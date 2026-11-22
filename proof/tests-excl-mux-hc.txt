@@ -1,0 +1,732 @@
+   Compiling shprd-server v0.0.0 (/Users/cryogenix/.shprd/wt/shprd/m11-close/scope-real-diff/crates/shprd-server)
+   Compiling shprd v0.0.0 (/Users/cryogenix/.shprd/wt/shprd/m11-close/scope-real-diff/crates/shprd)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 26.10s
+     Running unittests src/main.rs (target/debug/deps/shprd-2edcf7c910b61f9f)
+
+running 416 tests
+test cmd::adopt::tests::an_npm_placeholder_is_not_a_gate ... ok
+test cmd::agent::tests::a_check_may_be_a_json_object_for_a_command_with_a_pipe ... ok
+test cmd::agent::tests::a_check_spec_carries_its_gate_command_and_exit_code ... ok
+test cmd::agent::tests::a_check_spec_keeps_the_output_tail_capped ... ok
+test cmd::agent::tests::a_malformed_check_spec_is_an_error ... ok
+test cmd::agent::tests::a_timed_out_check_has_no_exit_code ... ok
+test cmd::ask::tests::a_denied_plan_says_why ... ok
+test cmd::ask::tests::a_permission_allow_is_the_empty_decision_the_hook_expects ... ok
+test cmd::ask::tests::a_permission_payload_names_what_the_agent_runs ... ok
+test cmd::adopt::tests::a_folder_that_is_not_there_says_so_in_plain_words ... ok
+test cmd::ask::tests::a_plan_payload_is_a_plan_to_approve ... ok
+test cmd::ask::tests::a_question_answer_goes_back_as_the_tools_answers ... ok
+test cmd::ask::tests::a_question_payload_keeps_its_first_question_and_choices ... ok
+test cmd::ask::tests::a_raised_plan_offers_approve_and_reject ... ok
+test cmd::ask::tests::an_answer_is_denied_only_when_it_says_no ... ok
+test cmd::confirm::tests::a_debug_build_honours_yes_for_the_tests ... ok
+test cmd::ask::tests::the_recommended_tag_is_taken_off_a_choice ... ok
+test cmd::confirm::tests::only_a_debug_build_may_skip_the_terminal ... ok
+test cmd::confirm::tests::only_a_named_human_may_act ... ok
+test cmd::dagr::tests::a_context_carries_the_home_the_binary_resolved ... ok
+test cmd::dagr::tests::the_document_sits_where_the_graph_block_reads_it ... ok
+test cmd::dagr::tests::a_home_with_no_settings_names_no_program ... ok
+test cmd::dagr::tests::the_graph_dagr_setting_is_what_the_wiring_hands_the_locator ... ok
+test cmd::deliver::tests::a_blocking_prompt_wins_over_a_ready_line ... ok
+test cmd::deliver::tests::a_folder_trust_prompt_is_reported_at_once ... ok
+test cmd::adopt::tests::an_existing_ignore_with_the_run_rule_still_keeps_the_config ... ok
+test cmd::adopt::tests::an_empty_folder_becomes_a_repository_on_main_with_a_commit ... ok
+test cmd::deliver::tests::a_host_that_carries_plugin_reports_delivers_a_program_with_no_ready_line ... ok
+test cmd::deliver::tests::a_host_without_agent_state_falls_back_to_the_ready_line ... ok
+test cmd::deliver::tests::a_named_ready_line_is_the_evidence_even_when_the_host_could_report ... ok
+test cmd::deliver::tests::a_model_renders_its_flags ... ok
+test cmd::adopt::tests::a_folder_inside_a_repository_uses_that_repository ... ok
+test cmd::deliver::tests::a_program_that_reports_itself_is_ready_on_its_own_word ... ok
+test cmd::deliver::tests::a_plain_screen_leaves_the_delivery_alone ... ok
+test cmd::deliver::tests::a_pane_that_never_painted_anything_is_a_start_failure_not_a_ready_screen ... ok
+test cmd::deliver::tests::a_program_the_host_cannot_report_is_ready_when_its_own_line_is_on_screen ... ok
+test cmd::deliver::tests::a_program_the_host_cannot_report_waits_while_its_tui_is_still_painting ... ok
+test cmd::deliver::tests::a_ready_line_that_never_shows_still_ends_in_the_hosts_word ... ok
+test cmd::adopt::tests::a_repository_with_no_commit_gets_one_without_a_new_init ... ok
+test cmd::adopt::tests::a_folder_with_files_commits_them_and_finds_its_gates ... ok
+test cmd::deliver::tests::an_agent_that_never_shows_up_is_a_warning_not_a_failure ... ok
+test cmd::deliver::tests::no_model_renders_nothing ... ok
+test cmd::deliver::tests::the_wait_comes_from_the_environment_with_a_default ... ok
+test cmd::doctor::tests::a_bare_agent_name_a_worker_uses_is_still_in_a_role ... ok
+test cmd::doctor::tests::a_configured_free_pin_wins_over_kilos_own_model ... ok
+test cmd::doctor::tests::a_dry_agent_a_worker_uses_fails_the_verb ... ok
+test cmd::adopt::tests::a_repository_with_a_commit_is_left_alone ... ok
+test cmd::doctor::tests::a_free_pin_is_taken_from_kilos_own_config_when_shprd_names_none ... ok
+test cmd::doctor::tests::a_model_merely_named_free_is_not_the_free_tier ... ok
+test cmd::doctor::tests::a_dry_agent_no_role_uses_is_a_warning_and_the_verb_succeeds ... ok
+test cmd::doctor::tests::a_reviewer_from_the_workers_model_family_fails_the_section ... ok
+test cmd::doctor::tests::a_pi_reviewer_on_claude_is_independent_of_a_pi_worker_on_deepseek ... ok
+test cmd::doctor::tests::a_reviewer_whose_vendor_cannot_be_checked_is_reported ... ok
+test cmd::doctor::tests::a_worker_on_a_router_is_reported_and_never_called_independent ... ok
+test cmd::doctor::tests::an_auto_approving_orchestrator_is_named_in_the_config_section ... ok
+test cmd::doctor::tests::an_ok_agent_is_ok_whatever_the_roster_says ... ok
+test cmd::doctor::tests::an_orchestrator_with_prompts_has_no_auto_approve_line ... ok
+test cmd::doctor::tests::a_worker_whose_vendor_cannot_be_checked_is_reported ... ok
+test cmd::doctor::tests::an_unknown_agent_outside_every_role_only_warns ... ok
+test cmd::drop::tests::a_drop_closes_an_open_reviewer_tab_too ... ok
+test cmd::drop::tests::a_drop_closes_only_the_dropped_tasks_own_tabs ... ok
+test cmd::drop::tests::a_drop_with_no_terminal_and_no_yes_is_refused_and_logs_nothing ... ok
+test cmd::drop::tests::a_human_drops_a_reported_task_and_its_worker_tab_is_closed ... ok
+test cmd::deliver::tests::an_answerable_trust_prompt_gets_enter_and_then_the_brief ... ok
+test cmd::drop::tests::a_worker_tab_the_host_keeps_refuses_the_drop_and_logs_nothing ... ok
+test cmd::drop::tests::a_worker_tab_already_gone_counts_as_closed ... ok
+test cmd::drop::tests::a_working_task_may_be_dropped ... ok
+test cmd::folder_trust::tests::a_bypass_launch_accepts_the_one_time_warning_without_writing_anything ... ok
+test cmd::deliver::tests::a_brief_waits_for_a_late_agent_then_lands ... ok
+test cmd::drop::tests::an_orchestrator_may_not_drop_a_task ... ok
+test cmd::drop::tests::an_integrated_task_cannot_be_dropped ... ok
+test cmd::folder_trust::tests::a_file_that_is_not_json_is_left_alone ... ok
+test cmd::folder_trust::tests::a_quote_in_a_folder_name_cannot_break_the_codex_override ... ok
+test cmd::folder_trust::tests::a_declined_folder_is_trusted_and_its_other_fields_stay ... ok
+test cmd::folder_trust::tests::a_folder_already_trusted_writes_nothing ... ok
+test cmd::folder_trust::tests::a_new_folder_gets_a_trust_entry_and_every_other_key_stays ... ok
+test cmd::folder_trust::tests::pi_and_opencode_coordinators_lose_their_edit_tools_and_codex_has_no_flag ... ok
+test cmd::folder_trust::tests::pi_is_approved_and_opencode_has_nothing_to_say ... ok
+test cmd::folder_trust::tests::codex_is_told_by_argument_and_nothing_is_written ... ok
+test cmd::folder_trust::tests::claude_config_dir_wins_over_home ... ok
+test cmd::folder_trust::tests::the_claude_coordinator_cannot_edit_or_commit_but_keeps_its_shell ... ok
+test cmd::folder_trust::tests::with_neither_home_nor_config_dir_nothing_is_written ... ok
+test cmd::fullgate::tests::worker_env_sets_an_actor_the_cli_parses ... ok
+test cmd::folder_trust::tests::the_replaced_file_keeps_its_permissions_and_no_temp_file_is_left ... ok
+test cmd::deliver::tests::a_harness_that_names_no_ready_line_is_never_rushed_into_a_painted_pane ... ok
+test cmd::handoff::tests::a_hand_off_rewrites_the_spawn_record_for_the_newcomer ... ok
+test cmd::handoff::tests::a_dry_next_worker_is_skipped ... ok
+test cmd::handoff::tests::a_hand_off_records_the_event_and_moves_the_tab ... ok
+test cmd::deliver::tests::the_ready_line_lands_once_the_tui_finishes_painting ... ok
+test cmd::handoff::tests::a_hand_off_checkpoints_the_work_and_swaps_the_agent ... ok
+test cmd::handoff::tests::a_hand_off_that_cannot_record_and_cannot_clean_up_says_so ... ok
+test cmd::handoff::tests::a_hand_off_that_cannot_record_and_finds_its_tab_already_gone_says_so ... ok
+test cmd::handoff::tests::a_hand_off_that_cannot_stop_the_old_agent_starts_no_new_one ... ok
+test cmd::handoff::tests::a_hand_off_that_cannot_record_its_tab_fails ... ok
+test cmd::handoff::tests::an_invalid_to_exits_two_and_changes_nothing ... ok
+test cmd::install::tests::a_hash_is_lowercase_hex_of_the_content ... ok
+test cmd::install::tests::a_keys_file_is_sections_of_commands ... ok
+test cmd::install::tests::a_keys_file_that_is_not_one_is_refused ... ok
+test cmd::install::tests::a_missing_manifest_reads_as_an_empty_one_at_this_version ... ok
+test cmd::install::tests::a_private_app_home_is_never_refused ... ok
+test cmd::install::tests::an_agent_actor_refuses_the_real_home ... ok
+test cmd::install::tests::an_hc_or_herdr_child_variable_refuses_the_real_home ... ok
+test cmd::install::tests::another_spelling_of_the_real_home_is_still_refused ... ok
+test cmd::install::tests::no_known_real_home_refuses_nothing ... ok
+test cmd::install::tests::no_marker_and_empty_markers_pass ... ok
+test cmd::install::tests::the_directories_a_file_needs_are_outermost_first ... ok
+test cmd::install::tests::the_flag_lets_an_agent_through ... ok
+test cmd::handoff::tests::a_hand_off_without_a_tab_record_starts_no_new_one ... ok
+test cmd::handoff::tests::a_takeover_hand_off_uses_the_takeover_words ... ok
+test cmd::handoff::tests::no_worker_available_escalates_and_exits_two ... ok
+test cmd::deliver::tests::a_trust_prompt_that_opens_on_no_is_moved_down_first ... ok
+test cmd::deliver::tests::a_trust_prompt_that_will_not_go_is_left_to_the_person ... ok
+test cmd::janitor::tests::a_dry_run_lists_review_packets_and_writes_nothing ... ok
+test cmd::janitor::tests::a_dropped_task_is_archived_before_its_worktree_and_branch_go ... ok
+test cmd::janitor::tests::a_failed_archive_leaves_the_review_packets_and_counts_as_a_failure ... ok
+test cmd::janitor::tests::a_run_that_is_still_working_keeps_its_review_packets ... ok
+test cmd::janitor::tests::apply_archives_then_removes_review_packets_and_records_the_removal ... ok
+test cmd::janitor::tests::apply_cleans_the_review_packets_of_a_run_finished_before_any_earlier_apply ... ok
+test cmd::integrate::tests::a_reported_task_keeps_its_worker_tab ... ok
+test cmd::janitor::tests::tasks_archive_after_sets_how_long_the_janitor_waits ... ok
+test cmd::janitor::tests::apply_keeps_and_records_nothing_for_a_run_that_has_not_finished ... ok
+test cmd::land::tests::a_clean_review_reads_as_passed ... ok
+test cmd::handoff::tests::the_hand_off_brief_starts_from_the_attempt_s_real_brief ... ok
+test cmd::land::tests::a_passed_review_gate_without_a_recorded_review_is_degraded ... ok
+test cmd::land::tests::a_proven_verdict_passes_the_marker ... ok
+test cmd::land::tests::an_independent_review_without_a_passed_gate_is_degraded ... ok
+test cmd::land::tests::a_restarted_review_still_reads_as_one_clean_review ... ok
+test cmd::land::tests::an_overridden_review_gate_degrades_the_marker_with_its_reason ... ok
+test cmd::land::tests::an_override_of_a_failed_review_degrades_the_marker ... ok
+test cmd::land::tests::an_unproven_verdict_degrades_the_marker ... ok
+test cmd::land::tests::one_degraded_review_names_the_task ... ok
+test cmd::land::tests::only_a_debug_build_honours_the_fake_forge ... ok
+test cmd::live_agents::tests::a_state_change_restarts_its_clock ... ok
+test cmd::live_agents::tests::a_worker_and_a_reviewer_are_listed_with_no_tab_and_stay_after_they_stop ... ok
+test cmd::live_agents::tests::another_products_assistant_is_never_listed_as_the_coordinator ... ok
+test cmd::live_agents::tests::only_a_listed_agent_has_a_terminal_or_output ... ok
+test cmd::janitor::tests::tasks_archive_namespace_decides_which_branches_the_janitor_owns ... ok
+test cmd::live_agents::tests::another_repositorys_agents_are_not_listed_here ... ok
+test cmd::live_news::tests::a_space_without_a_recorded_tab_has_no_pane ... ok
+test cmd::handoff::tests::the_brief_says_where_to_continue ... ok
+test cmd::live_agents::tests::only_the_running_coordinator_is_listed_however_many_earlier_starts_left ... ok
+test cmd::override_rule::tests::a_check_gate_is_named_as_a_gate ... ok
+test cmd::override_rule::tests::an_unknown_task_is_refused_before_anything_is_asked ... ok
+test cmd::override_rule::tests::the_question_names_the_task_the_gate_and_the_finding ... ok
+test cmd::live_news::tests::a_coordinator_the_host_finds_is_the_pane_news_uses ... ok
+test cmd::readmit::tests::only_a_human_re_admits ... ok
+test cmd::readmit::tests::the_program_id_names_the_agent_a_dry_mark_stores ... ok
+test cmd::readmit::tests::an_agent_the_log_never_mentions_has_no_id ... ok
+test cmd::janitor::tests::an_apply_waits_for_the_runs_integration_lock ... ok
+test cmd::review::tests::a_dry_mark_ends_at_the_time_the_cli_gave ... ok
+test cmd::integrate::tests::a_landing_stops_the_tasks_agent_and_no_other ... ok
+test cmd::integrate::tests::a_vanished_worker_tab_does_not_fail_the_integration ... ok
+test cmd::review::tests::a_packet_folder_is_named_by_where_it_really_is ... ok
+test cmd::integrate::tests::integrating_a_task_closes_its_worker_tab ... ok
+test cmd::review::tests::a_brief_that_fails_twice_is_escalated_once ... ok
+test cmd::review::tests::a_brief_whose_first_delivery_fails_is_retried_once ... ok
+test cmd::review::tests::a_claude_reviewers_packet_folder_is_trusted_before_it_starts ... ok
+test cmd::review::tests::a_degraded_review_is_allowed_and_says_so ... ok
+test cmd::review::tests::a_kickoff_stuck_on_the_trust_prompt_says_so_plainly ... ok
+test cmd::review::tests::a_pi_worker_on_claude_cannot_be_reviewed_by_claude_code ... ok
+test cmd::review::tests::a_kickoff_that_never_arrives_is_escalated ... ok
+test cmd::review::tests::a_pi_worker_on_deepseek_is_reviewed_by_a_pi_reviewer_on_claude ... ok
+test cmd::review::tests::a_reviewer_list_under_agents_alone_never_reviews_on_an_old_roster_program ... ok
+test cmd::review::tests::a_reviewer_out_of_quota_is_skipped_for_the_next_line_with_a_plain_note ... ok
+test cmd::review::tests::a_restart_after_a_verdict_is_refused ... ok
+test cmd::review::tests::a_restart_never_clears_a_file_still_being_written ... ok
+test cmd::review::tests::a_restart_without_a_review_is_refused ... ok
+test cmd::review::tests::a_restart_never_discards_written_findings ... ok
+test cmd::review::tests::a_restart_clears_a_settled_invalid_packet ... ok
+test cmd::review::tests::a_reviewer_from_the_authors_vendor_is_refused ... ok
+test cmd::review::tests::a_settings_role_that_may_not_review_is_refused ... ok
+test cmd::review::tests::codexs_usage_limit_pane_is_spent_and_a_diff_that_says_quota_is_not ... ok
+test cmd::review::tests::a_restart_replaces_an_undelivered_reviewer ... ok
+test cmd::review::tests::no_reviewer_inherits_the_specs_auto_approval_flags ... ok
+test cmd::review::tests::proof_files_are_copied_into_the_packet ... ok
+test cmd::review::tests::reviewer_lines_are_tried_in_order ... ok
+test cmd::review::tests::a_second_review_of_the_same_attempt_is_refused ... ok
+test cmd::review::tests::the_codex_reviewer_is_confined_to_its_packet ... ok
+test cmd::review::tests::a_verdict_closes_the_reviewer_tab ... ok
+test cmd::review::tests::a_system_prompt_reviewer_is_given_the_kickoff ... ok
+test cmd::review::tests::a_vanished_reviewer_tab_is_already_closed ... ok
+test cmd::review::tests::a_worker_and_a_reviewer_have_no_tab_and_stop_on_land_or_drop ... ok
+test cmd::review::tests::the_cross_vendor_setting_reaches_the_review_environment ... ok
+test cmd::review::tests::the_first_of_agents_is_the_reviewer_when_no_agent_is_set ... ok
+test cmd::review::tests::the_legacy_roster_reviewer_still_resolves_and_says_where_it_came_from ... ok
+test cmd::review::tests::a_worker_on_a_router_is_never_assumed_independent ... ok
+test cmd::review::tests::the_contract_carries_the_attempts_asks_and_their_answers ... ok
+test cmd::review::tests::degraded_is_ignored_when_the_reviewer_is_independent ... ok
+test cmd::review::tests::the_reviewer_fallback_reviews_when_the_main_reviewer_cannot ... ok
+test cmd::review::tests::the_contract_says_plainly_when_an_ask_is_unanswered ... ok
+test cmd::review::tests::the_contract_says_so_when_the_attempt_asked_nothing ... ok
+test cmd::review::tests::the_cross_vendor_check_uses_the_settings_reviewer ... ok
+test cmd::review::tests::run_end_closes_the_reviewer_and_worker_tabs ... ok
+test cmd::run::tests::a_refused_finish_closes_no_tab ... ok
+test cmd::run::tests::an_abandon_refuses_an_actor_that_is_not_a_human ... ok
+test cmd::run::tests::answering_no_to_the_abandon_question_leaves_the_run_as_it_was ... ok
+test cmd::run::tests::finish_abandon_ends_a_run_whose_pull_request_never_merged ... ok
+test cmd::run::tests::finish_abandon_records_the_tasks_it_left_and_their_branches ... ok
+test cmd::review::tests::the_packet_carries_the_real_diff_and_the_contract ... ok
+test cmd::run::tests::finish_counts_a_pane_and_tab_already_gone_as_closed ... ok
+test cmd::run::tests::finish_ends_a_run_with_nothing_in_flight ... ok
+test cmd::run::tests::finish_escalates_the_watchdog_pane_the_host_will_not_close ... ok
+test cmd::run::tests::finish_escalates_the_worker_tab_the_host_will_not_close ... ok
+test cmd::run::tests::finish_finishes_a_run_whose_work_landed_and_merged ... ok
+test cmd::run::tests::finish_records_no_escalation_when_every_tab_and_pane_closes ... ok
+test cmd::run::tests::finish_refuses_a_reported_task ... ok
+test cmd::run::tests::finish_refuses_a_passed_task_that_was_never_integrated ... ok
+test cmd::review::tests::the_reviewer_comes_from_the_settings_role ... ok
+test cmd::review::tests::the_reviewer_tab_starts_in_the_packet_not_the_worktree ... ok
+test cmd::run::tests::finish_refuses_and_abandons_its_unfinished_work ... ok
+test cmd::run::tests::finish_refuses_while_a_task_is_working ... ok
+test cmd::run::tests::finish_refuses_landed_work_whose_pull_request_has_not_merged ... ok
+test cmd::review::tests::the_reviewer_starts_in_the_real_path_of_a_symlinked_packet ... ok
+test cmd::run_lock::tests::the_lock_file_is_named_for_the_repo_and_the_run ... ok
+test cmd::serve::tests::a_coordinator_that_cannot_start_says_why_in_the_banner ... ok
+test cmd::run::tests::finish_stops_the_tasks_agents_and_keeps_the_repositorys_space ... ok
+test cmd::serve::tests::a_closed_spaces_surviving_agent_is_stopped_and_its_record_dropped ... ok
+test cmd::run::tests::the_abandon_question_names_the_run_the_tasks_and_their_branches ... ok
+test cmd::serve::tests::a_failed_coordinator_start_is_retried_until_it_runs ... ok
+test cmd::serve::tests::a_service_reuses_the_space_that_is_already_there ... ok
+test cmd::serve::tests::a_space_an_earlier_run_left_for_the_folder_is_reused_and_given_the_label ... ok
+test cmd::serve::tests::a_withheld_space_says_so_and_names_no_label ... ok
+test cmd::serve::tests::a_space_that_could_not_be_made_is_reported_not_hidden ... ok
+test cmd::serve::tests::a_service_makes_the_missing_space_at_the_repository_root ... ok
+test cmd::serve::tests::the_host_is_not_asked_at_all_when_the_guard_refused ... ok
+test cmd::review::tests::turning_cross_vendor_off_lets_a_same_vendor_review_run_unlabelled ... ok
+test cmd::serve::tests::agents_of_a_space_the_host_still_has_open_are_never_stopped ... ok
+test cmd::review::tests::the_written_packet_carries_the_attempts_own_ask ... ok
+test cmd::serve_migrate::tests::a_pid_that_is_not_a_shprd_serve_is_left_alone ... ok
+test cmd::set::tests::refuses_a_change_that_lands_while_the_temp_file_is_written ... ok
+test cmd::set::tests::every_refused_set_exits_2 ... ok
+test cmd::set::tests::an_invalid_change_leaves_the_file_untouched ... ok
+test cmd::set::tests::refuses_a_file_that_changed_while_it_was_edited ... ok
+test cmd::set::tests::keeps_the_comments_and_keys_of_an_existing_file ... ok
+test cmd::set::tests::refuses_a_pi_model_without_its_provider ... ok
+test cmd::set::tests::replaces_the_file_and_leaves_no_temp_file ... ok
+test cmd::serve_migrate::tests::old_records_are_removed_and_one_password_moves_up ... ok
+test cmd::set::tests::refuses_a_reviewer_equal_to_the_orchestrator ... ok
+test cmd::set::tests::refuses_when_another_set_holds_the_lock ... ok
+test cmd::set::tests::the_auto_approve_switch_keeps_the_roles_around_it ... ok
+test cmd::set::tests::writes_the_repo_file_with_repo ... ok
+test cmd::set::tests::writes_the_orchestrator_to_the_global_file ... ok
+test cmd::set::tests::writes_the_auto_approve_switch_under_roster ... ok
+test cmd::run_lock::tests::a_second_holder_waits_for_the_first_to_release ... ok
+test cmd::spawn::flow_tests::a_claude_coordinator_cannot_edit_and_its_folder_is_already_trusted ... ok
+test cmd::spawn::flow_tests::a_configured_worker_that_does_not_parse_is_skipped ... ok
+test cmd::review::tests::the_packet_diff_holds_only_the_tasks_own_commits_when_origin_is_ahead ... ok
+test cmd::spawn::flow_tests::a_coordinator_line_goes_to_the_pane_the_service_recorded ... ok
+test cmd::spawn::flow_tests::a_brief_no_agent_ever_takes_is_a_warning_and_an_escalation ... ok
+test cmd::spawn::flow_tests::a_brief_read_off_the_ready_line_keeps_a_task_the_host_cannot_report_alive ... ok
+test cmd::spawn::flow_tests::a_coordinator_line_without_a_recorded_pane_is_refused ... ok
+test cmd::spawn::flow_tests::a_coordinator_restart_leaves_exactly_one ... ok
+test cmd::set::tests::a_model_the_scripted_harness_does_not_list_warns ... ok
+test cmd::spawn::flow_tests::a_git_failure_on_retry_is_a_plain_sentence ... ok
+test cmd::spawn::flow_tests::a_coordinator_that_exits_at_start_is_an_error_and_the_next_try_recovers ... ok
+test cmd::spawn::flow_tests::a_claude_worker_is_trusted_in_its_worktree_and_keeps_its_edit_tools ... ok
+test cmd::set::tests::writes_workers_as_an_ordered_list_and_effort_per_agent ... ok
+test cmd::spawn::flow_tests::a_model_that_names_no_provider_is_refused_with_the_hint ... ok
+test cmd::spawn::flow_tests::a_missing_coordinator_program_never_becomes_the_workers ... ok
+test cmd::spawn::flow_tests::a_fallback_coordinator_program_never_gets_anothers_model ... ok
+test cmd::spawn::flow_tests::a_missing_repo_space_is_created_at_the_repository_root ... ok
+test cmd::spawn::flow_tests::a_failed_tab_removes_the_worktree_and_records_nothing ... ok
+test cmd::spawn::flow_tests::a_renamed_repo_space_is_reused_not_made_again ... ok
+test cmd::spawn::flow_tests::a_program_the_harness_table_lacks_is_refused_with_the_ones_it_has ... ok
+test cmd::spawn::flow_tests::a_failing_run_closes_the_tab_and_removes_the_worktree ... ok
+test cmd::spawn::flow_tests::a_brief_lands_once_the_host_detects_the_agent ... ok
+test cmd::spawn::flow_tests::a_retried_start_still_leaves_only_the_coordinator ... ok
+test cmd::spawn::flow_tests::a_mode_the_program_lacks_is_not_claimed_in_the_brief ... ok
+test cmd::spawn::flow_tests::a_no_thinking_model_is_not_passed_the_effort_flag ... ok
+test cmd::spawn::flow_tests::a_running_coordinator_is_found_without_a_record_and_send_reaches_it ... ok
+test cmd::spawn::flow_tests::a_shell_or_an_ended_coordinator_is_never_typed_into ... ok
+test cmd::spawn::flow_tests::a_retry_refuses_an_attempt_that_is_still_in_flight ... ok
+test cmd::spawn::flow_tests::a_space_that_was_not_fresh_keeps_its_tabs ... ok
+test cmd::spawn::flow_tests::a_spawn_installs_the_ask_hook_in_the_workers_worktree ... ok
+test cmd::spawn::flow_tests::a_retry_after_a_failed_review_archives_and_replaces_the_attempt ... ok
+test cmd::spawn::flow_tests::a_spawn_makes_the_repo_space_and_the_worker_has_no_tab ... ok
+test cmd::spawn::flow_tests::a_retry_clears_a_registration_whose_folder_is_gone ... ok
+test cmd::spawn::flow_tests::a_spawn_of_a_program_with_no_ask_hook_writes_none ... ok
+test cmd::spawn::flow_tests::a_retry_replaces_a_worktree_registered_under_another_spelling_of_the_home ... ok
+test cmd::spawn::flow_tests::a_retry_of_an_attempt_with_no_commits_starts_from_the_base ... ok
+test cmd::spawn::flow_tests::a_spawn_plan_finds_the_pi_harness_in_the_embedded_data ... ok
+test cmd::spawn::flow_tests::a_stale_coordinator_record_is_not_typed_into ... ok
+test cmd::spawn::flow_tests::a_spawn_without_worktrees_leaves_the_persons_checkout_alone ... ok
+test cmd::spawn::flow_tests::a_spawn_records_that_a_ready_line_was_what_said_the_program_was_up ... ok
+test cmd::spawn::flow_tests::a_spawned_append_that_fails_leaves_no_live_resource ... ok
+test cmd::spawn::flow_tests::an_adopted_space_keeps_the_assistant_tab_another_agent_claims ... ok
+test cmd::spawn::flow_tests::an_agent_string_with_no_model_is_refused ... ok
+test cmd::spawn::flow_tests::a_task_the_host_does_report_goes_quiet_when_its_agent_does ... ok
+test cmd::spawn::flow_tests::a_retry_starts_from_the_previous_attempts_commits ... ok
+test cmd::spawn::flow_tests::an_agent_is_started_for_the_repositorys_own_space ... ok
+test cmd::spawn::flow_tests::an_existing_repo_space_is_reused_and_no_other_is_created ... ok
+test cmd::spawn::flow_tests::an_agent_given_the_brief_as_a_system_prompt_gets_a_kickoff ... ok
+test cmd::spawn::flow_tests::an_unmarked_repo_space_is_found_by_name_and_gets_the_mark ... ok
+test cmd::spawn::flow_tests::an_agent_without_system_prompt_arguments_gets_the_whole_brief ... ok
+test cmd::spawn::flow_tests::distinct_space_ids_never_share_a_record_path ... ok
+test cmd::spawn::flow_tests::a_task_picks_a_worker_line_and_gets_its_settings ... ok
+test cmd::spawn::flow_tests::another_products_agent_is_never_the_recorded_coordinator ... ok
+test cmd::spawn::flow_tests::another_products_assistant_tab_is_left_alone_and_the_old_tab_goes ... ok
+test cmd::spawn::flow_tests::a_stop_leaves_the_attempt_replaceable_and_a_retry_starts ... ok
+test cmd::spawn::flow_tests::another_repositorys_coordinator_is_neither_found_nor_ended ... ok
+test cmd::spawn::flow_tests::live_tasks_sees_nothing_without_the_repositorys_workspace ... ok
+test cmd::spawn::flow_tests::old_coordinators_are_ended_and_a_restart_never_adds_one ... ok
+test cmd::spawn::flow_tests::prompt_without_a_run_says_so ... ok
+test cmd::spawn::flow_tests::prompt_after_the_run_finished_says_there_is_no_active_run ... ok
+test cmd::spawn::flow_tests::prompt_ignores_an_older_runs_tab_record ... ok
+test cmd::spawn::flow_tests::prompt_reaches_the_tab_its_own_task_spawned ... ok
+test cmd::spawn::flow_tests::an_opencode_coordinators_edit_rule_never_reaches_its_workers ... ok
+test cmd::spawn::flow_tests::live_tasks_reads_the_host_state_of_each_attempts_own_tab ... ok
+test cmd::spawn::flow_tests::starting_an_agent_opens_its_plain_launch_line_in_the_repositorys_space ... ok
+test cmd::spawn::flow_tests::starting_an_agent_in_a_named_space_opens_there_and_makes_no_space ... ok
+test cmd::spawn::flow_tests::tasks_worktrees_off_runs_one_task_at_a_time ... ok
+test cmd::spawn::flow_tests::spawn_creates_a_worktree_and_records_it ... ok
+test cmd::spawn::flow_tests::the_coordinators_name_comes_from_its_role ... ok
+test cmd::spawn::flow_tests::the_coordinator_is_started_once_and_reused_on_a_restart ... ok
+test cmd::spawn::flow_tests::tasks_worktrees_off_works_in_the_repository_itself ... ok
+test cmd::spawn::flow_tests::the_coordinators_tab_follows_its_name_and_no_other_tab_is_renamed ... ok
+test cmd::spawn::flow_tests::the_coordinator_keeps_its_own_programs_model ... ok
+test cmd::spawn::flow_tests::the_old_record_is_migrated_only_for_a_live_pane_of_this_space ... ok
+test cmd::spawn::flow_tests::a_third_attempt_keeps_each_earlier_attempts_archive_apart ... ok
+test cmd::spawn::flow_tests::the_refusal_names_the_expected_label_and_the_ones_the_host_has ... ok
+test cmd::spawn::flow_tests::the_refusal_says_when_the_host_has_no_space_at_all ... ok
+test cmd::spawn::flow_tests::the_repositorys_space_the_host_already_has_is_reused ... ok
+test cmd::spawn::flow_tests::two_repositories_keep_their_own_coordinator_records ... ok
+test cmd::spawn::tests::a_brief_repeats_only_a_failed_earlier_gate ... ok
+test cmd::spawn::tests::a_launch_carries_the_access_mode_and_fast_switch_it_applied ... ok
+test cmd::spawn::tests::a_mode_the_program_does_not_declare_falls_back_to_full_access ... ok
+test cmd::spawn::tests::a_new_attempts_brief_carries_the_previous_findings ... ok
+test cmd::spawn::tests::a_role_that_names_no_mode_gets_full_access ... ok
+test cmd::spawn::tests::a_task_tab_record_is_matched_by_its_whole_name ... ok
+test cmd::spawn::tests::a_task_tab_record_needs_the_tab_extension ... ok
+test cmd::spawn::tests::a_task_whose_name_ends_in_review_keeps_its_records ... ok
+test cmd::spawn::tests::a_task_with_a_model_gets_its_flags ... ok
+test cmd::spawn::tests::a_task_without_a_model_gets_no_model_flags ... ok
+test cmd::spawn::tests::a_worker_close_leaves_the_reviewers_record_alone ... ok
+test cmd::spawn::tests::brief_states_scope_rules_and_skills ... ok
+test cmd::spawn::tests::fast_is_applied_only_where_the_program_has_the_switch ... ok
+test cmd::spawn::tests::only_running_agents_of_this_repositorys_closed_spaces_are_chosen ... ok
+test cmd::spawn::tests::skills_combine_config_and_tagged_allow_entries ... ok
+test cmd::spawn::tests::skills_never_include_a_denied_entry ... ok
+test cmd::sync::tests::an_agent_may_not_sync_the_base ... ok
+test cmd::view::tests::a_failed_pass_on_the_current_run_is_worth_a_warning ... ok
+test cmd::view::tests::a_finished_runs_failure_is_never_warned_again ... ok
+test cmd::view::tests::another_runs_failure_and_a_clean_pass_say_nothing ... ok
+test cmd::spawn::flow_tests::start_and_finish_notes_are_in_the_workers_brief ... ok
+test cmd::spawn::flow_tests::the_runs_recorded_coordinator_pane_wins ... ok
+test cmd::spawn::flow_tests::tasks_branch_and_archive_namespace_name_the_branch ... ok
+test cmd::spawn::flow_tests::there_is_no_tab_to_rename_before_the_coordinator_starts ... ok
+test cmd::watch::tests::a_blocked_orchestrator_is_not_typed_at ... ok
+test cmd::spawn::flow_tests::the_roles_access_mode_and_fast_switch_reach_the_launch_and_the_brief ... ok
+test cmd::spawn::flow_tests::the_worker_roles_pick_beats_the_configured_workers ... ok
+test cmd::spawn::flow_tests::tasks_base_is_the_branch_a_worktree_is_cut_from ... ok
+test cmd::watch::tests::a_failed_prompt_does_not_lose_the_notice ... ok
+test cmd::watch::tests::a_hand_in_notice_carries_what_the_log_says_the_worker_asked ... ok
+test cmd::watch::tests::a_failing_review_is_recorded_as_a_failed_gate ... ok
+test cmd::watch::tests::a_closed_pane_is_handed_off_to_the_same_agent_and_dries_nothing ... ok
+test cmd::watch::tests::a_dropped_task_is_not_watched ... ok
+test cmd::watch::tests::a_human_hand_off_starts_a_fresh_exit_streak ... ok
+test cmd::watch::tests::a_finished_review_is_recorded_by_the_watchdog ... ok
+test cmd::watch::tests::a_missing_record_directory_answers_none ... ok
+test cmd::watch::tests::a_new_attempt_starts_with_no_streak_and_no_escalation ... ok
+test cmd::watch::tests::a_long_blocked_orchestrator_is_escalated_once ... ok
+test cmd::watch::tests::a_failed_hand_off_escalates_once_and_parks ... ok
+test cmd::watch::tests::a_dry_hand_off_moves_the_watch_to_the_new_agent ... ok
+test cmd::watch::tests::a_plain_screen_does_not_hold_the_notice_back ... ok
+test cmd::watch::tests::a_handed_off_agent_is_available_again_after_its_retry_time ... ok
+test cmd::watch::tests::a_repeated_escalation_body_is_noticed_once ... ok
+test cmd::watch::tests::a_human_hand_off_unparks_a_running_watch ... ok
+test cmd::watch::tests::a_reported_task_wakes_the_orchestrator ... ok
+test cmd::watch::tests::a_restart_replays_no_notice ... ok
+test cmd::watch::tests::a_non_parking_escalation_leaves_the_watch_parked ... ok
+test cmd::watch::tests::a_review_the_service_already_decided_is_left_alone ... ok
+test cmd::watch::tests::a_run_with_no_coordinator_says_nothing_about_it ... ok
+test cmd::watch::tests::a_trust_prompt_on_screen_is_not_typed_at ... ok
+test cmd::watch::tests::a_transient_mux_error_is_not_a_dead_agent ... ok
+test cmd::watch::tests::a_human_hand_off_after_a_spent_budget_starts_a_fresh_streak ... ok
+test cmd::watch::tests::a_stalled_agent_goes_dry_and_is_handed_off_in_one_tick ... ok
+test cmd::watch::tests::a_restarted_watcher_does_nothing_for_an_attempt_the_log_escalated ... ok
+test cmd::watch::tests::a_restarted_watcher_escalates_an_attempt_the_log_already_spent ... ok
+test cmd::watch::tests::both_builders_pick_the_newest_record ... ok
+test cmd::watch::tests::claude_record_slugifies_every_separator_and_dot ... ok
+test cmd::watch::tests::each_action_names_the_command_that_does_it ... ok
+test cmd::watch::tests::a_working_worker_reading_quota_text_dries_nothing ... ok
+test cmd::watch::tests::one_runs_claim_is_not_anothers ... ok
+test cmd::watch::tests::only_one_watchdog_claims_one_run ... ok
+test cmd::watch::tests::the_lock_sits_beside_the_event_log ... ok
+test cmd::watch::tests::the_rule_reads_the_newest_parking_event_of_the_task ... ok
+test cmd::watch::tests::pi_record_slugs_without_the_leading_slash ... ok
+test cmd::web_tunnel::tests::a_record_shows_a_masked_link_and_no_code_unless_asked ... ok
+test ctx::tests::a_directory_that_is_not_a_worktree_resolves_to_itself ... ok
+test cmd::watch::tests::an_invalid_findings_file_is_escalated_once ... ok
+test cmd::watch::tests::an_unreadable_screen_does_not_hold_the_notice_back ... ok
+test guard::tests::a_real_checkout_may_drive_the_persons_own_session ... ok
+test guard::tests::a_real_path_is_compared_with_its_symlinks_resolved ... ok
+test guard::tests::a_sibling_whose_name_only_starts_the_same_is_not_inside ... ok
+test guard::tests::a_socket_beside_the_temporary_directory_is_not_inside_it ... ok
+test guard::tests::a_temporary_checkout_with_a_socket_of_its_own_is_left_alone ... ok
+test guard::tests::a_temporary_checkout_with_no_socket_named_is_refused ... ok
+test guard::tests::a_temporary_checkout_with_the_persons_socket_named_is_refused ... ok
+test guard::tests::the_variable_that_means_it_turns_the_guard_off ... ok
+test host::tests::a_named_desktop_that_is_not_there_falls_back_and_says_so ... ok
+test host::tests::a_named_desktop_that_is_there_is_used_without_a_guess ... ok
+test host::tests::a_named_tui_is_used_even_when_the_desktop_is_there ... ok
+test host::tests::a_tui_that_is_not_on_path_still_names_itself ... ok
+test host::tests::a_window_without_a_core_is_not_a_desktop ... ok
+test host::tests::an_open_time_fallback_amends_what_the_banner_says ... ok
+test host::tests::auto_picks_the_desktop_when_a_core_and_a_window_answer ... ok
+test host::tests::auto_picks_the_tui_when_no_window_is_attached ... ok
+test host::tests::auto_picks_the_tui_when_the_core_does_not_answer ... ok
+test host::tests::the_kind_names_the_program_it_is_driven_through ... ok
+test cmd::watch::tests::two_notices_in_one_tick_are_one_prompt ... ok
+test cmd::watch::tests::a_new_spawn_unparks_a_running_watch ... ok
+test ctx::tests::a_main_worktree_resolves_to_itself ... ok
+test cmd::watch::tests::an_idle_worker_that_never_reports_is_escalated ... ok
+test cmd::watch::tests::a_worker_that_keeps_dying_escalates_instead_of_looping ... ok
+test ctx::tests::a_worktree_resolves_to_the_repository_it_was_cut_from ... ok
+test cmd::watch::tests::a_first_run_does_not_replay_thirteen_thousand_escalations ... ok
+
+test result: ok. 416 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.97s
+
+     Running tests/ask.rs (target/debug/deps/ask-85df44819a8df7db)
+
+running 8 tests
+test a_codex_install_turns_the_worktrees_own_hooks_on ... ok
+test an_install_writes_the_hook_only_inside_the_worktree ... ok
+test a_raise_without_a_task_says_what_is_missing ... ok
+test a_hook_that_times_out_prints_nothing ... ok
+test a_raise_waits_for_an_answer_a_card_posts_and_prints_it ... ok
+test two_hooks_racing_the_same_id_leave_the_ask_answerable ... ok
+test a_hook_waits_for_an_answer_a_card_posts_and_prints_it ... ok
+test a_programs_harness_says_how_long_its_hook_waits ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.62s
+
+     Running tests/brief.rs (target/debug/deps/brief-f5bfb2b17b8eee8a)
+
+running 3 tests
+test a_program_with_an_ask_hook_keeps_the_question_tool_wording ... ok
+test a_program_without_an_ask_hook_is_given_the_raise_verb ... ok
+test every_shipped_program_gets_the_route_its_harness_names ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/chat_live.rs (target/debug/deps/chat_live-188b63b5c22204d0)
+
+running 1 test
+test a_live_pi_turn_is_read_back_through_the_chat_route ... ignored, starts a real herdr server and spends one model call; run by hand
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/cli.rs (target/debug/deps/cli-cd023f276b037e62)
+
+running 39 tests
+test a_failing_sync_does_not_undo_a_write ... ok
+test a_proof_inside_the_worktree_is_recorded ... ok
+test a_proof_outside_the_worktree_is_refused ... ok
+test a_hand_in_records_its_proofs_apart_from_the_summary ... ok
+test a_drop_that_cannot_find_the_home_is_refused_and_logs_nothing ... ok
+test a_human_re_admits_a_dry_agent_and_the_run_may_use_it_again ... ok
+test a_refused_hand_in_leaves_a_card_naming_the_reason ... ok
+test an_orchestrator_may_not_re_admit_an_agent ... ok
+test abandoning_refuses_without_a_terminal_and_logs_nothing ... ok
+test abandoning_is_refused_for_an_agent_actor_even_with_yes ... ok
+test dagr_sync_before_run_start_says_there_is_nothing_to_project ... ok
+test a_scripted_run_writes_the_document_and_the_views ... ok
+test bare_shprd_prints_the_status_line ... ok
+test a_human_override_with_yes_is_recorded_and_the_task_then_integrates ... ok
+test an_orchestrator_override_is_refused_even_with_yes ... ok
+test handoff_needs_a_task_and_a_reason ... ok
+test an_agent_override_is_refused_even_with_yes ... ok
+test dagr_sync_checks_the_document_when_a_checker_is_given ... ok
+test changed_path_outside_scope_is_refused ... ok
+test an_override_of_a_rule_nothing_reads_is_refused ... ok
+test no_dagr_flag_skips_the_sync ... ok
+test overlapping_scope_is_refused ... ok
+test janitor_without_a_run_is_an_error ... ok
+test happy_path_reaches_integrated ... ok
+test readmit_takes_a_reason_and_refuses_what_is_not_dry ... ok
+test override_without_a_terminal_and_without_yes_is_refused_and_logs_nothing ... ok
+test janitor_takes_the_archive_window_from_the_repo_config ... ok
+test janitor_leaves_a_branch_outside_the_namespace_alone ... ok
+test janitor_takes_the_namespace_from_the_repo_config ... ok
+test run_start_refuses_a_missing_base_and_writes_nothing ... ok
+test run_start_creates_the_integration_branch_from_the_base ... ok
+test without_dagr_the_note_names_the_setting_to_fix ... ok
+test verbs_before_run_start_are_refused ... ok
+test run_start_leaves_an_existing_integration_branch_alone ... ok
+test the_first_task_in_a_fresh_repo_starts_a_run ... ok
+test restore_refuses_a_finished_run_before_creating_the_branch ... ok
+test janitor_dry_run_changes_nothing_and_apply_appends_resource_events ... ok
+test restore_brings_back_the_newest_attempt_archive ... ok
+test the_graph_dagr_setting_is_what_validates_the_projection ... ok
+
+test result: ok. 39 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.79s
+
+     Running tests/doctor.rs (target/debug/deps/doctor-d3e0da01b649b721)
+
+running 14 tests
+test a_persons_own_harness_is_named_as_an_override ... ok
+test falls_back_to_the_legacy_roster_when_the_settings_name_no_role ... ok
+test reports_every_section_and_succeeds_on_a_clean_setup ... ok
+test a_desktop_the_machine_cannot_give_warns_and_falls_back ... ok
+test an_installed_binary_reads_the_data_it_ships ... ok
+test names_the_host_a_run_would_drive_and_why ... ok
+test reads_the_roles_from_settings_when_there_is_no_legacy_config ... ok
+test fails_when_the_reviewer_shares_a_vendor_with_a_worker ... ok
+test the_config_line_names_both_files_when_both_are_there ... ok
+test the_config_line_names_only_files_that_exist ... ok
+test the_data_section_names_the_source_of_every_kind ... ok
+test the_graph_section_says_which_probe_found_dagr ... ok
+test warns_when_this_shell_hides_a_skill_directory ... ok
+test without_dagr_the_graph_section_names_the_setting ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 15.28s
+
+     Running tests/gate.rs (target/debug/deps/gate-d44c140d31baa15e)
+
+running 5 tests
+test no_integration_gate_is_refused_and_records_nothing ... ok
+test a_failing_gate_is_recorded_and_exits_one ... ok
+test a_gate_that_changes_the_worktree_fails ... ok
+test a_passing_gate_is_recorded_and_exits_zero ... ok
+test a_dirty_integration_worktree_is_refused ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.64s
+
+     Running tests/install.rs (target/debug/deps/install-35413fe685f7184f)
+
+running 30 tests
+test a_host_tree_with_no_layouts_is_refused ... ok
+test a_merge_keeps_the_keys_the_person_bound_and_takes_the_rest ... ok
+test a_fresh_install_copies_the_layout_and_its_mods ... ok
+test a_dry_run_of_an_uninstall_writes_nothing ... ok
+test a_layout_herdr_pruned_is_put_back ... ok
+test a_layout_the_person_changed_is_still_refused ... ok
+test a_layout_key_the_person_bound_is_kept_and_reported ... ok
+test an_explicit_from_wins_over_the_embedded_copy ... ok
+test a_dry_run_writes_nothing ... ok
+test an_install_keeps_a_foreign_file_and_refuses_to_overwrite_it ... ok
+test a_reinstall_updates_a_file_it_wrote_and_leaves_the_rest ... ok
+test an_older_install_gives_back_the_global_keys_it_wrote ... ok
+test a_second_install_writes_nothing ... ok
+test an_install_with_no_host_tree_installs_the_copy_in_the_binary ... ok
+test an_m10_install_upgrades_to_the_new_keys_and_keeps_the_person_s_own ... ok
+test an_uninstall_keeps_a_data_folder_that_holds_something_else ... ok
+test an_uninstall_with_nothing_installed_says_so ... ok
+test an_uninstall_keeps_a_file_the_person_edited ... ok
+test an_uninstall_keeps_a_key_the_person_rebound ... ok
+test an_older_layout_the_person_changed_is_still_refused ... ok
+test an_uninstall_leaves_the_app_home_as_empty_as_it_found_it ... ok
+test the_host_dir_variable_wins_over_repo ... ok
+test an_uninstall_removes_only_what_the_manifest_lists ... ok
+test the_json_output_carries_the_plan ... ok
+test an_install_upgrades_the_desktop_it_wrote_before ... ok
+test an_upgrade_puts_back_a_layout_herdr_pruned_from_the_build_before ... ok
+test the_shprd_keys_land_in_the_layout_and_no_global_key_changes ... ok
+test an_upgrade_takes_back_a_mod_this_build_no_longer_ships ... ok
+test the_working_directory_is_never_the_source_of_the_layout ... ok
+test a_desktop_from_an_earlier_layout_upgrades_too ... ok
+
+test result: ok. 30 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 33.54s
+
+     Running tests/integrate.rs (target/debug/deps/integrate-a246503874a7ad3c)
+
+running 3 tests
+test a_passed_task_lands_on_the_integration_branch ... ok
+ok integrated seq=10
+integrated T2: 1 commit(s), head 1e62bd9
+test a_conflicting_pick_sends_the_task_back ... ok
+ok integrated seq=11
+integrated T1: 1 commit(s), head e6168ea
+test two_integrates_on_one_run_take_turns ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.64s
+
+     Running tests/land.rs (target/debug/deps/land-fdb69f32566eeacb)
+
+running 31 tests
+test a_dropped_task_has_nothing_to_land ... ok
+test a_protected_base_waits_for_a_human_even_under_auto ... ok
+test a_second_landing_of_a_merged_task_records_nothing ... ok
+test a_dropped_task_stops_blocking_landing_and_is_listed_in_the_pull_request ... ok
+test a_task_landing_refuses_the_run_level_merge_flag ... ok
+test a_merge_records_the_branch_so_the_janitor_deletes_it_remotely ... ok
+test a_shprd_approval_at_the_head_merges ... ok
+test a_full_run_pushes_the_branch_and_opens_one_pull_request ... ok
+test a_merge_done_on_the_forge_is_recorded_once ... ok
+test a_stale_gate_is_refused_after_the_head_moves ... ok
+test a_task_without_an_independent_review_is_refused_and_asks_no_forge ... ok
+test a_task_whose_checks_failed_is_refused_until_they_pass ... ok
+test a_stale_head_is_refused ... ok
+test approve_is_refused_for_an_agent_actor_even_with_yes ... ok
+test approve_without_a_pull_request_is_refused ... ok
+test approve_records_the_human_approval_at_the_integration_head ... ok
+test an_approval_of_an_older_head_still_waits ... ok
+test approve_without_a_terminal_and_without_yes_is_refused ... ok
+test auto_landing_opens_one_task_pull_request_and_merges_it ... ok
+test ask_landing_waits_for_the_human_then_merges_after_approve ... ok
+test approve_waits_for_the_runs_integration_lock ... ok
+test drop_is_refused_without_a_terminal_and_for_an_agent_actor ... ok
+test auto_never_merges_into_a_protected_base ... ok
+test an_outside_merge_counts_only_at_the_integration_head ... ok
+test checks_landing_waits_for_the_checks_and_merges_once_they_pass ... ok
+test checks_that_have_not_passed_are_refused ... ok
+test merge_without_an_opened_pull_request_is_refused ... ok
+test every_precondition_refuses_and_writes_no_pull_request ... ok
+test merge_waits_for_approval_and_merges_once_a_human_approves ... ok
+test finish_ends_a_run_whose_remaining_task_was_dropped ... ok
+test the_body_records_the_review_marker_and_the_attribution ... ok
+
+test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 18.65s
+
+     Running tests/local_land.rs (target/debug/deps/local_land-68ef0af003fc4c0f)
+
+running 6 tests
+test a_local_ask_waits_for_a_person_and_local_checks_land_on_the_report ... ok
+test a_local_ask_can_be_approved_on_the_task_itself ... ok
+test accepting_lands_when_origin_is_a_local_bare_repository_and_pushes_it ... ok
+test the_settings_file_alone_sets_the_merge_policy_the_tick_lands_under ... ok
+test accepting_lands_when_origin_is_not_a_github_host ... ok
+test a_repository_without_a_remote_lands_locally_and_escalates_a_conflict ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.68s
+
+     Running tests/opencode_desktop_live.rs (target/debug/deps/opencode_desktop_live-17dcc79ee625531c)
+
+running 1 test
+test an_opencode_worker_on_a_private_desktop_receives_its_brief_with_nobody_typing ... ignored, needs a real hc, a private Herdr desktop and an opencode turn; run by hand
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/opencode_live.rs (target/debug/deps/opencode_live-d07cc3f167867936)
+
+running 1 test
+test an_opencode_worker_receives_its_brief_with_nobody_typing ... ignored, starts a real herdr server and a real opencode turn; run by hand
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/prompts.rs (target/debug/deps/prompts-73823a3cad4c6043)
+
+running 8 tests
+test without_xdg_the_prompts_live_under_the_home_directory ... ok
+test the_prompts_follow_the_xdg_config_home ... ok
+test the_first_list_writes_every_shipped_prompt ... ok
+test show_prints_the_shipped_words_and_path_names_the_file ... ok
+test the_coordinator_can_be_asked_for_by_its_role_id ... ok
+test a_file_that_cannot_be_read_is_listed_as_unreadable ... ok
+test a_prompt_of_your_own_is_read_and_a_missing_one_is_a_refusal ... ok
+test an_edit_survives_and_reset_puts_the_shipped_words_back ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+
+     Running tests/review.rs (target/debug/deps/review-ba02e5e82da06e53)
+
+running 5 tests
+test review_refuses_a_task_that_has_not_reported ... ok
+test review_refuses_when_no_reviewer_is_configured ... ok
+test review_refuses_a_worker_on_a_router ... ok
+test review_reads_the_reviewer_from_the_settings_role ... ok
+test review_refuses_a_reviewer_from_the_authors_vendor ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.23s
+
+     Running tests/review_verdict.rs (target/debug/deps/review_verdict-b2732ca52a59aa73)
+
+running 10 tests
+test findings_outside_the_packet_are_not_a_verdict ... ok
+test one_major_finding_fails_and_sends_the_task_back ... ok
+test minor_findings_pass_the_review ... ok
+test a_passed_review_keeps_its_minor_findings ... ok
+test a_review_decided_by_another_caller_is_said_once ... ok
+test bad_findings_exit_2 ... ok
+test the_verdict_records_the_reviewer_and_the_packet_hash ... ok
+test the_second_failed_round_escalates_at_rounds_two ... ok
+test the_orchestrator_cannot_record_a_review_verdict ... ok
+test the_verdict_runs_from_a_directory_outside_the_repository ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.71s
+
+     Running tests/roster.rs (target/debug/deps/roster-5134e19df707184d)
+
+running 3 tests
+test an_installed_binary_lists_the_programs_it_ships ... ok
+test reports_a_fake_cli_and_the_ones_that_are_missing ... ok
+test prints_a_json_array_when_asked ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.74s
+
+     Running tests/scope_diff.rs (target/debug/deps/scope_diff-55cfe7bd2ccbadcb)
+
+running 2 tests
+test an_in_scope_hand_in_still_lands ... ok
+test a_stray_file_missing_from_the_hand_in_list_stops_the_review_and_the_landing ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.97s
+
+     Running tests/serve.rs (target/debug/deps/serve-266c23611880810a)
+
+running 12 tests
+test a_second_serve_for_the_same_state_directory_is_refused ... ok
+test a_serve_right_after_a_kill_takes_over_from_the_stale_record ... ok
+test a_failed_step_warns_on_the_services_stderr_and_reaches_the_board ... ok
+test a_service_says_what_it_did_about_the_repositorys_space ... ok
+test serve_answers_the_api_and_leaves_no_record_behind ... ok
+test the_service_touches_a_change_file_a_herdr_mod_can_watch ... FAILED
+test the_banner_prints_the_tick_interval_the_settings_name ... ok
+test two_repositories_are_served_at_once_by_one_service ... ok
+test a_service_started_before_the_run_says_so_and_sees_it_without_a_restart ... ok
+test a_json_service_keeps_stdout_one_document_when_the_run_starts ... ok
+test a_service_on_the_desktop_host_stops_with_code_zero_on_sigterm ... ok
+test a_service_on_the_desktop_host_stops_with_code_zero_on_sigint ... ok
+
+failures:
+
+---- the_service_touches_a_change_file_a_herdr_mod_can_watch stdout ----
+
+thread 'the_service_touches_a_change_file_a_herdr_mod_can_watch' (95592304) panicked at crates/shprd/tests/serve.rs:1105:38:
+the change file is written at start: Os { code: 2, kind: NotFound, message: "No such file or directory" }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    the_service_touches_a_change_file_a_herdr_mod_can_watch
+
+test result: FAILED. 11 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.03s
+
+error: test failed, to rerun pass `-p shprd --test serve`
