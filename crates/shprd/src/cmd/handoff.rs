@@ -964,10 +964,22 @@ project_dirs = []
         // brief the stopped worker was launched with, with the ladder's
         // takeover context before both.
         assert!(
-            brief.contains("You are taking over one shprd task"),
+            brief.contains("worker taking over one task"),
             "the takeover prompt is in the brief: {brief}"
         );
         assert!(brief.contains("<shprd-backup>"), "{brief}");
+        // The takeover's words, then the worker's, then the task.
+        let at = |needle: &str| {
+            brief
+                .find(needle)
+                .unwrap_or_else(|| panic!("{needle}: {brief}"))
+        };
+        assert!(
+            at("worker taking over one task") < at("You are a shprd worker. Use only")
+                && at("You are a shprd worker. Use only") < at("# T1 Hand a task over"),
+            "{brief}"
+        );
+        assert!(!brief.contains("Shepherdr"), "{brief}");
         assert!(brief.contains("# T1 Hand a task over"), "{brief}");
         assert!(brief.contains("## Your settings"), "{brief}");
         assert!(

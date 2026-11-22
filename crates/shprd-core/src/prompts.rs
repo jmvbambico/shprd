@@ -159,8 +159,17 @@ const BACKUP_M9_ASKS: &str = include_str!("../../../data/templates/history/backu
 const BACKUP_M9_ASKS_DIGEST: &str =
     "870902264b1bcf1c89e6fddb66dd04728fcfca510aa0722c639d1236023670f4";
 
+/// The backup wording before it was cut to the takeover's own rules: it
+/// repeated the worker's rules, which the brief now carries after it.
+#[cfg(test)]
+const BACKUP_M11_LONG: &str = include_str!("../../../data/templates/history/backup-m11-long.md");
+
+/// The SHA-256 of [`BACKUP_M11_LONG`].
+const BACKUP_M11_LONG_DIGEST: &str =
+    "4cbcd2fd8c152a6c734421c5831cafb33c5a9549bcbfa5d255302f011761c485";
+
 /// The backup's retired defaults.
-const BACKUP_OLD: &[&str] = &[BACKUP_M9_ASKS_DIGEST];
+const BACKUP_OLD: &[&str] = &[BACKUP_M9_ASKS_DIGEST, BACKUP_M11_LONG_DIGEST];
 
 /// The coordinator wording M9.5 shipped, retired because it named only the
 /// CLI's own question tool, which a program with no ask hook does not have.
