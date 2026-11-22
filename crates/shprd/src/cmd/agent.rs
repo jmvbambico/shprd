@@ -453,12 +453,35 @@ fn proof_paths(ctx: &Ctx, args: &ReportArgs) -> Result<Vec<String>, CliError> {
             return Err(CliError::Invalid(anyhow!(
                 "refusing to record the proof {proof:?}: it is not inside the task's worktree {}\n\
                  leave the artifact in the worktree and pass its path from there (e.g. \
-                 `--proof proof/tests.txt`), because that is the folder the reviewer is given",
+                 `--proof .shprd/proof/tests.txt`), because that is the folder the reviewer is given",
                 root.display()
+            )));
+        }
+        if is_tracked(&root, &absolute) {
+            return Err(CliError::Invalid(anyhow!(
+                "refusing to record the proof {proof:?}: it is a tracked file on the task's branch, \
+                 and proof notes never live in the repository\n\
+                 write the artifact under `.shprd/proof/` in the worktree (e.g. \
+                 `--proof .shprd/proof/tests.txt`), which git ignores, and pass that path"
             )));
         }
     }
     Ok(args.proofs.clone())
+}
+
+/// Whether git tracks `path` in the worktree at `root`. A directory that is not
+/// a git checkout tracks nothing.
+fn is_tracked(root: &Path, path: &Path) -> bool {
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["ls-files", "--error-unmatch", "--"])
+        .arg(path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
 }
 
 /// The worktree the hand-in's proofs are read from.

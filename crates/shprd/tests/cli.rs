@@ -336,7 +336,7 @@ fn a_proof_outside_the_worktree_is_refused() {
         "it names the worktree the proof belongs in: {stderr}"
     );
     assert!(
-        stderr.contains("--proof proof/tests.txt"),
+        stderr.contains("--proof .shprd/proof/tests.txt"),
         "and shows the shape that works: {stderr}"
     );
     // Nothing was written: the log has the spawn and nothing after it.

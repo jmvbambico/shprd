@@ -5,3 +5,7 @@
 # The web app's build products; `web/src/gen/` is committed.
 /web/node_modules
 /web/dist
+
+# Proof notes live in the worktree, never in the repository.
+proof/
+.shprd/proof/
