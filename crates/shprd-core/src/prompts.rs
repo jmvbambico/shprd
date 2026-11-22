@@ -221,6 +221,17 @@ const ASSISTANT_M11_ACCEPT: &str =
 const ASSISTANT_M11_ACCEPT_DIGEST: &str =
     "2edb55677e9ae75377a852243658a791b0169d71c55b8bd711c7192f1aa00a50";
 
+/// The coordinator wording shipped before SHPR-83 (`git show
+/// 7bc01e7^:data/templates/assistant.md`). An install of it read as `edited`
+/// because its digest was never listed, so it never upgraded.
+#[cfg(test)]
+const ASSISTANT_PRE_SHPR83: &str =
+    include_str!("../../../data/templates/history/assistant-pre-shpr83.md");
+
+/// The SHA-256 of [`ASSISTANT_PRE_SHPR83`].
+const ASSISTANT_PRE_SHPR83_DIGEST: &str =
+    "b2bb0172dfa307a6f7e93f3a2883b3c00c99f21a836d25772a86a2d1d24340a5";
+
 /// The coordinator's retired defaults.
 const ASSISTANT_OLD: &[&str] = &[
     ASSISTANT_M9_ASKS_DIGEST,
@@ -229,6 +240,7 @@ const ASSISTANT_OLD: &[&str] = &[
     ASSISTANT_M11_IDENTITY_DIGEST,
     ASSISTANT_M11_TASKS_ONLY_DIGEST,
     ASSISTANT_M11_ACCEPT_DIGEST,
+    ASSISTANT_PRE_SHPR83_DIGEST,
 ];
 
 /// The reviewer wording M9.6 shipped, which did not name the asks the packet
@@ -675,16 +687,20 @@ impl PromptRef {
         Ok(PromptRef::Path(PathBuf::from(trimmed)))
     }
 
-    /// The words this reference names.
+    /// The words this reference names, without a leading credit comment.
     ///
     /// An id is written on first use and upgraded like any other installed
     /// prompt; a path must exist, and a `~` in it is `home`.
     pub fn read(&self, dir: &Path, home: &Path) -> Result<String, PromptError> {
         match self {
-            PromptRef::Prompt(id) => ensure(dir, id).map(|prompt| prompt.text),
+            PromptRef::Prompt(id) => {
+                ensure(dir, id).map(|prompt| strip_leading_comment(&prompt.text).to_owned())
+            }
             PromptRef::Path(path) => {
                 let path = expand_tilde(path, home);
-                std::fs::read_to_string(&path).map_err(|source| PromptError::Read { path, source })
+                std::fs::read_to_string(&path)
+                    .map(|text| strip_leading_comment(&text).to_owned())
+                    .map_err(|source| PromptError::Read { path, source })
             }
         }
     }
@@ -695,6 +711,22 @@ impl PromptRef {
             PromptRef::Prompt(id) => format!("{}{id}", Self::PREFIX),
             PromptRef::Path(path) => path.display().to_string(),
         }
+    }
+}
+
+/// `text` without a leading `<!-- ... -->` block (and the blank lines after it).
+///
+/// A template opens with a comment holding its licence credit. The file on disk
+/// keeps it; the words an agent is sent never carry it. Text that does not open
+/// with a closed comment is returned whole.
+pub fn strip_leading_comment(text: &str) -> &str {
+    let trimmed = text.trim_start();
+    let Some(rest) = trimmed.strip_prefix("<!--") else {
+        return text;
+    };
+    match rest.split_once("-->") {
+        Some((_, after)) => after.trim_start_matches(['\n', '\r']),
+        None => text,
     }
 }
 

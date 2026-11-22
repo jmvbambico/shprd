@@ -2335,7 +2335,10 @@ project_dirs = []
         let brief = std::fs::read_to_string(&report.brief).unwrap_or_else(|err| panic!("{err}"));
         // The reviewer's own words lead the brief: the shipped reviewer prompt
         // is installed on first use and read in.
-        assert!(brief.starts_with("<!--"), "{brief}");
+        assert!(
+            brief.starts_with("You are a shprd reviewer") && !brief.contains("<!--"),
+            "{brief}"
+        );
         assert!(
             brief.contains("You review one finished attempt's work"),
             "{brief}"
