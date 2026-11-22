@@ -72,6 +72,10 @@ pub const BRIEF_LOST: &str = "brief not delivered";
 /// nothing to resolve it against.
 pub fn card(state: &RunState, escalation: &Escalation) -> Option<Card> {
     let Some(id) = escalation.task.as_deref() else {
+        // A successful update settles the failed updates before it; its record is no card.
+        if gate::is_update_settled(escalation) || gate::update_failure_settled(state, escalation) {
+            return None;
+        }
         return Some(Card {
             body: plain_body(&escalation.body),
             default_action: escalation.default_action.clone(),
@@ -550,5 +554,35 @@ mod tests {
         };
         let drawn = card(&state, &escalation).expect("the card still holds");
         assert_eq!(drawn.body, escalation.body);
+    }
+
+    #[test]
+    fn a_failed_update_card_clears_after_a_later_success_and_returns_after_a_new_failure() {
+        use shprd_core::gate::{UPDATE_FAILED_ACTIONS, update_settled_body};
+        let mk = |seq: u64, body: String, action: &str| Escalation {
+            task: None,
+            body,
+            default_action: action.to_string(),
+            seq,
+            by_agent: false,
+        };
+        let failed = |seq| {
+            mk(
+                seq,
+                "shprd could not build".into(),
+                UPDATE_FAILED_ACTIONS[0],
+            )
+        };
+        let ok = |seq| mk(seq, update_settled_body("9.9"), "nothing needs doing");
+        let cards = |all: Vec<Escalation>| -> usize {
+            let state = RunState {
+                escalations: all.clone(),
+                ..Default::default()
+            };
+            all.iter().filter_map(|e| card(&state, e)).count()
+        };
+        assert_eq!(cards(vec![failed(1)]), 1);
+        assert_eq!(cards(vec![failed(1), ok(2)]), 0);
+        assert_eq!(cards(vec![failed(1), ok(2), failed(3)]), 1);
     }
 }

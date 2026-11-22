@@ -44,6 +44,9 @@ pub fn run(args: &SelfUpdateArgs) -> Result<(), CliError> {
     let mut failed = None;
     for outcome in &outcomes {
         println!("{}", describe(outcome));
+        if let Outcome::Updated { version, .. } = outcome {
+            machine.settle(version);
+        }
         if let Outcome::Stuck(why) = outcome {
             failed = Some(why.clone());
         }
@@ -140,6 +143,17 @@ impl<'a> Machine<'a> {
             args,
             old_id: RefCell::new(None),
         }
+    }
+
+    /// Records that an update succeeded, which settles every failed update's
+    /// card raised before it (they leave the chat and the board). It is an
+    /// engine escalation of its own that draws no card; a failure after it
+    /// stays open.
+    fn settle(&self, version: &str) {
+        self.escalate(
+            &shprd_core::gate::update_settled_body(version),
+            "nothing needs doing; shprd is up to date",
+        );
     }
 
     fn work(&self) -> &Path {
