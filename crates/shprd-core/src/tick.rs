@@ -398,7 +398,10 @@ fn step_for(
     // Not while its agent has taken the work up again: a landing judges the
     // commit the branch is at, and an agent that is writing produces another.
     let busy = facts.is_live(&task.id) || matches!(phase, Phase::Working | Phase::Merging);
-    if !busy && !nothing_to_merge && rules::ready_to_land(task).is_ok() {
+    // A task already landed is never landed again, whatever its approvals or
+    // overrides: `ready_to_land` accepts an accepted failure at any status.
+    let landed = matches!(task.status, TaskStatus::Integrated | TaskStatus::Dropped);
+    if !busy && !landed && !nothing_to_merge && rules::ready_to_land(task).is_ok() {
         let policy = input.config.land.policy_for(landing_target);
         let land = Step::Land {
             task: task.id.clone(),
@@ -1763,6 +1766,76 @@ mod tests {
         let after = folded(&log);
         let steps = plan_for(&after, &Facts::default(), &config(MergePolicy::Auto, 4));
         assert!(steps.is_empty(), "A has landed: {steps:?}");
+    }
+
+    /// The chat-tail shape: the review failed on every round, a person
+    /// overrode the failure and approved the head.
+    fn overridden_approved_log(id: &str) -> Vec<Event> {
+        let mut log = two_failed_rounds_log(id);
+        log.push(spawned(11, id, 3));
+        log.push(reported(12, id, 3));
+        log.push(review_requested(13, id, 3));
+        log.push(review_failed(14, id, 3, 13));
+        log.push(ev(
+            15,
+            EventKind::TaskPrOpened {
+                task: id.to_string(),
+                number: 7,
+                url: String::from("https://example.invalid/pull/7"),
+                head: format!("shprd/r1/{id}"),
+            },
+        ));
+        log.push(Event {
+            seq: 16,
+            at_ms: 16_000,
+            actor: Actor::Human,
+            kind: EventKind::Override {
+                task: id.to_string(),
+                rule: crate::rules::INTEGRATE_AFTER_FAILED_GATE.to_string(),
+                reason: String::from("take it as it is"),
+            },
+        });
+        log.push(Event {
+            seq: 17,
+            at_ms: 17_000,
+            actor: Actor::Human,
+            kind: EventKind::TaskApproved {
+                task: id.to_string(),
+                number: 7,
+                head_sha: format!("{id}-commit"),
+            },
+        });
+        log
+    }
+
+    #[test]
+    fn an_overridden_approved_task_lands_once() {
+        let mut log = overridden_approved_log("A");
+        let state = folded(&log);
+        let cfg = config(MergePolicy::Ask, 4);
+        let steps = plan_for(&state, &Facts::default(), &cfg);
+        assert_eq!(
+            steps,
+            vec![Step::Land {
+                task: "A".to_string(),
+                policy: MergePolicy::Ask,
+            }]
+        );
+        log.push(ev(
+            20,
+            EventKind::TaskLanded {
+                task: "A".to_string(),
+                base: "main".to_string(),
+                head: "A-commit".to_string(),
+                number: Some(7),
+                outcome: LandOutcome::Merged,
+            },
+        ));
+        let after = folded(&log);
+        for policy in [MergePolicy::Ask, MergePolicy::Auto, MergePolicy::Checks] {
+            let steps = plan_for(&after, &Facts::default(), &config(policy, 4));
+            assert!(steps.is_empty(), "A has landed ({policy:?}): {steps:?}");
+        }
     }
 
     /// A log whose one task handed in and had its review fail on attempt 1.
