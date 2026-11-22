@@ -780,3 +780,11 @@ test("clicking the name opens a shut space and shuts the open picked one", () =>
   pickOpen(open, space, "sp-scratch");
   assert.equal(isOpen(open, space, "sp-scratch"), true);
 });
+
+test("dropReason trims what was typed and defaults a blank one", async () => {
+  const { dropReason } = await import("../mods/lib/accept.js");
+  assert.equal(dropReason("  too slow \n"), "too slow");
+  assert.equal(dropReason(""), "No reason given");
+  assert.equal(dropReason("   "), "No reason given");
+  assert.equal(dropReason(undefined), "No reason given");
+});
