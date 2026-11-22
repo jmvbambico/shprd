@@ -2089,11 +2089,13 @@ pub(crate) fn brief_context(
     let prompt = if prompt_id == role_id {
         role_prompt(env, role_id)?
     } else {
-        // The takeover words: the installed prompt, not a role's `prompt` field.
-        PromptRef::parse(&format!("{}{prompt_id}", PromptRef::PREFIX))
+        // The takeover words (the installed prompt, not a role's `prompt`
+        // field), then the worker's own words.
+        let takeover = PromptRef::parse(&format!("{}{prompt_id}", PromptRef::PREFIX))
             .map_err(invalid)?
             .read(&env.prompts_dir, &env.home)
-            .map_err(invalid)?
+            .map_err(invalid)?;
+        format!("{}\n{}", takeover.trim_end(), role_prompt(env, role_id)?)
     };
     let proof = settings.tasks().proof;
     Ok(BriefContext {

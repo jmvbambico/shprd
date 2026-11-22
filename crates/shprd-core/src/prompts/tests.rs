@@ -540,16 +540,12 @@ fn every_role_opens_with_who_it_is() {
         ("assistant", "You are shprd's coordinator"),
         ("worker", "You are a shprd worker"),
         ("reviewer", "You are a shprd reviewer"),
+        ("backup", "You are a shprd worker taking over"),
     ] {
         let text = shipped_prompt(id).expect("shipped").text;
         let body = text.split("-->").nth(1).expect("a licence header");
         assert!(body.trim_start().starts_with(first), "{id}: {body:.80}");
-        if id != "backup" {
-            assert!(
-                !body.contains("Shepherdr"),
-                "the coordinator's words name no other product"
-            );
-        }
+        assert!(!body.contains("Shepherdr"), "{id} names no other product");
     }
 }
 
@@ -717,7 +713,7 @@ const PINNED: [(&str, &str); 4] = [
     ),
     (
         "backup",
-        "4cbcd2fd8c152a6c734421c5831cafb33c5a9549bcbfa5d255302f011761c485",
+        "40180bf431489a9f95b6e0ff762b8a03cf54b8477cbb44f67ee0884f0961eefa",
     ),
 ];
 
@@ -840,4 +836,24 @@ fn the_condensed_reviewer_replaces_the_long_one() {
     std::fs::write(path_of(temp.path(), "reviewer"), REVIEWER_M11_LONG).expect("old install");
     let installed = ensure(temp.path(), "reviewer").expect("the upgrade runs");
     assert_eq!(installed.change, Change::Upgraded, "{installed:?}");
+}
+
+/// Every shipped body (credit comment stripped) names no other product.
+#[test]
+fn no_shipped_body_names_another_product() {
+    for prompt in shipped() {
+        let body = prompt.text.split("-->").nth(1).unwrap_or(prompt.text);
+        assert!(!body.contains("Shepherdr"), "{}", prompt.id);
+    }
+}
+
+#[test]
+fn the_backup_m11_long_digest_is_the_listed_one() {
+    let backup = shipped_prompt("backup").expect("shipped");
+    assert_eq!(digest(BACKUP_M11_LONG.as_bytes()), BACKUP_M11_LONG_DIGEST);
+    assert!(backup.old.contains(&BACKUP_M11_LONG_DIGEST));
+    assert!(
+        !backup.text.contains("put the proof path")
+            && !backup.text.contains("say where it is in your summary")
+    );
 }
