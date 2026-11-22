@@ -221,7 +221,7 @@ export function passItem(state) {
   // A task that could not start is said in plain words: which task, and that
   // nothing was lost. The engine's own wording (pass, attempt, branch names)
   // stays in its log.
-  if ((first.step === "start" || first.step === "send_back") && first.task) {
+  if (first.step === "start" && first.task) {
     return {
       id: passId(tick.at_ms),
       level: "error",

@@ -747,7 +747,7 @@ fn the_pass_prints_a_document_a_script_can_read() {
 /// failed step and no "Waiting:" line.
 #[test]
 fn two_passes_at_once_start_a_queued_task_exactly_once() {
-    for round in 0..4 {
+    for round in 0..12 {
         let fixture = Fixture::new("auto");
         fixture.start();
         fixture.add_task(&format!("A{round}"), "task-A.txt", None);

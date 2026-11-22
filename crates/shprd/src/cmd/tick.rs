@@ -229,13 +229,6 @@ pub(crate) fn worker_with_hub(
     })
 }
 
-/// The run id and the briefs directory of `repo`, as a tab-closing closure needs
-/// them.
-///
-/// A tab record lives at `<briefs>/<run>/<task>-a<n>.tab`, so closing one needs
-/// both halves of its path. A log that names no run is not something either
-/// closure can act on — nothing landed, so no tab is owed a close — and it comes
-/// back as the reason the closure had nothing to do.
 /// Starts `task` unless another pass already has.
 ///
 /// The service's own tick and a coordinator's `shprd tick` can plan the same
@@ -260,6 +253,13 @@ fn start_once(ctx: &Ctx, home: &Path, repo: &Path, task: &str) -> Result<String,
     crate::cmd::agent::start_for_tick(ctx, home, task)
 }
 
+/// The run id and the briefs directory of `repo`, as a tab-closing closure needs
+/// them.
+///
+/// A tab record lives at `<briefs>/<run>/<task>-a<n>.tab`, so closing one needs
+/// both halves of its path. A log that names no run is not something either
+/// closure can act on — nothing landed, so no tab is owed a close — and it comes
+/// back as the reason the closure had nothing to do.
 fn run_and_briefs(repo: &Path, home: &Path) -> Result<(String, PathBuf), String> {
     let ctx = Ctx::new(repo.to_path_buf(), Actor::Engine, false, true);
     let run = ctx
