@@ -470,7 +470,7 @@ fn proof_paths(ctx: &Ctx, args: &ReportArgs) -> Result<Vec<String>, CliError> {
 }
 
 /// Whether git tracks `path` in the worktree at `root`. A directory that is not
-/// a git checkout tracks nothing.
+/// a git checkout tracks nothing; a git that cannot be run counts as tracked.
 fn is_tracked(root: &Path, path: &Path) -> bool {
     std::process::Command::new("git")
         .arg("-C")
@@ -481,7 +481,8 @@ fn is_tracked(root: &Path, path: &Path) -> bool {
         .stderr(std::process::Stdio::null())
         .status()
         .map(|status| status.success())
-        .unwrap_or(false)
+        // git itself could not run: fail closed rather than accept a tracked proof.
+        .unwrap_or(true)
 }
 
 /// The worktree the hand-in's proofs are read from.
