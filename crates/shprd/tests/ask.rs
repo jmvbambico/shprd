@@ -18,7 +18,7 @@ use tempfile::TempDir;
 
 mod support;
 
-use support::herdr::isolate;
+use support::isolate;
 
 /// The binary under test, built by cargo for this integration test.
 const BIN: &str = env!("CARGO_BIN_EXE_shprd");
