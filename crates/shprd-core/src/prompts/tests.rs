@@ -321,7 +321,7 @@ fn an_untouched_m10_proof_default_is_upgraded() {
     let installed = ensure(temp.path(), "worker").expect("the upgrade runs");
     assert_eq!(installed.change, Change::Upgraded, "{installed:?}");
     assert!(
-        installed.text.contains("inside the task's worktree"),
+        installed.text.contains("inside your worktree"),
         "the artifact has a place to live in today's words: {}",
         installed.text
     );
@@ -544,7 +544,7 @@ fn every_role_opens_with_who_it_is() {
         let text = shipped_prompt(id).expect("shipped").text;
         let body = text.split("-->").nth(1).expect("a licence header");
         assert!(body.trim_start().starts_with(first), "{id}: {body:.80}");
-        if id == "assistant" {
+        if id == "assistant" || id == "worker" {
             assert!(
                 !body.contains("Shepherdr"),
                 "the coordinator's words name no other product"
@@ -779,5 +779,34 @@ fn the_condensed_coordinator_replaces_the_long_one() {
     let temp = dir();
     std::fs::write(path_of(temp.path(), "assistant"), ASSISTANT_M11_LONG).expect("old install");
     let installed = ensure(temp.path(), "assistant").expect("the upgrade runs");
+    assert_eq!(installed.change, Change::Upgraded, "{installed:?}");
+}
+
+/// The worker's long wording is retired and upgrades; the shipped body names no
+/// other product and keeps the rules the rewrite must keep.
+#[test]
+fn the_condensed_worker_replaces_the_long_one() {
+    let shipped = shipped_prompt("worker").expect("shipped");
+    assert_eq!(digest(WORKER_M11_LONG.as_bytes()), WORKER_M11_LONG_DIGEST);
+    assert!(shipped.old.contains(&WORKER_M11_LONG_DIGEST));
+    let body = strip_leading_comment(shipped.text);
+    assert!(!body.to_lowercase().contains("shepherdr"), "{body}");
+    assert!(!body.contains("herdr-task"), "{body}");
+    for needed in [
+        "shprd task status",
+        "`Asking the person` section",
+        "Never push",
+        "pass every gate you ran as `--check",
+        "`.shprd/proof/`",
+        "`--proof <path>`",
+        "within the task's scope",
+        "Reviewing is the engine's job",
+        "shprd agent report",
+    ] {
+        assert!(body.contains(needed), "the worker must say {needed:?}");
+    }
+    let temp = dir();
+    std::fs::write(path_of(temp.path(), "worker"), WORKER_M11_LONG).expect("old install");
+    let installed = ensure(temp.path(), "worker").expect("the upgrade runs");
     assert_eq!(installed.change, Change::Upgraded, "{installed:?}");
 }

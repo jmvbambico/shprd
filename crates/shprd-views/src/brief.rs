@@ -467,27 +467,19 @@ fn task_sections(input: &BriefInput<'_>) -> String {
         "- work only in `{}`; change nothing outside the scope above\n",
         input.worktree
     ));
-    out.push_str(&format!(
-        "- commit on your branch `{}`; never push, never open a pull request\n",
-        input.branch
-    ));
+    out.push_str(&format!("- commit on your branch `{}`\n", input.branch));
     out.push_str(
-        "- `.shprd/` and `.dagr/` are shprd's own: the run's log, asks and graph live there, and \
-         the worktree's git already ignores them. Never commit them, never add them to the \
-         repository's `.gitignore`, and leave them out of your changes\n",
+        "- `.shprd/` and `.dagr/` are shprd's own and git ignores them: never commit them or add \
+         them to `.gitignore`\n",
     );
     out.push_str(&gate_rule(input.gates));
     out.push_str(&format!(
-        "- say where you are as you go: `shprd task status {t} --msg <one short line> [--progress 0-100]`\n",
+        "- status: `shprd task status {t} --msg <one short line> [--progress 0-100]`\n",
         t = input.task.id
     ));
-    out.push_str(&proof_rule(input.proof));
     out.push_str(&format!(
-        "- report when you are done: `shprd agent report --task {t} --attempt {a} --status <completed|blocked|failed> --summary <one line>` \
-         plus `--check <gate>|<command>|<exit code>[|<last 20 lines>]` for every gate you ran (a completed hand-in is refused \
-         without them, and refused if any exited non-zero), `--test <cmd>` for each command you ran, `--changed <path>` for each \
-         path you changed, `--commit <sha>` for your commit, `--skill-used <name>` for each skill above you actually used \
-         and `--proof <path>` for each artifact you left behind\n",
+        "- hand in: `shprd agent report --task {t} --attempt {a} --status <completed|blocked|failed> --summary <one line>` \
+         with `--check`, `--test`, `--changed`, `--commit`, `--skill-used` and `--proof` as your instructions say\n",
         t = input.task.id,
         a = input.attempt
     ));
@@ -559,30 +551,9 @@ fn gate_rule(gates: &[String]) -> String {
         return gate_rule(&[]);
     }
     format!(
-        "- run the worker gates before you report: {}\n",
+        "- gates to run before you hand in, each passed with `--check`: {}\n",
         commands.join(", ")
     )
-}
-
-/// The Rules line that tells the agent where its proof goes, when it needs one.
-///
-/// It sits before the hand-in rule, not after it, because a hand-in is spent
-/// once: a worker that reads "say where it is in your summary" only after
-/// reporting has already written a summary it cannot change, and the re-report
-/// is refused. The proof path goes in `--proof`, where it costs the summary
-/// nothing, so the first report is right.
-fn proof_rule(proof: bool) -> String {
-    if !proof {
-        return String::new();
-    }
-    "- leave one real proof of the work behind (a screenshot of the change, a command's actual \
-     output, a test run) under `.shprd/proof/` inside your worktree (git ignores it; never commit proof into the \
-     repository), and pass its path as `--proof <path>`, once per artifact: the artifact must be \
-     in the worktree, because that is the folder the reviewer is given, and a path outside it, or \
-     a tracked file, is refused. The proof path never goes in the summary, which is \
-     one plain line for the person. A mock is no proof of what people see; a bug fix shows the same \
-     repro failing before and passing after\n"
-        .to_string()
 }
 
 /// The settings that shape one task, each with the layer that set it.
@@ -617,79 +588,89 @@ pub fn settings_block(
     if let Some(note) = program_line {
         out.push_str(&format!("- Program line: {note}\n"));
     }
-    let role_line = |name: &str, field: Option<&Sourced<String>>, absent: &str| match field {
-        Some(sourced) if !sourced.value.trim().is_empty() => {
+    // A role line is shown only when something other than shprd's own default
+    // set it; a value the agent can see for itself is not worth its tokens.
+    let role_line = |name: &str, field: Option<&Sourced<String>>| match field {
+        Some(sourced) if !sourced.value.trim().is_empty() && sourced.source != Source::BuiltIn => {
             format!("- {name}: {} ({})\n", sourced.value, sourced.source.label())
         }
-        _ => format!("- {name}: {absent} (built in)\n"),
+        _ => String::new(),
     };
     out.push_str(&role_line(
         "Program",
         role.and_then(|role| role.agent.as_ref()),
-        "the program's own default",
     ));
     out.push_str(&role_line(
         "Model",
         role.and_then(|role| role.model.as_ref()),
-        "the program's own default",
     ));
     out.push_str(&role_line(
         "Effort",
         role.and_then(|role| role.effort.as_ref()),
-        "the program's own default",
     ));
-    if let Some(role) = role {
+    if let Some(role) = role.filter(|role| role.fast.source != Source::BuiltIn) {
         out.push_str(&format!(
             "- Fast mode: {} ({})\n",
             if role.fast.value { "on" } else { "off" },
             role.fast.source.label()
         ));
-    } else {
-        out.push_str("- Fast mode: off (built in)\n");
     }
     out.push_str(&role_line(
         "Permissions",
         role.and_then(|role| role.perm.as_ref()),
-        "the program's own default",
     ));
-    let fallback = role
-        .filter(|role| !role.fallback.value.is_empty())
-        .map(|role| {
-            format!(
-                "{} ({})",
-                role.fallback.value.join(", "),
-                role.fallback.source.label()
-            )
-        })
-        .unwrap_or_else(|| "none: the configured workers (built in)".to_owned());
     // A task that got a program line says which and what comes next, which is
     // the whole of the old fallback list's job.
-    if program_line.is_none() {
-        out.push_str(&format!("- Fallback: {fallback}\n"));
+    if program_line.is_none()
+        && let Some(role) = role.filter(|role| {
+            !role.fallback.value.is_empty() && role.fallback.source != Source::BuiltIn
+        })
+    {
+        out.push_str(&format!(
+            "- Fallback: {} ({})\n",
+            role.fallback.value.join(", "),
+            role.fallback.source.label()
+        ));
     }
-    for (name, key, absent) in [
-        ("Merge", TaskKey::Merge, "ask"),
-        ("Review rounds", TaskKey::ReviewRounds, "0 (off)"),
-        ("Must fix", TaskKey::MustFix, "major"),
-        ("Proof", TaskKey::Proof, "none"),
-        ("Worktrees", TaskKey::Worktrees, "on"),
-        ("Base branch", TaskKey::Base, "the repo's own branch"),
-        ("Branch pattern", TaskKey::Branch, "{run}/{task}"),
-        ("Tasks at once", TaskKey::MaxRunning, "10"),
-        ("Start notes", TaskKey::StartNotes, "none"),
-        ("Finish notes", TaskKey::FinishNotes, "none"),
+    // (name, key, shown even when built in, value when nothing sets it)
+    for (name, key, always, absent) in [
+        ("Merge", TaskKey::Merge, true, "ask"),
+        ("Review rounds", TaskKey::ReviewRounds, true, "0 (off)"),
+        ("Must fix", TaskKey::MustFix, true, "major"),
+        ("Proof", TaskKey::Proof, true, "none"),
+        ("Worktrees", TaskKey::Worktrees, false, "on"),
+        ("Base branch", TaskKey::Base, false, "the repo's own branch"),
+        ("Branch pattern", TaskKey::Branch, false, "{run}/{task}"),
+        ("Tasks at once", TaskKey::MaxRunning, false, "10"),
+        ("Start notes", TaskKey::StartNotes, false, "none"),
+        ("Finish notes", TaskKey::FinishNotes, false, "none"),
     ] {
-        out.push_str(&task_line(resolved, name, key, absent));
+        out.push_str(&task_line(resolved, name, key, always, absent));
     }
     out
 }
 
-/// One workflow line of the Settings block.
-fn task_line(resolved: &Resolved, name: &str, key: TaskKey, absent: &str) -> String {
-    match resolved.get(&Key::Task(key)) {
+/// One workflow line of the Settings block. The person's notes print as `set`,
+/// never their text: the text is in the brief already.
+fn task_line(resolved: &Resolved, name: &str, key: TaskKey, always: bool, absent: &str) -> String {
+    let sourced = resolved.get(&Key::Task(key));
+    let built_in = sourced
+        .as_ref()
+        .is_none_or(|sourced| sourced.source == Source::BuiltIn);
+    if built_in && !always {
+        return String::new();
+    }
+    match sourced {
         Some(sourced) => {
+            let notes = matches!(key, TaskKey::StartNotes | TaskKey::FinishNotes);
             let words = match &sourced.value {
-                Value::Text(text) if text.trim().is_empty() => absent.to_owned(),
+                Value::Text(text) if text.trim().is_empty() => {
+                    if notes {
+                        return String::new();
+                    }
+                    absent.to_owned()
+                }
+                _ if notes => "set".to_owned(),
                 other => value_words(other),
             };
             format!("- {name}: {words} ({})\n", sourced.source.label())
@@ -961,7 +942,7 @@ mod tests {
         let rules = rules_with(&gates);
         assert!(
             rules.contains(
-                "- run the worker gates before you report: `python3 -m pytest -q`, `python3 -m ruff check .`\n"
+                "- gates to run before you hand in, each passed with `--check`: `python3 -m pytest -q`, `python3 -m ruff check .`\n"
             ),
             "{rules}"
         );
@@ -1001,7 +982,7 @@ mod tests {
         let rules = rules_with(&gates);
         assert!(
             rules.contains(
-                "- run the worker gates before you report: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`\n"
+                "- gates to run before you hand in, each passed with `--check`: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`\n"
             ),
             "{rules}"
         );
@@ -1018,32 +999,47 @@ Each line ends with the layer that set it: `this task`, `this repo`, `you`, `the
 - Program: claude (this task)
 - Model: opus (you)
 - Effort: high (this repo)
-- Fast mode: off (built in)
-- Permissions: the program's own default (built in)
-- Fallback: none: the configured workers (built in)
 - Merge: checks (this repo)
 - Review rounds: 2 (you)
 - Must fix: major (built in)
 - Proof: on (built in)
-- Worktrees: on (built in)
 - Base branch: main (the repo's file)
-- Branch pattern: {run}/{task} (built in)
-- Tasks at once: 4 (built in)
-- Start notes: none (built in)
-- Finish notes: none (built in)
 ";
         assert_eq!(block, expected);
+    }
+
+    #[test]
+    fn the_notes_lines_say_set_and_never_print_the_text() {
+        use shprd_core::settings::{File, Key, Layer, Request, TaskKey, Value, resolve};
+        let mut file = File::default();
+        file.you.set(
+            Key::Task(TaskKey::StartNotes),
+            Value::Text("read the changelog first".to_owned()),
+        );
+        let mut task = Layer::new();
+        task.set(Key::Task(TaskKey::Worktrees), Value::Switch(false));
+        let resolved = resolve(
+            &file,
+            &Request {
+                repo: None,
+                repo_file: None,
+                task: Some(&task),
+            },
+        );
+        let block = settings_block(&resolved, None, None);
+        assert!(block.contains("- Start notes: set (you)"), "{block}");
+        assert!(!block.contains("changelog"), "{block}");
+        assert!(!block.contains("Finish notes"), "{block}");
+        assert!(block.contains("- Worktrees: off (this task)"), "{block}");
     }
 
     #[test]
     fn a_settings_block_without_a_role_says_the_program_decides() {
         let (resolved, _) = settings_fixture();
         let block = settings_block(&resolved, None, None);
-        assert!(
-            block.contains("- Program: the program's own default (built in)"),
-            "{block}"
-        );
-        assert!(block.contains("- Fast mode: off (built in)"), "{block}");
+        assert!(!block.contains("- Program:"), "{block}");
+        assert!(!block.contains("- Fast mode:"), "{block}");
+        assert!(block.contains("- Merge: "), "{block}");
     }
 
     #[test]
@@ -1098,12 +1094,11 @@ branch `task/30-m9-4` in worktree `/home/me/.shprd/worktrees/shprd/m9/M9.4`
 ## Rules
 
 - work only in `/home/me/.shprd/worktrees/shprd/m9/M9.4`; change nothing outside the scope above
-- commit on your branch `task/30-m9-4`; never push, never open a pull request
-- `.shprd/` and `.dagr/` are shprd's own: the run's log, asks and graph live there, and the worktree's git already ignores them. Never commit them, never add them to the repository's `.gitignore`, and leave them out of your changes
-- run the worker gates before you report: `cargo fmt --all --check`, `cargo test --workspace`
-- say where you are as you go: `shprd task status M9.4 --msg <one short line> [--progress 0-100]`
-- leave one real proof of the work behind (a screenshot of the change, a command's actual output, a test run) under `.shprd/proof/` inside your worktree (git ignores it; never commit proof into the repository), and pass its path as `--proof <path>`, once per artifact: the artifact must be in the worktree, because that is the folder the reviewer is given, and a path outside it, or a tracked file, is refused. The proof path never goes in the summary, which is one plain line for the person. A mock is no proof of what people see; a bug fix shows the same repro failing before and passing after
-- report when you are done: `shprd agent report --task M9.4 --attempt 1 --status <completed|blocked|failed> --summary <one line>` plus `--check <gate>|<command>|<exit code>[|<last 20 lines>]` for every gate you ran (a completed hand-in is refused without them, and refused if any exited non-zero), `--test <cmd>` for each command you ran, `--changed <path>` for each path you changed, `--commit <sha>` for your commit, `--skill-used <name>` for each skill above you actually used and `--proof <path>` for each artifact you left behind
+- commit on your branch `task/30-m9-4`
+- `.shprd/` and `.dagr/` are shprd's own and git ignores them: never commit them or add them to `.gitignore`
+- gates to run before you hand in, each passed with `--check`: `cargo fmt --all --check`, `cargo test --workspace`
+- status: `shprd task status M9.4 --msg <one short line> [--progress 0-100]`
+- hand in: `shprd agent report --task M9.4 --attempt 1 --status <completed|blocked|failed> --summary <one line>` with `--check`, `--test`, `--changed`, `--commit`, `--skill-used` and `--proof` as your instructions say
 
 ## Asking the person
 
@@ -1116,19 +1111,11 @@ Each line ends with the layer that set it: `this task`, `this repo`, `you`, `the
 - Program: claude (this task)
 - Model: opus (you)
 - Effort: high (this repo)
-- Fast mode: off (built in)
-- Permissions: the program's own default (built in)
-- Fallback: none: the configured workers (built in)
 - Merge: checks (this repo)
 - Review rounds: 2 (you)
 - Must fix: major (built in)
 - Proof: on (built in)
-- Worktrees: on (built in)
 - Base branch: main (the repo's file)
-- Branch pattern: {run}/{task} (built in)
-- Tasks at once: 4 (built in)
-- Start notes: none (built in)
-- Finish notes: none (built in)
 ";
         assert_eq!(text, expected);
     }
@@ -1284,67 +1271,26 @@ Each line ends with the layer that set it: `this task`, `this repo`, `you`, `the
         let text = plain_brief(AskRoute::Hook);
         assert!(
             text.contains(
-                "- `.shprd/` and `.dagr/` are shprd's own: the run's log, asks and graph live there, and the worktree's git already ignores them. Never commit them, never add them to the repository's `.gitignore`, and leave them out of your changes\n"
+                "- `.shprd/` and `.dagr/` are shprd's own and git ignores them: never commit them or add them to `.gitignore`\n"
             ),
             "{text}"
         );
     }
 
-    /// The proof rule comes before the hand-in rule, and it says where the proof
-    /// path goes. A hand-in is spent once, so a worker that only learns about
-    /// `--proof` after reporting has no report left to correct.
+    /// The brief's Rules say where the worker is and how to report; the proof
+    /// rule has one home, the worker's prompt, so the brief does not repeat it.
     #[test]
-    fn the_proof_rule_is_read_before_the_hand_in_rule() {
+    fn the_rules_name_the_worktree_and_leave_the_proof_rule_to_the_prompt() {
         let text = plain_brief(AskRoute::Hook);
-        let proof = text
-            .find("- leave one real proof of the work behind")
-            .unwrap_or_else(|| panic!("the brief names the proof rule: {text}"));
-        let report = text
-            .find("- report when you are done:")
-            .unwrap_or_else(|| panic!("the brief names the hand-in rule: {text}"));
-        assert!(proof < report, "the proof rule comes first: {text}");
         assert!(
-            text.contains("pass its path as `--proof <path>`"),
-            "the rule says where the proof path goes: {text}"
+            text.contains("- work only in `/wt/M9.4`; change nothing outside the scope above\n"),
+            "{text}"
         );
-        assert!(
-            text.contains("never goes in the summary"),
-            "the rule keeps the proof path out of the summary: {text}"
-        );
-        assert!(
-            text.contains("`--proof <path>` for each artifact you left behind"),
-            "the hand-in rule repeats the flag: {text}"
-        );
-    }
-
-    /// A run that does not ask for proof says nothing about it, so the rule
-    /// never becomes a line a worker skips over.
-    #[test]
-    fn a_run_without_proof_has_no_proof_rule() {
-        let plan = brief_task();
-        let text = task_brief(&BriefInput {
-            task: &plan,
-            run: "m9",
-            attempt: 1,
-            agent: "claude",
-            model: None,
-            branch: "task/30-m9-4",
-            worktree: "/wt/M9.4",
-            skills: &[],
-            gates: &[],
-            archive: None,
-            prompt: None,
-            ask: AskRoute::Hook,
-            proof: false,
-            settings: None,
-            role: None,
-            warnings: &[],
-            program_line: None,
-        });
         assert!(!text.contains("leave one real proof"), "{text}");
+        assert!(!text.contains("Shepherdr"), "{text}");
         assert!(
-            text.contains("`--proof <path>` for each artifact you left behind"),
-            "the flag is still named by the hand-in rule: {text}"
+            text.contains("`--proof`"),
+            "the hand-in line still names the flag: {text}"
         );
     }
 

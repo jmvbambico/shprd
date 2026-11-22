@@ -4454,10 +4454,6 @@ project_dirs = []
         );
         let brief = std::fs::read_to_string(&report.brief).unwrap_or_default();
         assert!(
-            brief.contains("- Permissions: bypassPermissions (built in)"),
-            "the block names the mode in force, not the one that was set: {brief}"
-        );
-        assert!(
             !brief.contains("- Permissions: read-only"),
             "the block does not claim a mode the program lacks: {brief}"
         );
@@ -7498,7 +7494,6 @@ off = ["--no-fast"]
             "crates/shprd",
             "## Skills to load first",
             "- tdd",
-            "never push",
             "shprd task status M4.4 --msg",
             "shprd agent report --task M4.4 --attempt 2",
             "--check",
