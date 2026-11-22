@@ -208,7 +208,21 @@ fn land_task(
     // A repository with no remote, or with no forge to drive, lands locally:
     // the task's branch is merged into the run's integration branch in shprd's
     // own worktree; a non-GitHub remote is then pushed to, best effort.
-    if local_landing(&Git::new(&ctx.root)) {
+    let local = local_landing(&Git::new(&ctx.root));
+    // The scope is judged on the branch's real diff, not on the paths the
+    // hand-in listed: a file the worker left off the list is caught here. It
+    // is read against the same base the review's packet used (the run's base
+    // branch) on a forge landing, and against the integration branch the task
+    // is merged into on a local one.
+    let scope_base = if local {
+        &run.integration_branch
+    } else {
+        &base
+    };
+    if let Err(err) = land::check_scope(&git, scope_base, &branch, &task.scope) {
+        return Err(CliError::Invalid(anyhow!(err.plain(task_id))));
+    }
+    if local {
         return land_task_local(
             ctx, &events, task, task_id, run, &branch, approved, has_work, &base, &config, home,
         );
