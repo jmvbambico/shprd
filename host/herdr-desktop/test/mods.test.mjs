@@ -1496,11 +1496,22 @@ test("a done task's second line says it is done, never a stale agent line; the b
 });
 
 test("a bubble gets a definite width from its longest line, within the column (SHPR-79)", () => {
+  // The coordinator's bubbles keep their sizing: 8 px a character + 30, never under 120.
   assert.equal(bubbleSpan("ok", 900), 120);
   const line = "T1 landed. T2 and T3 can now start, so I'll run a tick.";
   assert.equal(bubbleSpan(line, 900), line.length * 8 + 30);
+  assert.equal(bubbleSpan(line, 900, false), line.length * 8 + 30);
   assert.equal(bubbleSpan("x".repeat(500), 900), bubbleWidth(900));
   assert.equal(bubbleSpan("x".repeat(500), 300), bubbleWidth(300));
   const second = "and a second much longer line of words here";
   assert.equal(bubbleSpan(`short\n${second}`, 900), second.length * 8 + 30);
+});
+
+test("the person's bubble hugs its text, up to the same maximum width", () => {
+  assert.equal(bubbleSpan("ok", 900, true), 96);
+  const short = "shprd restarted and is now running version 0.0.0 (commit 7c2b6b571).";
+  assert.equal(bubbleSpan(short, 1060, true), short.length * 7 + 26);
+  assert.ok(bubbleSpan(short, 1060, true) < bubbleSpan(short, 1060, false));
+  assert.ok(bubbleSpan(short, 1060, true) < bubbleWidth(1060));
+  assert.equal(bubbleSpan("x".repeat(500), 900, true), bubbleWidth(900));
 });

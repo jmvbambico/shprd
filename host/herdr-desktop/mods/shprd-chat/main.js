@@ -1068,7 +1068,7 @@ export default class Chat extends View {
           // tint, which is how a long column of one voice stays readable.
           .when(!mine(message) && message.role !== "news", (el) => el.bg(t.raised))
           // What the service told the agent is a quiet news line, not a bubble.
-          .when(message.role === "news", (el) => el.text_color(t.muted).text_size(TEXT.label).border_1().border_color(t.dim + "66"))
+          .when(message.role === "news", (el) => el.px(4).py(2).text_color(t.muted).text_size(TEXT.label))
           .when(mine(message), (el) => el.bg(t.accent + "33").border_1().border_color(t.accent + "4d"))
           .child(
             TextView.markdown(`chat-md-${row.key}${open ? "" : shown.folded ? "-f" : ""}`, markdownOf(message, shown.text) || " ")
@@ -1101,7 +1101,7 @@ export default class Chat extends View {
         v_flex()
           // A definite width: sized by its content alone, a short message collapsed to one
           // letter per row (see `bubbleSpan`).
-          .w(bubbleSpan(shown.text, this.width))
+          .w(bubbleSpan(shown.text, this.width, mine(message)))
           .min_w(0)
           .gap(3)
           .children(parts)

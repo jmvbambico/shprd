@@ -427,7 +427,7 @@ fn parse_line(format: TranscriptFormat, line: &[u8]) -> Option<Message> {
         // OpenCode's two shapes are read from files of their own, not lines.
         TranscriptFormat::OpencodeStorage | TranscriptFormat::OpencodeSqlite => None,
     }?;
-    hc_clean(news_of(message))
+    hc_clean(notice_of(news_of(message)))
 }
 
 /// Herdr's own `<hc …>` markup, taken out of a message.
@@ -454,9 +454,10 @@ fn hc_clean(message: Message) -> Option<Message> {
         let open = &trimmed[..open_end];
         let inner = &trimmed[open_end + 1..trimmed.len() - "</hc>".len()];
         if !open.ends_with('/') && !inner.contains("<hc") {
-            let from = open.contains("from=\"");
             let words = inner.trim();
-            return (from && !words.is_empty()).then(|| Message {
+            // A sender's wrapper is another agent's words; a wrapper without
+            // one is a notice the host typed. Either is shown as a muted line.
+            return (!words.is_empty()).then(|| Message {
                 role: Role::News,
                 text: words.to_owned(),
                 ..message
@@ -511,6 +512,26 @@ fn strip_hc_tags(text: &str) -> String {
         out.push_str(rest);
     }
     out
+}
+
+/// The lines shprd's own service types into the coordinator that are not
+/// wrapped in tags: the self-update notices.
+const SYSTEM_NOTICES: [&str; 2] = [
+    "shprd will restart once",
+    "shprd restarted and is now running",
+];
+
+/// A user turn that is one of shprd's own notices, as a news message.
+fn notice_of(message: Message) -> Message {
+    let trimmed = message.text.trim();
+    if message.role == Role::User && SYSTEM_NOTICES.iter().any(|n| trimmed.starts_with(n)) {
+        return Message {
+            role: Role::News,
+            text: trimmed.to_owned(),
+            ..message
+        };
+    }
+    message
 }
 
 /// A user turn that is shprd's news, as news lines.
@@ -1956,14 +1977,33 @@ mod tests {
     }
 
     #[test]
+    fn self_update_notices_are_news_not_the_persons_turn() {
+        for text in [
+            "shprd will restart once to apply the accepted change (7c2b6b571). Nothing is lost: the work on the board stays.",
+            "shprd restarted and is now running version 0.0.0 (commit 7c2b6b571).",
+        ] {
+            let value =
+                serde_json::json!({"type": "user", "message": {"role": "user", "content": text}});
+            let message = parse_line(TranscriptFormat::ClaudeJsonl, &line(&value)).unwrap();
+            assert_eq!(message.role, Role::News, "{text}");
+            assert_eq!(message.text, text);
+        }
+        let value = serde_json::json!({"type": "user", "message": {"role": "user", "content": "shprd is great"}});
+        let message = parse_line(TranscriptFormat::ClaudeJsonl, &line(&value)).unwrap();
+        assert_eq!(message.role, Role::User);
+    }
+
+    #[test]
     fn hc_markup_is_never_shown_raw() {
         let parse = |role: &str, text: &str| {
             let value =
                 serde_json::json!({"type": role, "message": {"role": role, "content": text}});
             parse_line(TranscriptFormat::ClaudeJsonl, &line(&value))
         };
-        // A host notice has no sender: hidden.
-        assert!(parse("user", "<hc>t9v exited (signal 1). Read: hc read t9v</hc>").is_none());
+        // A host notice has no sender: a muted news line, never the person's.
+        let notice = parse("user", "<hc>t9v exited (signal 1). Read: hc read t9v</hc>").unwrap();
+        assert_eq!(notice.role, Role::News);
+        assert_eq!(notice.text, "t9v exited (signal 1). Read: hc read t9v");
         // Another agent's message is a news line with its words.
         let from = parse("user", "<hc from=\"t7 herd-1\">Done, see the PR.</hc>").unwrap();
         assert_eq!(from.role, Role::News);
