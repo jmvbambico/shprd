@@ -1294,6 +1294,50 @@ fn a_landing_goes_through_the_forge_and_the_ledger() {
 }
 
 #[test]
+fn a_task_that_already_landed_is_never_landed_again() {
+    // The chat-tail shape: the task landed, and every later pass must plan
+    // nothing for it, open no pull request and record nothing.
+    let mut log = vec![started()];
+    log.extend(ready(2, "abc123"));
+    let next = log.len() as u64 + 10;
+    log.push(ev(
+        next,
+        EventKind::TaskLanded {
+            task: String::from("A"),
+            base: String::from("main"),
+            head: String::from("abc123"),
+            number: Some(1),
+            outcome: shprd_core::event::LandOutcome::Merged,
+        },
+    ));
+    let fixture = Fixture::new(log);
+    let forge = Arc::new(SharedFake::new(vec![]));
+    let worker = fixture.worker(
+        Arc::new(Scripted::default()),
+        forge.clone(),
+        config(shprd_core::config::MergePolicy::Auto),
+        recording_start(Arc::new(Mutex::new(Vec::new()))),
+    );
+    for _ in 0..3 {
+        let report = worker.tick().expect("the pass ran");
+        assert!(
+            report.steps.iter().all(|step| step.action != "land"),
+            "{:?}",
+            report.steps
+        );
+    }
+    assert!(forge.calls().is_empty(), "{:?}", forge.calls());
+    assert_eq!(
+        fixture
+            .events()
+            .iter()
+            .filter(|e| matches!(e.kind, EventKind::TaskLanded { .. }))
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn a_landing_closes_the_landed_tasks_worker_tab_and_no_others() {
     // A landed task's worker tab stayed open with its agent done (the M9 gate's
     // "also noticed"): nothing closed it, the way a verdict closes the reviewer's.
