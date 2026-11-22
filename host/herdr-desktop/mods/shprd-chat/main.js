@@ -345,12 +345,8 @@ export default class Chat extends View {
       // its answer another conversation's, which is not folded into this one.
       if (this.slot !== undefined && this.slotKey() !== this.slot) this.forget(false);
       const slot = this.slot;
-      const board = await this.client.state();
-      const asks = await this.client.asks();
-      if (stale()) return;
-      this.state = board;
-      this.asks = asks;
-      await this.readModel(cx, space);
+      // The conversation first: it is what the person is looking at. The board,
+      // the asks and the model are read beside each other afterwards, not in series.
       if (space !== null) {
         // `more` means the page filled up: a long conversation arrives over a few
         // calls rather than one slow one, and the next timer catches any left over.
@@ -358,7 +354,16 @@ export default class Chat extends View {
           if (!(await this.pull(space, slot, stale))) return;
           if (!this.chat.more) break;
         }
+        cx.notify();
       }
+      const [board, asks] = await Promise.all([
+        this.client.state(),
+        this.client.asks(),
+        this.readModel(cx, space),
+      ]);
+      if (stale()) return;
+      this.state = board;
+      this.asks = asks;
       this.failure = null;
       if (space === this.space && slot === this.slot) this.loaded?.add(slot);
     } catch (err) {
@@ -409,19 +414,24 @@ export default class Chat extends View {
    * (not the board and the asks) soon, and again a little later, until the echo is
    * confirmed. The 3 s timer is only the fallback.
    */
-  follow_up(delays = [120, 300, 700, 1500]) {
+  follow_up(delays = [120, 300, 700, 1000]) {
     const slot = this.slot;
     const space = this.space;
     if (space === null || !this.client) return;
-    const waiting = () => (this.echoes ?? []).some((echo) => echo.slot === slot && echo.sent);
+    // Fast only while an answer is awaited: the echo is not yet in the record, or
+    // the newest message is still the person's (the agent has not replied).
+    const waiting = () =>
+      (this.echoes ?? []).some((echo) => echo.slot === slot && echo.sent) ||
+      (this.chat?.messages ?? []).at(-1)?.role === "user";
+    const until = Date.now() + 90_000;
     const step = async (at) => {
-      if (at >= delays.length || !waiting() || slot !== this.slot || !this.client) return;
+      if (Date.now() > until || !waiting() || slot !== this.slot || !this.client) return;
       try {
         if (await this.pull(space, slot)) this.cx.notify();
       } catch {
         // The timer's read reports a service that is down.
       }
-      if (waiting()) this.cx.timer?.after?.(delays[at + 1] ?? 0, () => step(at + 1));
+      if (waiting()) this.cx.timer?.after?.(delays[Math.min(at + 1, delays.length - 1)], () => step(at + 1));
     };
     this.cx.timer?.after?.(delays[0], () => step(0));
   }

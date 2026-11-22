@@ -70,6 +70,19 @@ impl Hub {
         self.notify.notify_waiters();
     }
 
+    /// Wakes every waiter and rewrites the change file at the current sequence,
+    /// for a change the log does not record (a chat line delivered, a transcript
+    /// that grew). A client's chat reads on it; the log is untouched.
+    pub fn poke(&self) {
+        let seq = self.last();
+        if let Some(dir) = self.change_dir()
+            && let Err(err) = crate::changes::touch(dir, seq)
+        {
+            tracing::warn!(%err, dir = %dir.display(), "could not write the change file a watching mod reads");
+        }
+        self.notify.notify_waiters();
+    }
+
     /// The last sequence anyone published through this service.
     pub fn last(&self) -> u64 {
         self.last.load(Ordering::SeqCst)

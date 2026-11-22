@@ -85,7 +85,10 @@ pub fn touch_at(state_dir: &Path, seq: u64, now_ms: u64) -> io::Result<Touch> {
     let record = Touch::new(seq, now_ms);
     std::fs::create_dir_all(state_dir)?;
     let target = path(state_dir);
-    let temporary = state_dir.join(format!("{FILE}.tmp"));
+    // Unique per write: the API, the tick and a chat watcher can write at once.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let temporary = state_dir.join(format!("{FILE}.{}.{n}.tmp", std::process::id()));
     std::fs::write(&temporary, record.to_json())?;
     std::fs::rename(&temporary, &target)?;
     Ok(record)
