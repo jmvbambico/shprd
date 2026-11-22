@@ -20,5 +20,6 @@ toml.workspace = true
 workspace = true
 
 [dev-dependencies]
+shprd-mux-hc = { path = "../shprd-mux-hc" }
 rusqlite.workspace = true
 tempfile.workspace = true

@@ -1077,6 +1077,26 @@ pub struct AskHookSpec {
     /// How long the program lets the hook wait for an answer, if it says.
     #[serde(default)]
     pub timeout_seconds: Option<u32>,
+    /// Events that tell the terminal the program is no longer waiting.
+    ///
+    /// A program that reports `blocked` for a permission and never reports
+    /// again until its next status leaves the header and sidebar on *Needs
+    /// you* after the prompt is answered (known gap G5). Each entry installs a
+    /// hook on `event` that writes `state` to the terminal, so an answered
+    /// prompt, a resumed tool run or a finished turn clears it. The ask's own
+    /// event is never listed: a prompt that is open stays blocked.
+    #[serde(default)]
+    pub settle: Vec<SettleEvent>,
+}
+
+/// One event whose hook writes a status word to the agent's terminal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SettleEvent {
+    /// The program's own event name, e.g. `PostToolUse`.
+    pub event: String,
+    /// The word the hook reports: `working`, `idle` or `done`.
+    pub state: String,
 }
 
 impl AskHookSpec {
@@ -1099,6 +1119,8 @@ impl AskHookSpec {
                 Some("events")
             } else if self.timeout_seconds.is_some() {
                 Some("timeout_seconds")
+            } else if !self.settle.is_empty() {
+                Some("settle")
             } else {
                 None
             };
@@ -1139,6 +1161,16 @@ impl AskHookSpec {
         }
         if self.events.is_empty() {
             return Err(SpecError::IncompleteAskHook { missing: "events" });
+        }
+        for settle in &self.settle {
+            if settle.event.trim().is_empty()
+                || !matches!(settle.state.as_str(), "working" | "idle" | "done")
+            {
+                return Err(SpecError::InvalidSettle {
+                    event: settle.event.clone(),
+                    state: settle.state.clone(),
+                });
+            }
         }
         for (index, event) in self.events.iter().enumerate() {
             if event.event.trim().is_empty() {
@@ -1439,6 +1471,17 @@ pub enum SpecError {
     InvalidAskCommand {
         /// The command that was written.
         command: String,
+    },
+    /// A settle entry has no event name or a state that is not `working`,
+    /// `idle` or `done`.
+    #[error(
+        "invalid asks.settle entry {event:?} -> {state:?}: name an event and use working, idle or done"
+    )]
+    InvalidSettle {
+        /// The event as written.
+        event: String,
+        /// The state as written.
+        state: String,
     },
     /// An ask event has an empty program event name.
     #[error("the {kind:?} ask event has an empty event name")]
@@ -1825,6 +1868,35 @@ project_dirs = []
                 .any(|pair| pair == wanted.as_slice()),
             "codex still checks for updates at startup: {:?}",
             codex.launch.interactive
+        );
+    }
+
+    /// G5: Claude reports `blocked` and never clears it, so its spec settles the
+    /// status once a tool runs or the turn ends, and never on the open prompt.
+    #[test]
+    fn claude_settles_a_blocked_status_without_touching_the_open_prompt() {
+        let specs = match load_dir(&harness_dir()) {
+            Ok(specs) => specs,
+            Err(error) => panic!("harness data should load: {error}"),
+        };
+        let Some(claude) = specs.iter().find(|spec| spec.id == "claude") else {
+            panic!("the claude spec should load");
+        };
+        let settle: Vec<(&str, &str)> = claude
+            .asks
+            .settle
+            .iter()
+            .map(|entry| (entry.event.as_str(), entry.state.as_str()))
+            .collect();
+        assert!(settle.contains(&("PostToolUse", "working")), "{settle:?}");
+        assert!(settle.contains(&("Stop", "idle")), "{settle:?}");
+        assert!(
+            claude
+                .asks
+                .events
+                .iter()
+                .all(|ask| !settle.iter().any(|(event, _)| *event == ask.event)),
+            "an ask's own event must stay blocked"
         );
     }
 
