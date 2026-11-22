@@ -1,0 +1,927 @@
+# How this was run: act is not installed, so the 'desktop' job's steps were replayed by hand.
+# A fresh clone of this branch's HEAD (no untracked files, like actions/checkout), then the job's
+# exact 'run:' line, read out of .github/workflows/ci.yml, with a PATH that has node but NOT bun
+# (what the ubuntu-latest runner has after actions/setup-node), under a clean env.
+78e8b56 ci: run the desktop mod checks on every pull request
+# job run line: host/herdr-desktop/bin/check --no-app
+$ env -i HOME=$HOME PATH=<node only>:/usr/bin:/bin sh -c 'host/herdr-desktop/bin/check --no-app'
+== shared modules
+shared modules are in date
+== gate-env
+ok: gate-env writes a private home and refuses the real one
+== isolate
+ok: isolate strips every host variable and keeps a later assignment
+== client unit tests
+   (node)
+(node:27448) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+✔ an open ask is one card: its question, its choices and its task (1.577916ms)
+✔ a card's footer says what happens if nobody answers (0.219209ms)
+✔ a permission with choices is answered by a button, not by words (0.141709ms)
+✔ an escalation is a card with its words and its default action (0.181625ms)
+✔ a spent review's card shows the verb a person still has to run (0.143666ms)
+✔ the verb is only a command, never a choice or an ask id (0.108917ms)
+✔ a verb the service has an action for gets a button (0.218667ms)
+✔ the panel draws the asks that can be answered, then the escalations (0.389666ms)
+✔ an escalation naming an open ask is the same card as that ask (0.232333ms)
+✔ an ask is answered with its task, its id and the person's words (0.765875ms)
+✔ a card about no task names the run instead of a blank reference (0.165459ms)
+✔ a lost brief's card has a Resend button that posts task.resend_brief (0.25375ms)
+(node:27449) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+✔ a page is appended to what the panel holds (0.868417ms)
+✔ a new session starts the panel over rather than gluing two conversations (0.084792ms)
+✔ what the service told the agent stays news, and is not the person's side (0.054958ms)
+✔ a message keeps its shape even when the service left a field out (0.056542ms)
+✔ the panel keeps a bounded tail of a long conversation (0.483459ms)
+✔ latest is the tail a short panel draws, oldest first (0.070417ms)
+✔ a tool call reads as one line, and the person's side is the right one (0.063708ms)
+✔ a long bubble is folded at a row length (0.076459ms)
+✔ an empty chat says what it is waiting for, and the service's note wins (0.066959ms)
+✔ only words worth sending are sent, and they name a space (0.098542ms)
+✔ the header names the program and the session, and the time is a clock (0.701625ms)
+✔ the next request asks from the cursor the last page answered with (0.055458ms)
+✔ opening a card's answer box focuses it, and a refresh leaves it there (0.709417ms)
+✔ a submit types the composer's words into the coordinator and clears it (0.18125ms)
+✔ an empty composer sends nothing at all (0.0475ms)
+✔ a refused turn keeps the words and says why (0.20175ms)
+✔ a page is read from the cursor, and a page with more is followed at once (0.134333ms)
+✔ a service that is not there says so in the panel rather than throwing (0.407083ms)
+✔ a reply folds past FOLD_TALL lines to its first FOLD, and opens whole (0.298584ms)
+✔ markup in what an agent wrote is text, in code and out of it (0.378416ms)
+✔ only web links are opened from a bubble (0.177292ms)
+✔ the timeline puts waiting cards among the messages by time, and the rest last (0.334208ms)
+✔ a card belongs to its task's chat, and the run's to the coordinator's (0.128375ms)
+✔ every card the Asks panel drew is in exactly one chat (0.494334ms)
+✔ the space a chat shows is the thread's task, a pane's own, or the coordinator's (0.070291ms)
+✔ a tab's chat space is its task, the coordinator, or none (0.124208ms)
+✔ the switch is drawn on agent panes of a chat space, and on a chat with a live agent (1.559917ms)
+✔ the thread's chat reads the task it is shown and starts over for another (0.538541ms)
+✔ a card is answered through the service, once, and a refusal stays on the card (1.752375ms)
+✔ a message's key is stable, so its fold state survives a page (0.138458ms)
+✔ the thread opens on its chat; the Asks panel and the sidebar's coordinator are gone (0.22325ms)
+✔ SHPR-69: the coordinator's chat says plainly when shprd's coordinator is not running (0.158959ms)
+✔ a run of tool calls is one folded row, and a reply's words end the run (0.526125ms)
+✔ an shprd agent's header says whose it is (0.070709ms)
+✔ the person's typed line breaks stay breaks (0.05675ms)
+✔ an unread conversation says Loading only at first; later it is the empty chat (SHPR-80) (0.389625ms)
+✔ a read given up on changes nothing if it finishes late (SHPR-80) (20.3155ms)
+(node:27450) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+✔ the start is hc run --bg, never the app's bounded exec (2.298333ms)
+✔ the terminals an earlier version named per repository stay apart (they are ended once) (0.241083ms)
+✔ a start that fails says why, in the row, and does not retry every look (0.754083ms)
+✔ a service that dies at once is explained by what it said (0.759417ms)
+✔ SHPR-70: a folder that is not a git repository is served all the same (0.782208ms)
+✔ SHPR-70: a chat line that could not be sent says why in the sidebar's foot (0.189125ms)
+✔ a window with no service starts the one by itself; an up service is left alone (1.155458ms)
+✔ the service starts with no space shown: it is not tied to one (0.7905ms)
+✔ switching spaces starts nothing and only changes the repository the row names (0.201958ms)
+✔ the footer tells the service every space's folder, once per change (1.027459ms)
+✔ a start that the core is already serving is not run twice (0.116416ms)
+✔ the footer's rows are the app's settings, shprd's own, and the service (0.171292ms)
+✔ the shprd row opens the settings window over the layout, not a panel tab (0.267667ms)
+✔ the app's own settings row is still the app's (0.143459ms)
+✔ a record whose process is alive is never killed or restarted (0.1655ms)
+✔ a shprd that is nowhere is said in one plain sentence, and nothing is started (0.306625ms)
+✔ hc's JSON spawn error reads as a sentence, not as JSON (0.196209ms)
+✔ a look that throws shows a reason in the footer, never silence (0.149541ms)
+(node:27451) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+✔ Enter sends, Shift+Enter is left to the text area, Alt+Enter is a new line (1.01625ms)
+✔ a real Enter in the composer sends the words and the text area never sees it (25.515625ms)
+✔ Shift+Enter is not taken: the text area makes the new line, nothing is sent (0.467333ms)
+✔ Alt+Enter puts a line break in the box and sends nothing (0.264375ms)
+✔ Enter on an empty box sends nothing and makes no new line (11.060792ms)
+✔ the Enter key and the chord's submit within a blink send once (10.381417ms)
+✔ the send button sends the current text; empty it sends nothing; a refusal keeps the words (24.536709ms)
+✔ the composer draws the + the model button and the send button inside one box (0.677083ms)
+✔ the model button reads like Shepherdr's: Opus 5.5 · Medium (0.251292ms)
+✔ choosing a model writes the Settings keys once, restarts the coordinator and keeps the history (26.657583ms)
+✔ another window's answer, and a refused write, change nothing for good (23.242875ms)
+✔ attached files go with the message by path, are kept when it is refused, and clear when it is sent (1.109125ms)
+✔ the file picker answers the chosen paths, and none when cancelled (0.364333ms)
+✔ Esc stops a working agent while the box is empty; Stop asks the service (22.105458ms)
+✔ the mic is offered only where Shepherdr's recorder and bun are (0.637292ms)
+✔ a dictation records, then its words come back to put in the box (1.16025ms)
+✔ a restart the person asked for keeps the old messages and says why (0.147917ms)
+✔ the restart's new chat pane takes the conversation over, once, for the same folder (0.339584ms)
+(node:27452) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+✔ with nothing typed the coordinator and the spaces come first, then every task (2.295459ms)
+✔ a space shprd did not make is a space row of its own (0.986041ms)
+✔ typing a task id finds it, and Enter opens its thread (0.369042ms)
+✔ a task with no space of its own opens its thread in the Tasks panel (0.148958ms)
+✔ every word typed must be in the item, in any case and order (0.250209ms)
+✔ a group shows eight rows, then Show N more, which unfolds it (11.6115ms)
+✔ a dropped task is found only by typing (0.129917ms)
+✔ a head is never a target (0.05375ms)
+✔ every binding in words, grouped, the shown layout's key replacing the global one (0.642542ms)
+✔ the keys read as people read them, on macOS too (0.111875ms)
+✔ typing filters the rows by group, name or keys (0.077625ms)
+(node:27453) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+✔ the state directory follows XDG, and falls back to the home (1.338208ms)
+✔ the three files live under the state directory (0.26675ms)
+✔ service.json is accepted only with a usable port and an id (0.96225ms)
+✔ a token is trimmed, and an empty one is no token (0.238583ms)
+✔ the handshake refuses a service whose id is not the record's (0.529375ms)
+✔ a service that is not there answers nothing, and is not an error (0.221583ms)
+✔ discovery answers the address, the token and the health (0.344208ms)
+✔ a record with no token beside it is no service (0.2055ms)
+✔ discovery is probed from the home when no directory is given (0.279125ms)
+✔ a mod with no environment asks the shell where the state directory is (0.323959ms)
+✔ the state directory probe reads the shell's last line (0.226792ms)
+✔ every call carries the token, and a write carries x-shprd too (0.445084ms)
+✔ a shown repository with no running coordinator asks the service to start one, at most once in a while (10.944583ms)
+✔ starting an agent is one write to the service, with the program in it (0.422208ms)
+✔ a refusal is a ServiceError carrying the service's words (0.476458ms)
+✔ a read that runs out of time is no answer, and a strict read says so (24.56375ms)
+✔ the long poll names the sequence and the wait it wants (0.4305ms)
+✔ a 204 from the long poll is an empty answer, not a failure (0.111209ms)
+✔ a refusal body without words still says something (0.220708ms)
+✔ the change file is parsed, and a partial one is not a change (0.171708ms)
+✔ a batch matters unless it names only other files (0.225667ms)
+✔ the change file is read through the injected reader (0.124958ms)
+✔ following reports the first reading and then only real changes (30.655958ms)
+✔ a watcher that rejects ends the loop instead of the panel (0.176458ms)
+✔ a busy client never has more than one sleep outstanding (745.96275ms)
+✔ a call that never answers still runs out (502.836875ms)
+✔ singleFlight never overlaps and folds callers into one rerun (43.053375ms)
+✔ attach looks once more before believing a null (0.338166ms)
+✔ one record finds the one service whatever space the window shows (0.233625ms)
+✔ a repository's calls name it, and a global route does not (0.162083ms)
+✔ switching to another space re-points the client: no discovery, no health check (0.104583ms)
+✔ a restarted service is found again and every repository registered again (0.111ms)
+✔ a panel without a service says why in one plain sentence, never a command (0.1005ms)
+✔ a ready task's needs-you words point at the Tasks pane, never a command or the forge (0.409792ms)
+✔ the chevron toggles a space whether or not it is the picked one (0.06725ms)
+✔ clicking the name opens a shut space and shuts the open picked one (0.038291ms)
+(node:27454) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+✔ every icon the window draws is shipped (1.17525ms)
+✔ the pie fills in steps of five, at least five, half when there is no progress (0.12025ms)
+✔ a task's progress is the percent its last status reported (0.170917ms)
+✔ a toast's time stops while the pointer is on it, and none loses any (0.193583ms)
+✔ a dismissed toast under the pointer lets time go on (0.165833ms)
+✔ a pane header writes the home folder as ~ (0.280458ms)
+✔ toasts are one card: no frame or background each, a divider between them (1.009958ms)
+(node:27462) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+✔ the + menu offers Terminal, New space, New task, then the roster (2.32925ms)
+✔ a program this machine lacks is offered dimmed and says so (0.356083ms)
+✔ at most two programs that are not installed are offered, after the rest (0.107666ms)
+✔ the roster's absence or failure is a line, not an empty menu (0.06625ms)
+✔ a tab's menu is Rename, Restart when it can, then Close tab (0.117959ms)
+✔ only a tab shprd titled, with an agent in it, can be restarted (0.1085ms)
+✔ the app's menu is New space…, New task… and Keybinds, with no theme rows (0.061792ms)
+✔ a pane's menu splits, zooms, closes, and sends back only a kept sub-agent (0.125459ms)
+✔ a menu's height is its rows' own, so a popup is never taller than its content (0.096292ms)
+✔ ↑ and ↓ step over headings, notes, separators and dimmed rows, and wrap (0.193042ms)
+✔ the coordinator's tab menu adds Edit instructions… and Switch agent, and no Rename (0.094417ms)
+✔ a tab shprd titled is not renamed, so shprd can still find it (0.046583ms)
+✔ Switch agent lists the installed programs with Back first and the current one marked (0.12625ms)
+(node:27463) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+✔ every clickable control of every page takes its click (the cause of the dead dropdowns) (10.279625ms)
+✔ a click on a role's model button opens the menu popup, and nothing else closes it (1.417625ms)
+✔ the model menu's tabs are the installed programs only (0.252708ms)
+✔ a pick writes program, model and level in order, and none of what did not change (0.288834ms)
+✔ the model menu answers each change through the shared key (1.09825ms)
+✔ inline rename: click opens the field, Enter saves, Esc cancels, blank is the built-in name (4.34275ms)
+✔ the restart notice shows only after the coordinator's own choice changed, while one runs (8.839459ms)
+✔ a refused later write puts back what the choice already wrote (3.535417ms)
+✔ an undo the service refuses is said, not swallowed (0.937125ms)
+✔ a typed word that is already a model's name is not offered as a new id (0.477042ms)
+✔ a refused write drops the rest of its choice and closes the popup (1.046583ms)
+✔ a stored line reads and writes back as the same line (0.345583ms)
+✔ the worker's lines are its own pick, then agents; the old fallback reads as lines too (0.674709ms)
+✔ a line label leads with the program, then the model and the level (0.150542ms)
+✔ adding a line writes agents with the next free program; removing one writes it back (0.8545ms)
+✔ a reviewer holds lines like a worker: its old fallback reads as line 2 and migrates on a write (0.231709ms)
+✔ the Worker (s) row shows a picker per line, a + while a program is free, and × when there are two (4.311917ms)
+✔ every role ends at one right edge: a lone line's ⌄ takes the × column, and + sits in it (6.258834ms)
+✔ two or more lines draw a numbered gutter; a worker with three, a reviewer with two (1.352708ms)
+✔ the + adds a line, the line's menu opens with the program taken, a pick replaces it, × removes it (3.623584ms)
+✔ a reviewer's line writes roles.reviewer.agents like a worker's (1.744708ms)
+✔ the program selector is a dropdown listing every detected program, not tabs (1.712166ms)
+✔ a light menu (the reviewer's fallback) has None and no Reasoning, Fast or Permissions, and closes on a pick (0.276ms)
+✔ changing a program writes the old model, level and mode out before the new program in (0.077708ms)
+✔ a program that needs a provider is added with a model of a vendor the other role does not run (0.248958ms)
+(node:27464) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+✔ a space name says whether shprd owns it (1.082375ms)
+✔ the spaces shprd owns are sorted into the coordinator's and each task's (0.094167ms)
+✔ every task gets one row, in the order the board groups them (0.550792ms)
+✔ a task row carries the word, the colour and the reason the service gave it (0.191291ms)
+✔ a task with no space is a row that cannot be clicked, and says why (0.119875ms)
+✔ the whole board is still read when the window has no spaces yet (0.065667ms)
+✔ no run is a board with a hint, not an empty sidebar (0.05525ms)
+✔ the dropped tasks a run keeps are history, not rows (0.050042ms)
+✔ a row's badge counts what needs the person and what is ready (0.121791ms)
+✔ the rail is read from the sidebar's width, as Shepherdr reads it (0.104125ms)
+✔ a space's row menu is Open task then Close…, and only what a space can do (0.13525ms)
+✔ closing a space asks in Shepherdr's words (0.052ms)
+✔ task looks are the tokens' words (1.196208ms)
+✔ a needs-you row says the card's words when the service has a card (0.078ms)
+✔ the coordinator row says the run's state, finished or not (0.059625ms)
+✔ a tab's title names its agent, its task and its role (0.156334ms)
+✔ a pill says the host's state when it has one, else the task's own word (0.517834ms)
+✔ a tab whose title is not shprd's is still a pill, with no claims (0.065459ms)
+✔ a space with no tabs draws no pills (0.046042ms)
+✔ the most urgent status in a tab is the one its pill shows (0.035625ms)
+✔ a pill is called by its name, or by what runs in it when it has none (0.052333ms)
+✔ a pill wears the program in its tab and counts what it needs (0.114125ms)
+✔ the side panel's buttons carry the counts of the stacks they open (0.089916ms)
+✔ the pills' counts are the bar's summary (0.045292ms)
+✔ the news is the events a person acts on, each with the seq that made it (0.200959ms)
+✔ a card about a task the board calls finished is not news (0.219ms)
+✔ a batch of events nobody acts on says nothing (0.204583ms)
+✔ a failed pass is a toast, filed under the pass's own time (0.236208ms)
+✔ a land failure is one plain sentence in the toast and the status bar (0.473333ms)
+✔ one reading of the service is the news plus the pass (0.172708ms)
+✔ an event told twice is one toast (0.8665ms)
+✔ the list keeps the newest few, and forgets what is old (0.45375ms)
+✔ three toasts show at once, and an expired one goes by itself (0.23325ms)
+✔ a dismissed toast never comes back (0.1225ms)
+✔ a level's colour is the one the tokens give it (0.062375ms)
+✔ a body is cut at three lines' worth of characters (0.459791ms)
+✔ every word of the board is counted, in the panel's order (0.79675ms)
+✔ the bar names the run, its failure and the service's absence (1.607625ms)
+✔ a time in the bar is words, not a date (0.051084ms)
+✔ a stuck task can be dropped from its row, and a dropped one is not listed (0.25075ms)
+✔ a task in review says so, not its worker's last progress line (0.040583ms)
+✔ the add form takes an After list and names an id the board does not hold (0.125875ms)
+✔ a row's button follows the word the row shows, for every status and word (SHPR-78) (0.167042ms)
+✔ a row offers the one verb the engine has for its state (0.0575ms)
+✔ a task that may start is the one the rules would accept a start for (0.030333ms)
+✔ the add-task form says what is missing before the press (0.058625ms)
+✔ a panel finds the task its shared selection names, or nothing (0.031125ms)
+✔ the card shows the task the panel picked (0.060417ms)
+✔ a long summary keeps its first sentence and folds the rest away (0.103125ms)
+✔ the changes are counted once, from the branch git read (0.072625ms)
+✔ the newest commits are listed and the rest are counted (0.05025ms)
+✔ the thread's switch is Chat, Terminal, then Pull request and Artifacts once it has them (0.143708ms)
+✔ the Terminal view is the agent's own terminal, and a read-only stream only when it cannot be shown (0.163292ms)
+✔ the head's Review is the Ready row's Review, and its status line is the agent's (0.053417ms)
+✔ the changed files are the biggest first, and a binary file says so (0.107417ms)
+✔ the checks are the ones the hand-in recorded, with their exit codes (0.094875ms)
+✔ the proof the hand-in named is listed by file name and path (0.045958ms)
+✔ the reviewer's findings are worst first, each with its wave (0.091916ms)
+✔ the review line names the reviewer and whether it was independent (0.065625ms)
+✔ the card offers Accept only where a merge policy asks (0.098542ms)
+✔ Review opens the Accept card as a 640 by 640 modal dialog for that task (0.064292ms)
+✔ a task that landed through a forge shows its number, state and link (0.059541ms)
+✔ a local landing and a task that never landed say so, and open nothing (0.034709ms)
+✔ the pull request bar says how big the change is and which branches it joins (0.066125ms)
+✔ the search finds a task by id, title, status word or PR number, and by nothing else (0.100375ms)
+✔ typing an id leaves only that task's row (0.092625ms)
+✔ For you comes first: needs you, then Ready; Done is a line until opened (0.104041ms)
+✔ an opened Done shows five rows and 'Show N more', whole once asked (0.113958ms)
+✔ a folded heading is reported shut, except while searching (0.075875ms)
+✔ a search finds Done tasks too, all shown (0.065375ms)
+✔ a status filter is that word's tasks, flat; the chips count what is there (0.1045ms)
+✔ minutes left show only when the service reports them (0.029417ms)
+✔ the panel button that is lit is the one the layout shows, not one the bar remembers (0.089667ms)
+✔ each space gets its own panel back when it is shown again (0.04825ms)
+✔ the add-task form takes the ids a task waits for, and refuses one nobody has (0.065459ms)
+✔ Group by Status gives every word its own heading, Needs you and Ready included (0.0445ms)
+✔ Group by Space gives each space its own heading, tasks in status order (0.087375ms)
+✔ There is no pinned group: a row has no star and listView takes no pins (SHPR-78) (0.0515ms)
+✔ Done is a grey tick, and only Ready is green (0.019875ms)
+✔ the Tasks popups list their rows and mark the one in force (0.438542ms)
+✔ a Waiting line from the engine keeps its path and task id on the row (0.027667ms)
+✔ an open task untouched for hours is old; a fresh one, a working one and a done one are not (0.558458ms)
+✔ a queued task waiting on an old task is old with it, however new (0.035583ms)
+✔ old tasks fold into one Older group at the bottom; new ones are on top, newest first (0.094667ms)
+✔ an old needs-you task does not light the Needs you badge (0.020709ms)
+✔ SHPR-69: another product's Assistant tab is not a pill in shprd's tab bar (0.066542ms)
+✔ strayTab moves a shprd space off Shepherdr's Assistant, and only there (SHPR-79) (0.098292ms)
+✔ seenWith notes shprd's spaces so Shepherdr never adds an Assistant to them (SHPR-79) (0.050083ms)
+✔ the chat's column and bubbles follow Shepherdr's at every pane width (SHPR-79) (0.025083ms)
+✔ a done task's second line says it is done, never a stale agent line; the bar follows the board (SHPR-79) (0.066916ms)
+✔ a bubble gets a definite width from its longest line, within the column (SHPR-79) (0.044708ms)
+(node:27465) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+✔ the field's text names a folder only when it is a path (0.475959ms)
+✔ a folder outside git is offered a repo, home never (0.297292ms)
+✔ the space is named for its folder and made with space.new (0.072958ms)
+✔ New task from anywhere shares a request and selects the list: it never calls the list's own command (0.105833ms)
+✔ New space opens its dialog (0.061167ms)
+✔ the new space opens on the chat view, not a shell (SHPR-75) (0.101375ms)
+(node:27466) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+✔ Accept moves the row to Merging at once and starts the task that waited on it (2.568834ms)
+✔ the Graph shows the pending word, and every pane that reads the shared list sees the same (0.373792ms)
+✔ Review says Reviewing until the card closes (0.168208ms)
+✔ Stop shows Stopping…; Drop removes the row; an answered question's card goes (0.224584ms)
+✔ a refresh that still shows the old state does not undo it; one that shows the outcome wins (0.174125ms)
+✔ double presses are ignored, while a different verb on a confirmed task is a new decision (0.131542ms)
+✔ press: the effect shows before the service answers, a refusal rolls back with one plain line (0.404042ms)
+✔ a merge the service cannot do (a failed land after the confirm) rolls an Accept back with the reason (0.157583ms)
+✔ ops expire by their timestamps, and another repository's ops are not applied (0.10025ms)
+✔ an Accept whose merge the engine could not do shows the task as it is, with the engine's words (0.139375ms)
+✔ a newer action on a confirmed task wins over the older one (0.082291ms)
+✔ a confirmed answer is not sent twice while its op lives (0.063375ms)
+✔ SHPR-83: Accept pressed in the card a Review opened is not ignored (the Review op ends, the Accept starts) (0.185292ms)
+✔ SHPR-83: a queued task held back for a shared file says so on the row and in the Graph (0.1605ms)
+✔ SHPR-83: a hand-in whose review kickoff was not delivered has a Retry review button, not Review or Accept (0.138833ms)
+(node:27470) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+✔ attach makes a client from the service on disk, and keeps it while it is the same one (1.494625ms)
+✔ attach notices a restarted service by the id in the record, even on the same port (0.216666ms)
+✔ attach answers no client when the service is gone, and says it restarted if it had one (0.187708ms)
+✔ attach refuses a record whose id nothing answers, and a token that is not there (0.22225ms)
+✔ the board read throws when nothing answers, and a refusal keeps its words (0.925ms)
+✔ a service is alive only while something answers its own id (0.151ms)
+✔ a panel repaints the whole board after the service restarts (1.136334ms)
+✔ a panel whose service stopped says so instead of keeping the old board (0.2385ms)
+✔ a board read that runs out of time is a failure, not the board the panel had (0.21975ms)
+✔ a panel forgets what a verb said about the run that went away (0.200917ms)
+✔ a discovery that has not happened yet reads the board in one go (0.124083ms)
+✔ noAnswer carries no status, so a panel can tell a dead service from a refusal (0.04575ms)
+(node:27473) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+✔ a role is called by its name, else its built-in word, else its key (0.874792ms)
+✔ the Agents pane and the tree name each agent's role as the person did (0.8195ms)
+✔ a task's line says the reviewer's own name only when it has one (0.353542ms)
+✔ the coordinator's row and Jump carry its name (23.054833ms)
+✔ the chat header falls back to the coordinator's name (0.081291ms)
+✔ a failed review says the reviewer's own name (0.153208ms)
+✔ a typed name is trimmed and cut like the service does (0.074334ms)
+✔ the settings page lists each role's name, with the built-in word as its fallback (0.630959ms)
+✔ only the coordinator's own starting keys ask for a restart (0.100292ms)
+(node:27475) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+✔ the roles are the ones the settings resolve, in their order (1.609083ms)
+✔ a role this build does not ship reads as the person's own (1.014167ms)
+✔ one settings file with no order still shows the roles this build ships (0.302416ms)
+✔ every value says the layer that answered it, in the service's words (0.338042ms)
+✔ a program is shown by its name, and written by its id (0.398417ms)
+✔ the program picker offers every program the harness table defines (0.095541ms)
+✔ a model picker offers the catalog's models after the program's default (0.306833ms)
+✔ a program whose catalog named no model still offers the default, and says why (0.247958ms)
+✔ an effort picker offers the model's own levels, and nothing where it takes none (0.502375ms)
+✔ a model that wants its provider says so (0.26825ms)
+✔ a role is added and removed through the order alone (0.337125ms)
+✔ a refusal is the service's sentence, kept word for word (0.166042ms)
+✔ a reviewer's list rules out the worker's vendor, so the refusal cannot be clicked into (0.342209ms)
+✔ a reviewer cannot pick a Pi model of the worker's vendor (0.561583ms)
+✔ a refusal is drawn in plain words, with no key path or backticks (0.20425ms)
+✔ a write says what it did (0.03925ms)
+✔ the settings' own problems and skipped checks are shown, not hidden (0.044291ms)
+✔ the template list says which prompts are the person's own (0.078667ms)
+✔ an edited or unreadable template is marked as such (0.039542ms)
+✔ the editor says what saving and resetting do (0.037167ms)
+✔ a role key is read back as its role and field (0.023375ms)
+✔ the layout no longer carries a settings block for the panel to show (0.107833ms)
+✔ the pages are the four shprd has, in the window's order, each with an icon (0.092167ms)
+✔ a page a repository can own takes the level switch; the others say they cannot (0.034458ms)
+✔ the level switch says what a write to each layer does (0.078ms)
+✔ the Tasks page shows the workflow keys the settings API exposes (0.888708ms)
+✔ a workflow key the service did not answer is a row, not a hole (0.187542ms)
+✔ a stepper never proposes a value the service would refuse (0.241917ms)
+✔ the window opens on the page it was asked for, and keeps to the ones it has (0.907625ms)
+✔ Esc closes what is open inside the window before it closes the window (0.911833ms)
+✔ a write goes to the layer the level switch names (7.015125ms)
+✔ a refused write keeps the service's sentence, and writes nothing twice (2.061708ms)
+✔ opening the window again keeps the one copy that is up (0.167667ms)
+✔ a window that stopped saying it is open is believed for twenty seconds only (0.046084ms)
+✔ closing the window gives its place back at once (0.154709ms)
+✔ Esc on the Prompts page saves the words typed since the last pause (1.909958ms)
+✔ Back saves the words and keeps the editor closed as the write lands (0.523083ms)
+✔ a prompt the service refused keeps the editor, and the next Esc closes the window (1.694584ms)
+✔ closing the window stores the last words before it goes (1.670459ms)
+✔ a window whose service is down still renews its place (1.538625ms)
+✔ a note typed while the window has no client is written once one answers (2.758667ms)
+✔ a note typed while another write is in flight is queued, not dropped (2.144416ms)
+✔ a re-read never replaces words the service does not have yet (1.921375ms)
+✔ Esc on the Prompts page says so when the words could not be stored (2.499083ms)
+✔ a write whose service is back writes the queue before the page is redrawn (0.518792ms)
+✔ a second change is queued behind the first instead of being dropped (1.49225ms)
+✔ a restarted service does not throw the editor's words away (0.4015ms)
+✔ a restarted service closes an editor with nothing typed in it (1.413291ms)
+✔ a refusal is the person's to read, not retried behind their back (0.463292ms)
+✔ review rounds may be Off, and Off hides what a review must fix (0.156833ms)
+✔ archive is a row of presets, and a value set by hand is still a segment (0.103541ms)
+✔ the two notes are rows now that a brief carries them (0.051958ms)
+✔ a branch pattern git would refuse is refused with a sentence (0.213083ms)
+✔ a branch box never writes a name git would refuse (0.504208ms)
+✔ Fast and Permissions are offered where the program has them (0.105292ms)
+✔ no Backup agent: its role is gone, and workers and reviewers hold a chain of lines (0.069875ms)
+✔ a role's fast, permission and lines writes go to its own keys (1.680833ms)
+✔ the remote page's words: a masked link, ages, devices and the tunnel (0.572208ms)
+✔ the Remote page reads the tunnel and the devices, and says when a route is missing (0.523084ms)
+✔ Start and Stop go through the service, and its refusal is shown word for word (1.609541ms)
+✔ Revoke ends one device and Log out all ends every one (1.532375ms)
+✔ every page, Remote included, draws without throwing (7.981375ms)
+(node:27477) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+✔ an agent pane's Chat segment swaps its terminal for the chat (1.368125ms)
+✔ a chat pane's Terminal segment brings the terminal back, even right after the swap (0.375708ms)
+✔ the thread's Terminal view re-focuses the task's agent when another agent was focused since (0.298084ms)
+✔ the thread's Chat and Terminal segments select their stack children, both ways, repeatedly (0.783583ms)
+(node:27478) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+✔ the pane's body: cached list, loading only where tasks exist, empty at once, neutral while unknown (0.452208ms)
+✔ a pane switched to another repository shows that repository's last board at once (0.611459ms)
+✔ a read that finishes after a switch is kept for its own repository, not drawn in the shown one (0.08575ms)
+✔ a pressed verb shows at once in the pane, a second press is ignored, and it is confirmed after the answer (0.650333ms)
+✔ a refused verb rolls the row back and says why in one line (0.362959ms)
+(node:27491) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+✔ a screen becomes lines: trailing blanks dropped, tabs widened, only the tail kept (0.653625ms)
+✔ artifacts are the hand-ins and reviews, newest attempt first (0.171791ms)
+(node:27513) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+✔ age is the shortest honest words (0.718375ms)
+✔ an agent's line says its state and how long, and 'ago' once it is done (0.074542ms)
+✔ the tree has a space per repo and only its live tasks, needs you first (6.842208ms)
+✔ a queued task with an agent on it is in the tree; one without is not (0.214708ms)
+✔ a task row's second line says who is on it and where it stands (0.124458ms)
+✔ a queued task whose agent already works reads working, not its raw status (0.083708ms)
+✔ a running review shows as the reviewer's line (0.065167ms)
+✔ spaces Herdr made show as plain rows; the served repo's own space does not repeat (0.132875ms)
+✔ the served space is Herdr's real one, and only it is left out of the plain rows (0.088917ms)
+✔ plainSpaces hides exactly the served space's id (0.096875ms)
+✔ the Tasks list's scope keeps one space's tasks, and all when none is picked (0.105958ms)
+✔ a Herdr space in the served folder shows the served space's tasks, under its name (0.334083ms)
+✔ a finished agent stays in the Agents pane 30 minutes; a coordinator stays (0.21675ms)
+✔ a state with no spaces still draws one, from its run (0.063125ms)
+✔ agents: needs you first, with role, program and state (0.068708ms)
+✔ grouped agents put a heading per space before its rows (0.06225ms)
+✔ the graph groups by phase, hangs a task under its last dependency and says what it waits for (0.16675ms)
+✔ the Graph is a view of the Tasks panel: the layout holds no graph block, terminal block or graph mod (0.252625ms)
+✔ the order is the window's own, whichever space is served or picked (SHPR-75) (0.108792ms)
+✔ every row's subtitle is its folder; only an unusual branch is added (SHPR-75) (0.042042ms)
+✔ a pick of a closed Herdr space is dropped, never shown as a raw id (0.058459ms)
+✔ the pick follows the window's space: a dead pick moves to it, so does a pick when the window moves on (0.074542ms)
+✔ a served space whose Herdr space was closed binds to the same folder's new space: one row, not two (0.072541ms)
+ℹ tests 406
+ℹ suites 0
+ℹ pass 406
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 1606.541583
+job exit code: 0
+
+# bun present as well (a developer machine):
+
+test/chrome.test.mjs:
+(pass) the start is hc run --bg, never the app's bounded exec [5.32ms]
+(pass) the terminals an earlier version named per repository stay apart (they are ended once) [0.34ms]
+(pass) a start that fails says why, in the row, and does not retry every look [0.51ms]
+(pass) a service that dies at once is explained by what it said [0.50ms]
+(pass) SHPR-70: a folder that is not a git repository is served all the same [0.12ms]
+(pass) SHPR-70: a chat line that could not be sent says why in the sidebar's foot [0.07ms]
+(pass) a window with no service starts the one by itself; an up service is left alone [0.09ms]
+(pass) the service starts with no space shown: it is not tied to one [0.13ms]
+(pass) switching spaces starts nothing and only changes the repository the row names [0.06ms]
+(pass) the footer tells the service every space's folder, once per change [0.69ms]
+(pass) a start that the core is already serving is not run twice [0.03ms]
+(pass) the footer's rows are the app's settings, shprd's own, and the service [0.07ms]
+(pass) the shprd row opens the settings window over the layout, not a panel tab [0.25ms]
+(pass) the app's own settings row is still the app's [0.04ms]
+(pass) a record whose process is alive is never killed or restarted [0.06ms]
+(pass) a shprd that is nowhere is said in one plain sentence, and nothing is started [0.08ms]
+(pass) hc's JSON spawn error reads as a sentence, not as JSON [0.05ms]
+(pass) a look that throws shows a reason in the footer, never silence [0.23ms]
+
+test/roles.test.mjs:
+(pass) a role is called by its name, else its built-in word, else its key [0.06ms]
+(pass) the Agents pane and the tree name each agent's role as the person did [0.27ms]
+(pass) a task's line says the reviewer's own name only when it has one [0.12ms]
+(pass) the coordinator's row and Jump carry its name [1.01ms]
+(pass) the chat header falls back to the coordinator's name [0.02ms]
+(pass) a failed review says the reviewer's own name [0.09ms]
+(pass) a typed name is trimmed and cut like the service does [0.03ms]
+(pass) the settings page lists each role's name, with the built-in word as its fallback [0.24ms]
+(pass) only the coordinator's own starting keys ask for a restart [0.04ms]
+
+test/composer.test.mjs:
+(pass) Enter sends, Shift+Enter is left to the text area, Alt+Enter is a new line [0.05ms]
+(pass) a real Enter in the composer sends the words and the text area never sees it [12.59ms]
+(pass) Shift+Enter is not taken: the text area makes the new line, nothing is sent [0.11ms]
+(pass) Alt+Enter puts a line break in the box and sends nothing [0.08ms]
+(pass) Enter on an empty box sends nothing and makes no new line [11.13ms]
+(pass) the Enter key and the chord's submit within a blink send once [11.09ms]
+(pass) the send button sends the current text; empty it sends nothing; a refusal keeps the words [22.37ms]
+(pass) the composer draws the + the model button and the send button inside one box [0.39ms]
+(pass) the model button reads like Shepherdr's: Opus 5.5 · Medium [0.05ms]
+(pass) choosing a model writes the Settings keys once, restarts the coordinator and keeps the history [27.14ms]
+(pass) another window's answer, and a refused write, change nothing for good [21.16ms]
+(pass) attached files go with the message by path, are kept when it is refused, and clear when it is sent [0.50ms]
+(pass) the file picker answers the chosen paths, and none when cancelled [0.26ms]
+(pass) Esc stops a working agent while the box is empty; Stop asks the service [22.04ms]
+(pass) the mic is offered only where Shepherdr's recorder and bun are [1.41ms]
+(pass) a dictation records, then its words come back to put in the box [0.59ms]
+(pass) a restart the person asked for keeps the old messages and says why [0.05ms]
+(pass) the restart's new chat pane takes the conversation over, once, for the same folder [0.12ms]
+
+test/look.test.mjs:
+(pass) every icon the window draws is shipped [0.20ms]
+(pass) the pie fills in steps of five, at least five, half when there is no progress [0.03ms]
+(pass) a task's progress is the percent its last status reported [0.02ms]
+(pass) a toast's time stops while the pointer is on it, and none loses any [0.08ms]
+(pass) a dismissed toast under the pointer lets time go on [0.05ms]
+(pass) a pane header writes the home folder as ~ [0.05ms]
+(pass) toasts are one card: no frame or background each, a divider between them [0.31ms]
+
+test/asks.test.mjs:
+(pass) an open ask is one card: its question, its choices and its task [0.07ms]
+(pass) a card's footer says what happens if nobody answers [0.07ms]
+(pass) a permission with choices is answered by a button, not by words [0.04ms]
+(pass) an escalation is a card with its words and its default action [0.06ms]
+(pass) a spent review's card shows the verb a person still has to run [0.05ms]
+(pass) the verb is only a command, never a choice or an ask id [0.04ms]
+(pass) a verb the service has an action for gets a button [0.05ms]
+(pass) the panel draws the asks that can be answered, then the escalations [0.07ms]
+(pass) an escalation naming an open ask is the same card as that ask [0.06ms]
+(pass) an ask is answered with its task, its id and the person's words [0.04ms]
+(pass) a card about no task names the run instead of a blank reference [0.02ms]
+(pass) a lost brief's card has a Resend button that posts task.resend_brief [0.04ms]
+
+test/tasks-pane.test.mjs:
+(pass) the pane's body: cached list, loading only where tasks exist, empty at once, neutral while unknown [0.16ms]
+(pass) a pane switched to another repository shows that repository's last board at once [0.32ms]
+(pass) a read that finishes after a switch is kept for its own repository, not drawn in the shown one [0.04ms]
+(pass) a pressed verb shows at once in the pane, a second press is ignored, and it is confirmed after the answer [1.07ms]
+(pass) a refused verb rolls the row back and says why in one line [0.21ms]
+
+test/chat.test.mjs:
+(pass) a page is appended to what the panel holds [0.06ms]
+(pass) a new session starts the panel over rather than gluing two conversations [0.03ms]
+(pass) what the service told the agent stays news, and is not the person's side [0.02ms]
+(pass) a message keeps its shape even when the service left a field out [0.02ms]
+(pass) the panel keeps a bounded tail of a long conversation [0.26ms]
+(pass) latest is the tail a short panel draws, oldest first [0.05ms]
+(pass) a tool call reads as one line, and the person's side is the right one [0.03ms]
+(pass) a long bubble is folded at a row length [0.03ms]
+(pass) an empty chat says what it is waiting for, and the service's note wins [0.03ms]
+(pass) only words worth sending are sent, and they name a space [0.02ms]
+(pass) the header names the program and the session, and the time is a clock [2.37ms]
+(pass) the next request asks from the cursor the last page answered with [0.03ms]
+(pass) opening a card's answer box focuses it, and a refresh leaves it there [1.15ms]
+(pass) a submit types the composer's words into the coordinator and clears it [0.12ms]
+(pass) an empty composer sends nothing at all [0.04ms]
+(pass) a refused turn keeps the words and says why [0.09ms]
+(pass) a page is read from the cursor, and a page with more is followed at once [0.08ms]
+(pass) a service that is not there says so in the panel rather than throwing [0.05ms]
+(pass) a reply folds past FOLD_TALL lines to its first FOLD, and opens whole [0.17ms]
+(pass) markup in what an agent wrote is text, in code and out of it [0.13ms]
+(pass) only web links are opened from a bubble [0.04ms]
+(pass) the timeline puts waiting cards among the messages by time, and the rest last [0.15ms]
+(pass) a card belongs to its task's chat, and the run's to the coordinator's [0.04ms]
+(pass) every card the Asks panel drew is in exactly one chat [0.06ms]
+(pass) the space a chat shows is the thread's task, a pane's own, or the coordinator's [0.03ms]
+(pass) a tab's chat space is its task, the coordinator, or none [0.07ms]
+(pass) the switch is drawn on agent panes of a chat space, and on a chat with a live agent [0.12ms]
+(pass) the thread's chat reads the task it is shown and starts over for another [0.17ms]
+(pass) a card is answered through the service, once, and a refusal stays on the card [0.29ms]
+(pass) a message's key is stable, so its fold state survives a page [0.02ms]
+(pass) the thread opens on its chat; the Asks panel and the sidebar's coordinator are gone [0.10ms]
+(pass) SHPR-69: the coordinator's chat says plainly when shprd's coordinator is not running [0.06ms]
+(pass) a run of tool calls is one folded row, and a reply's words end the run [0.31ms]
+(pass) an shprd agent's header says whose it is [0.03ms]
+(pass) the person's typed line breaks stay breaks [0.01ms]
+(pass) an unread conversation says Loading only at first; later it is the empty chat (SHPR-80) [0.13ms]
+(pass) a read given up on changes nothing if it finishes late (SHPR-80) [21.15ms]
+
+test/settings.test.mjs:
+(pass) the roles are the ones the settings resolve, in their order [0.33ms]
+(pass) a role this build does not ship reads as the person's own [0.41ms]
+(pass) one settings file with no order still shows the roles this build ships [0.06ms]
+(pass) every value says the layer that answered it, in the service's words [0.19ms]
+(pass) a program is shown by its name, and written by its id [0.13ms]
+(pass) the program picker offers every program the harness table defines [0.04ms]
+(pass) a model picker offers the catalog's models after the program's default [0.07ms]
+(pass) a program whose catalog named no model still offers the default, and says why [0.06ms]
+(pass) an effort picker offers the model's own levels, and nothing where it takes none [0.16ms]
+(pass) a model that wants its provider says so [0.06ms]
+(pass) a role is added and removed through the order alone [0.09ms]
+(pass) a refusal is the service's sentence, kept word for word [0.07ms]
+(pass) a reviewer's list rules out the worker's vendor, so the refusal cannot be clicked into [0.29ms]
+(pass) a reviewer cannot pick a Pi model of the worker's vendor [0.75ms]
+(pass) a refusal is drawn in plain words, with no key path or backticks [0.12ms]
+(pass) a write says what it did [0.03ms]
+(pass) the settings' own problems and skipped checks are shown, not hidden [0.04ms]
+(pass) the template list says which prompts are the person's own [0.08ms]
+(pass) an edited or unreadable template is marked as such [0.04ms]
+(pass) the editor says what saving and resetting do [0.05ms]
+(pass) a role key is read back as its role and field [0.02ms]
+(pass) the layout no longer carries a settings block for the panel to show [0.06ms]
+(pass) the pages are the four shprd has, in the window's order, each with an icon [0.08ms]
+(pass) a page a repository can own takes the level switch; the others say they cannot [0.03ms]
+(pass) the level switch says what a write to each layer does [0.08ms]
+(pass) the Tasks page shows the workflow keys the settings API exposes [0.26ms]
+(pass) a workflow key the service did not answer is a row, not a hole [0.06ms]
+(pass) a stepper never proposes a value the service would refuse [0.10ms]
+(pass) the window opens on the page it was asked for, and keeps to the ones it has [0.51ms]
+(pass) Esc closes what is open inside the window before it closes the window [0.63ms]
+(pass) a write goes to the layer the level switch names [1.38ms]
+(pass) a refused write keeps the service's sentence, and writes nothing twice [2.06ms]
+(pass) opening the window again keeps the one copy that is up [0.08ms]
+(pass) a window that stopped saying it is open is believed for twenty seconds only [0.03ms]
+(pass) closing the window gives its place back at once [0.16ms]
+(pass) Esc on the Prompts page saves the words typed since the last pause [1.43ms]
+(pass) Back saves the words and keeps the editor closed as the write lands [1.25ms]
+(pass) a prompt the service refused keeps the editor, and the next Esc closes the window [1.31ms]
+(pass) closing the window stores the last words before it goes [1.25ms]
+(pass) a window whose service is down still renews its place [1.24ms]
+(pass) a note typed while the window has no client is written once one answers [1.78ms]
+(pass) a note typed while another write is in flight is queued, not dropped [1.35ms]
+(pass) a re-read never replaces words the service does not have yet [1.36ms]
+(pass) Esc on the Prompts page says so when the words could not be stored [1.26ms]
+(pass) a write whose service is back writes the queue before the page is redrawn [1.30ms]
+(pass) a second change is queued behind the first instead of being dropped [1.22ms]
+(pass) a restarted service does not throw the editor's words away [1.29ms]
+(pass) a restarted service closes an editor with nothing typed in it [1.17ms]
+(pass) a refusal is the person's to read, not retried behind their back [1.24ms]
+(pass) review rounds may be Off, and Off hides what a review must fix [0.17ms]
+(pass) archive is a row of presets, and a value set by hand is still a segment [0.09ms]
+(pass) the two notes are rows now that a brief carries them [0.06ms]
+(pass) a branch pattern git would refuse is refused with a sentence [0.22ms]
+(pass) a branch box never writes a name git would refuse [1.35ms]
+(pass) Fast and Permissions are offered where the program has them [0.09ms]
+(pass) no Backup agent: its role is gone, and workers and reviewers hold a chain of lines [0.08ms]
+(pass) a role's fast, permission and lines writes go to its own keys [1.28ms]
+(pass) the remote page's words: a masked link, ages, devices and the tunnel [0.23ms]
+(pass) the Remote page reads the tunnel and the devices, and says when a route is missing [1.38ms]
+(pass) Start and Stop go through the service, and its refusal is shown word for word [1.38ms]
+(pass) Revoke ends one device and Log out all ends every one [1.36ms]
+(pass) every page, Remote included, draws without throwing [9.20ms]
+
+test/mods.test.mjs:
+(pass) a space name says whether shprd owns it [0.06ms]
+(pass) the spaces shprd owns are sorted into the coordinator's and each task's [0.03ms]
+(pass) every task gets one row, in the order the board groups them [0.27ms]
+(pass) a task row carries the word, the colour and the reason the service gave it [0.11ms]
+(pass) a task with no space is a row that cannot be clicked, and says why [0.06ms]
+(pass) the whole board is still read when the window has no spaces yet [0.04ms]
+(pass) no run is a board with a hint, not an empty sidebar [0.03ms]
+(pass) the dropped tasks a run keeps are history, not rows [0.02ms]
+(pass) a row's badge counts what needs the person and what is ready [0.09ms]
+(pass) the rail is read from the sidebar's width, as Shepherdr reads it [0.05ms]
+(pass) a space's row menu is Open task then Close…, and only what a space can do [0.14ms]
+(pass) closing a space asks in Shepherdr's words [0.04ms]
+(pass) task looks are the tokens' words [0.03ms]
+(pass) a needs-you row says the card's words when the service has a card [0.03ms]
+(pass) the coordinator row says the run's state, finished or not [0.02ms]
+(pass) a tab's title names its agent, its task and its role [0.06ms]
+(pass) a pill says the host's state when it has one, else the task's own word [0.26ms]
+(pass) a tab whose title is not shprd's is still a pill, with no claims [0.04ms]
+(pass) a space with no tabs draws no pills [0.04ms]
+(pass) the most urgent status in a tab is the one its pill shows [0.04ms]
+(pass) a pill is called by its name, or by what runs in it when it has none [0.03ms]
+(pass) a pill wears the program in its tab and counts what it needs [0.09ms]
+(pass) the side panel's buttons carry the counts of the stacks they open [0.07ms]
+(pass) the pills' counts are the bar's summary [0.03ms]
+(pass) the news is the events a person acts on, each with the seq that made it [0.13ms]
+(pass) a card about a task the board calls finished is not news [0.04ms]
+(pass) a batch of events nobody acts on says nothing [0.02ms]
+(pass) a failed pass is a toast, filed under the pass's own time [0.10ms]
+(pass) a land failure is one plain sentence in the toast and the status bar [0.07ms]
+(pass) one reading of the service is the news plus the pass [0.03ms]
+(pass) an event told twice is one toast [0.09ms]
+(pass) the list keeps the newest few, and forgets what is old [0.06ms]
+(pass) three toasts show at once, and an expired one goes by itself [0.07ms]
+(pass) a dismissed toast never comes back [0.04ms]
+(pass) a level's colour is the one the tokens give it [0.02ms]
+(pass) a body is cut at three lines' worth of characters [0.02ms]
+(pass) every word of the board is counted, in the panel's order [0.09ms]
+(pass) the bar names the run, its failure and the service's absence [0.07ms]
+(pass) a time in the bar is words, not a date [0.04ms]
+(pass) a stuck task can be dropped from its row, and a dropped one is not listed [0.30ms]
+(pass) a task in review says so, not its worker's last progress line [0.04ms]
+(pass) the add form takes an After list and names an id the board does not hold [0.12ms]
+(pass) a row's button follows the word the row shows, for every status and word (SHPR-78) [0.15ms]
+(pass) a row offers the one verb the engine has for its state [0.06ms]
+(pass) a task that may start is the one the rules would accept a start for [0.02ms]
+(pass) the add-task form says what is missing before the press [0.06ms]
+(pass) a panel finds the task its shared selection names, or nothing [0.03ms]
+(pass) the card shows the task the panel picked [0.06ms]
+(pass) a long summary keeps its first sentence and folds the rest away [0.11ms]
+(pass) the changes are counted once, from the branch git read [0.07ms]
+(pass) the newest commits are listed and the rest are counted [0.04ms]
+(pass) the thread's switch is Chat, Terminal, then Pull request and Artifacts once it has them [0.16ms]
+(pass) the Terminal view is the agent's own terminal, and a read-only stream only when it cannot be shown [0.13ms]
+(pass) the head's Review is the Ready row's Review, and its status line is the agent's [0.06ms]
+(pass) the changed files are the biggest first, and a binary file says so [0.09ms]
+(pass) the checks are the ones the hand-in recorded, with their exit codes [0.09ms]
+(pass) the proof the hand-in named is listed by file name and path [0.04ms]
+(pass) the reviewer's findings are worst first, each with its wave [0.09ms]
+(pass) the review line names the reviewer and whether it was independent [0.07ms]
+(pass) the card offers Accept only where a merge policy asks [0.10ms]
+(pass) Review opens the Accept card as a 640 by 640 modal dialog for that task [0.05ms]
+(pass) a task that landed through a forge shows its number, state and link [0.07ms]
+(pass) a local landing and a task that never landed say so, and open nothing [0.03ms]
+(pass) the pull request bar says how big the change is and which branches it joins [0.05ms]
+(pass) the search finds a task by id, title, status word or PR number, and by nothing else [0.06ms]
+(pass) typing an id leaves only that task's row [0.09ms]
+(pass) For you comes first: needs you, then Ready; Done is a line until opened [0.10ms]
+(pass) an opened Done shows five rows and 'Show N more', whole once asked [0.11ms]
+(pass) a folded heading is reported shut, except while searching [0.06ms]
+(pass) a search finds Done tasks too, all shown [0.11ms]
+(pass) a status filter is that word's tasks, flat; the chips count what is there [0.10ms]
+(pass) minutes left show only when the service reports them [0.03ms]
+(pass) the panel button that is lit is the one the layout shows, not one the bar remembers [0.08ms]
+(pass) each space gets its own panel back when it is shown again [0.04ms]
+(pass) the add-task form takes the ids a task waits for, and refuses one nobody has [0.06ms]
+(pass) Group by Status gives every word its own heading, Needs you and Ready included [0.04ms]
+(pass) Group by Space gives each space its own heading, tasks in status order [0.10ms]
+(pass) There is no pinned group: a row has no star and listView takes no pins (SHPR-78) [0.05ms]
+(pass) Done is a grey tick, and only Ready is green [0.01ms]
+(pass) the Tasks popups list their rows and mark the one in force [0.07ms]
+(pass) a Waiting line from the engine keeps its path and task id on the row [0.02ms]
+(pass) an open task untouched for hours is old; a fresh one, a working one and a done one are not [0.05ms]
+(pass) a queued task waiting on an old task is old with it, however new [0.03ms]
+(pass) old tasks fold into one Older group at the bottom; new ones are on top, newest first [0.12ms]
+(pass) an old needs-you task does not light the Needs you badge [0.01ms]
+(pass) SHPR-69: another product's Assistant tab is not a pill in shprd's tab bar [0.06ms]
+(pass) strayTab moves a shprd space off Shepherdr's Assistant, and only there (SHPR-79) [0.08ms]
+(pass) seenWith notes shprd's spaces so Shepherdr never adds an Assistant to them (SHPR-79) [0.05ms]
+(pass) the chat's column and bubbles follow Shepherdr's at every pane width (SHPR-79) [0.03ms]
+(pass) a done task's second line says it is done, never a stale agent line; the bar follows the board (SHPR-79) [0.07ms]
+(pass) a bubble gets a definite width from its longest line, within the column (SHPR-79) [0.05ms]
+
+test/models.test.mjs:
+(pass) every clickable control of every page takes its click (the cause of the dead dropdowns) [6.98ms]
+(pass) a click on a role's model button opens the menu popup, and nothing else closes it [1.54ms]
+(pass) the model menu's tabs are the installed programs only [0.10ms]
+(pass) a pick writes program, model and level in order, and none of what did not change [0.16ms]
+(pass) the model menu answers each change through the shared key [0.91ms]
+(pass) inline rename: click opens the field, Enter saves, Esc cancels, blank is the built-in name [1.45ms]
+(pass) the restart notice shows only after the coordinator's own choice changed, while one runs [3.95ms]
+(pass) a refused later write puts back what the choice already wrote [1.42ms]
+(pass) an undo the service refuses is said, not swallowed [1.36ms]
+(pass) a typed word that is already a model's name is not offered as a new id [0.05ms]
+(pass) a refused write drops the rest of its choice and closes the popup [1.26ms]
+(pass) a stored line reads and writes back as the same line [0.09ms]
+(pass) the worker's lines are its own pick, then agents; the old fallback reads as lines too [0.25ms]
+(pass) a line label leads with the program, then the model and the level [0.05ms]
+(pass) adding a line writes agents with the next free program; removing one writes it back [0.27ms]
+(pass) a reviewer holds lines like a worker: its old fallback reads as line 2 and migrates on a write [0.07ms]
+(pass) the Worker (s) row shows a picker per line, a + while a program is free, and × when there are two [2.99ms]
+(pass) every role ends at one right edge: a lone line's ⌄ takes the × column, and + sits in it [3.33ms]
+(pass) two or more lines draw a numbered gutter; a worker with three, a reviewer with two [1.52ms]
+(pass) the + adds a line, the line's menu opens with the program taken, a pick replaces it, × removes it [3.31ms]
+(pass) a reviewer's line writes roles.reviewer.agents like a worker's [1.57ms]
+(pass) the program selector is a dropdown listing every detected program, not tabs [0.94ms]
+(pass) a light menu (the reviewer's fallback) has None and no Reasoning, Fast or Permissions, and closes on a pick [0.23ms]
+(pass) changing a program writes the old model, level and mode out before the new program in [0.03ms]
+(pass) a program that needs a provider is added with a model of a vendor the other role does not run [0.14ms]
+
+test/optimistic.test.mjs:
+(pass) Accept moves the row to Merging at once and starts the task that waited on it [0.24ms]
+(pass) the Graph shows the pending word, and every pane that reads the shared list sees the same [0.23ms]
+(pass) Review says Reviewing until the card closes [0.09ms]
+(pass) Stop shows Stopping…; Drop removes the row; an answered question's card goes [0.10ms]
+(pass) a refresh that still shows the old state does not undo it; one that shows the outcome wins [0.06ms]
+(pass) double presses are ignored, while a different verb on a confirmed task is a new decision [0.04ms]
+(pass) press: the effect shows before the service answers, a refusal rolls back with one plain line [0.18ms]
+(pass) a merge the service cannot do (a failed land after the confirm) rolls an Accept back with the reason [0.10ms]
+(pass) ops expire by their timestamps, and another repository's ops are not applied [0.04ms]
+(pass) an Accept whose merge the engine could not do shows the task as it is, with the engine's words [0.04ms]
+(pass) a newer action on a confirmed task wins over the older one [0.04ms]
+(pass) a confirmed answer is not sent twice while its op lives [0.02ms]
+(pass) SHPR-83: Accept pressed in the card a Review opened is not ignored (the Review op ends, the Accept starts) [0.12ms]
+(pass) SHPR-83: a queued task held back for a shared file says so on the row and in the Graph [0.05ms]
+(pass) SHPR-83: a hand-in whose review kickoff was not delivered has a Retry review button, not Review or Accept [0.09ms]
+
+test/newspace.test.mjs:
+(pass) the field's text names a folder only when it is a path [0.05ms]
+(pass) a folder outside git is offered a repo, home never [0.02ms]
+(pass) the space is named for its folder and made with space.new [0.03ms]
+(pass) New task from anywhere shares a request and selects the list: it never calls the list's own command [0.05ms]
+(pass) New space opens its dialog [0.02ms]
+(pass) the new space opens on the chat view, not a shell (SHPR-75) [0.05ms]
+
+test/switch.test.mjs:
+(pass) an agent pane's Chat segment swaps its terminal for the chat [0.55ms]
+(pass) a chat pane's Terminal segment brings the terminal back, even right after the swap [0.24ms]
+(pass) the thread's Terminal view re-focuses the task's agent when another agent was focused since [0.18ms]
+(pass) the thread's Chat and Terminal segments select their stack children, both ways, repeatedly [0.54ms]
+
+test/menu.test.mjs:
+(pass) the + menu offers Terminal, New space, New task, then the roster [0.11ms]
+(pass) a program this machine lacks is offered dimmed and says so [0.04ms]
+(pass) at most two programs that are not installed are offered, after the rest [0.03ms]
+(pass) the roster's absence or failure is a line, not an empty menu [0.02ms]
+(pass) a tab's menu is Rename, Restart when it can, then Close tab [0.06ms]
+(pass) only a tab shprd titled, with an agent in it, can be restarted [0.04ms]
+(pass) the app's menu is New space…, New task… and Keybinds, with no theme rows [0.02ms]
+(pass) a pane's menu splits, zooms, closes, and sends back only a kept sub-agent [0.05ms]
+(pass) a menu's height is its rows' own, so a popup is never taller than its content [0.04ms]
+(pass) ↑ and ↓ step over headings, notes, separators and dimmed rows, and wrap [0.09ms]
+(pass) the coordinator's tab menu adds Edit instructions… and Switch agent, and no Rename [0.05ms]
+(pass) a tab shprd titled is not renamed, so shprd can still find it [0.01ms]
+(pass) Switch agent lists the installed programs with Back first and the current one marked [0.07ms]
+
+test/tree.test.mjs:
+(pass) age is the shortest honest words [0.02ms]
+(pass) an agent's line says its state and how long, and 'ago' once it is done [0.02ms]
+(pass) the tree has a space per repo and only its live tasks, needs you first [0.27ms]
+(pass) a queued task with an agent on it is in the tree; one without is not [0.13ms]
+(pass) a task row's second line says who is on it and where it stands [0.09ms]
+(pass) a queued task whose agent already works reads working, not its raw status [0.06ms]
+(pass) a running review shows as the reviewer's line [0.10ms]
+(pass) spaces Herdr made show as plain rows; the served repo's own space does not repeat [0.11ms]
+(pass) the served space is Herdr's real one, and only it is left out of the plain rows [0.04ms]
+(pass) plainSpaces hides exactly the served space's id [0.02ms]
+(pass) the Tasks list's scope keeps one space's tasks, and all when none is picked [0.07ms]
+(pass) a Herdr space in the served folder shows the served space's tasks, under its name [0.12ms]
+(pass) a finished agent stays in the Agents pane 30 minutes; a coordinator stays [0.09ms]
+(pass) a state with no spaces still draws one, from its run [0.04ms]
+(pass) agents: needs you first, with role, program and state [0.04ms]
+(pass) grouped agents put a heading per space before its rows [0.05ms]
+(pass) the graph groups by phase, hangs a task under its last dependency and says what it waits for [0.10ms]
+(pass) the Graph is a view of the Tasks panel: the layout holds no graph block, terminal block or graph mod [0.10ms]
+(pass) the order is the window's own, whichever space is served or picked (SHPR-75) [0.07ms]
+(pass) every row's subtitle is its folder; only an unusual branch is added (SHPR-75) [0.03ms]
+(pass) a pick of a closed Herdr space is dropped, never shown as a raw id [0.04ms]
+(pass) the pick follows the window's space: a dead pick moves to it, so does a pick when the window moves on [0.04ms]
+(pass) a served space whose Herdr space was closed binds to the same folder's new space: one row, not two [0.05ms]
+
+test/lib.test.mjs:
+(pass) the state directory follows XDG, and falls back to the home [0.05ms]
+(pass) the three files live under the state directory [0.02ms]
+(pass) service.json is accepted only with a usable port and an id [0.13ms]
+(pass) a token is trimmed, and an empty one is no token [0.08ms]
+(pass) the handshake refuses a service whose id is not the record's [0.17ms]
+(pass) a service that is not there answers nothing, and is not an error [0.03ms]
+(pass) discovery answers the address, the token and the health [0.07ms]
+(pass) a record with no token beside it is no service [0.03ms]
+(pass) discovery is probed from the home when no directory is given [0.06ms]
+(pass) a mod with no environment asks the shell where the state directory is [0.10ms]
+(pass) the state directory probe reads the shell's last line [0.07ms]
+(pass) every call carries the token, and a write carries x-shprd too [0.14ms]
+(pass) a shown repository with no running coordinator asks the service to start one, at most once in a while [10.89ms]
+(pass) starting an agent is one write to the service, with the program in it [0.10ms]
+(pass) a refusal is a ServiceError carrying the service's words [0.52ms]
+(pass) a read that runs out of time is no answer, and a strict read says so [21.39ms]
+(pass) the long poll names the sequence and the wait it wants [0.23ms]
+(pass) a 204 from the long poll is an empty answer, not a failure [0.03ms]
+(pass) a refusal body without words still says something [0.04ms]
+(pass) the change file is parsed, and a partial one is not a change [0.28ms]
+(pass) a batch matters unless it names only other files [0.08ms]
+(pass) the change file is read through the injected reader [0.06ms]
+(pass) following reports the first reading and then only real changes [31.16ms]
+(pass) a watcher that rejects ends the loop instead of the panel [0.12ms]
+(pass) a busy client never has more than one sleep outstanding [705.66ms]
+(pass) a call that never answers still runs out [502.85ms]
+(pass) singleFlight never overlaps and folds callers into one rerun [42.98ms]
+(pass) attach looks once more before believing a null [0.39ms]
+(pass) one record finds the one service whatever space the window shows [0.16ms]
+(pass) a repository's calls name it, and a global route does not [0.22ms]
+(pass) switching to another space re-points the client: no discovery, no health check [0.13ms]
+(pass) a restarted service is found again and every repository registered again [0.10ms]
+(pass) a panel without a service says why in one plain sentence, never a command [0.06ms]
+(pass) a ready task's needs-you words point at the Tasks pane, never a command or the forge [0.12ms]
+(pass) the chevron toggles a space whether or not it is the picked one [0.06ms]
+(pass) clicking the name opens a shut space and shuts the open picked one [0.03ms]
+
+test/taskview.test.mjs:
+(pass) a screen becomes lines: trailing blanks dropped, tabs widened, only the tail kept [0.17ms]
+(pass) artifacts are the hand-ins and reviews, newest attempt first [0.15ms]
+
+test/restart.test.mjs:
+(pass) attach makes a client from the service on disk, and keeps it while it is the same one [0.25ms]
+(pass) attach notices a restarted service by the id in the record, even on the same port [0.09ms]
+(pass) attach answers no client when the service is gone, and says it restarted if it had one [0.07ms]
+(pass) attach refuses a record whose id nothing answers, and a token that is not there [0.06ms]
+(pass) the board read throws when nothing answers, and a refusal keeps its words [0.15ms]
+(pass) a service is alive only while something answers its own id [0.09ms]
+(pass) a panel repaints the whole board after the service restarts [0.76ms]
+(pass) a panel whose service stopped says so instead of keeping the old board [0.21ms]
+(pass) a board read that runs out of time is a failure, not the board the panel had [0.19ms]
+(pass) a panel forgets what a verb said about the run that went away [0.12ms]
+(pass) a discovery that has not happened yet reads the board in one go [0.08ms]
+(pass) noAnswer carries no status, so a panel can tell a dead service from a refusal [0.02ms]
+
+test/jump.test.mjs:
+(pass) with nothing typed the coordinator and the spaces come first, then every task [0.20ms]
+(pass) a space shprd did not make is a space row of its own [0.06ms]
+(pass) typing a task id finds it, and Enter opens its thread [0.06ms]
+(pass) a task with no space of its own opens its thread in the Tasks panel [0.03ms]
+(pass) every word typed must be in the item, in any case and order [0.05ms]
+(pass) a group shows eight rows, then Show N more, which unfolds it [0.09ms]
+(pass) a dropped task is found only by typing [0.03ms]
+(pass) a head is never a target
+(pass) every binding in words, grouped, the shown layout's key replacing the global one [0.40ms]
+(pass) the keys read as people read them, on macOS too [0.03ms]
+(pass) typing filters the rows by group, name or keys [0.04ms]
+
+ 406 pass
+ 0 fail
+Ran 406 tests across 19 files. [1.66s]
+shared modules are in date
+== gate-env
+ok: gate-env writes a private home and refuses the real one
+== isolate
+ok: isolate strips every host variable and keeps a later assignment
+== client unit tests
+   (bun)
+bun test v1.4.4 (38afee6c8)
+(tail only; the exit code of this second run is not captured)
