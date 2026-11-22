@@ -3052,8 +3052,17 @@ fn remember_window_tabs(mux: &dyn Host, env: &SpawnEnv<'_>, prepared: &PreparedS
     if prepared.created || (shells.len() == 1 && idle) {
         ids.extend(shells.iter().map(|tab| tab.id.as_str().to_owned()));
     }
+    // An Assistant tab another product's agent chats in is that product's, used
+    // or not: it is never listed, so it is never closed. (An Assistant tab no
+    // agent claims holds nothing and is the empty one the window made.)
+    let claimed: Vec<String> = mux
+        .foreign_agent_tabs()
+        .iter()
+        .map(|tab| bare_id(tab.as_str()))
+        .collect();
     for (id, name) in named {
         if name.trim().eq_ignore_ascii_case(ASSISTANT_TITLE)
+            && !claimed.contains(&bare_id(id.as_str()))
             && !is_coordinator_tab(id.as_str())
             && id.as_str() != OLD_COORDINATOR_TAB
             && !coordinators.contains(&id)
@@ -4628,6 +4637,46 @@ project_dirs = []
             .unwrap_or_else(|err| panic!("{err}"));
         assert_eq!(tabs.len(), 1, "only the coordinator is left: {tabs:?}");
         assert_eq!(tabs[0].title, ASSISTANT_TITLE);
+    }
+
+    /// SHPR-88: a Shepherdr space adopted for the first time (not made by shprd,
+    /// shown by the window under its folder's name) keeps the Assistant tab
+    /// Shepherdr's agent chats in, with or without a terminal drawn in it; the
+    /// empty Assistant tab no agent claims is still the window's and goes.
+    #[test]
+    fn an_adopted_space_keeps_the_assistant_tab_another_agent_claims() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.spawn_env(&ctx);
+        let mux = FakeMux::default().with_ready_agent();
+        let mut prepared =
+            ensure_repo_space(&mux, scratch.root()).unwrap_or_else(|err| panic!("{err}"));
+        prepared.created = false;
+        prepared.fresh = true;
+        let used = mux.with_mod_tab(&prepared.space.id, "tb-used", "Assistant");
+        let empty = mux.with_mod_tab(&prepared.space.id, "tb-empty", "Assistant");
+        mux.mark_foreign_tab(&used);
+        let _ = mux.take_calls();
+
+        ensure_coordinator(&mux, &env, &prepared, |pending| pending.deliver(&mux))
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        let closed: Vec<_> = mux
+            .calls()
+            .into_iter()
+            .filter_map(|call| match call {
+                Call::CloseTab(tab) => Some(tab),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !closed.contains(&used),
+            "the claimed tab is left alone: {closed:?}"
+        );
+        assert!(
+            closed.contains(&empty),
+            "the empty one is the window's: {closed:?}"
+        );
     }
 
     /// A space nobody just made or adopted is never tidied: its tabs are the

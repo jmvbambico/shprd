@@ -17,6 +17,8 @@ import {
   Client,
   attach,
   forgetRegistered,
+  forgetWoken,
+  WAKE_EVERY_MS,
   pendingDeadlines,
   singleFlight,
   ServiceError,
@@ -276,6 +278,34 @@ test("every call carries the token, and a write carries x-shprd too", async () =
     task: "T1",
     msg: "working",
   });
+});
+
+test("a shown repository with no running coordinator asks the service to start one, at most once in a while", async () => {
+  forgetWoken();
+  let live = [];
+  const calls = [];
+  const doFetch = async (url, init = {}) => {
+    calls.push(`${init.method ?? "GET"} ${new URL(url).pathname}`);
+    const path = new URL(url).pathname;
+    const body = path === "/api/state" ? { seq: 1, tasks: [], live_agents: live } : { id: "r1", root: "/p", dir: "/d" };
+    return { ok: true, status: 200, text: async () => JSON.stringify(body), json: async () => body };
+  };
+  const client = new Client(
+    { base: "http://127.0.0.1:7788", dir: "/state/shprd", record: { port: 7788, id: "abc" }, token: "t", folder: "/p", repoId: "r1" },
+    { fetch: doFetch },
+  );
+  await client.state();
+  await client.state();
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(calls.filter((c) => c === "POST /api/repos").length, 1, `${calls}`);
+  // A running coordinator is left alone.
+  forgetWoken();
+  calls.length = 0;
+  live = [{ role: "coordinator", program: "claude" }];
+  await client.state();
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(calls.filter((c) => c === "POST /api/repos").length, 0, `${calls}`);
+  assert.ok(WAKE_EVERY_MS >= 10_000);
 });
 
 test("starting an agent is one write to the service, with the program in it", async () => {

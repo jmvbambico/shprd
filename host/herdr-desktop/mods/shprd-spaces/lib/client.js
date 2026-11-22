@@ -697,6 +697,17 @@ const registered = new Map();
  * restarts, its `id` changes and every call fails at the gate: the mod drops the
  * client and calls `discover()` again rather than holding a dead port.
  */
+/** How often a repository with no running coordinator is asked to start one, at most. */
+export const WAKE_EVERY_MS = 20_000;
+
+/** When each repository (by service and id) was last asked, in epoch milliseconds. */
+const woken = new Map();
+
+/** Forgets when repositories were asked to start their coordinator (a test's). */
+export function forgetWoken() {
+  woken.clear();
+}
+
 export class Client {
   /**
    * @param {{base: string, dir: string, record: object, token: string, folder?: string}} found
@@ -827,8 +838,29 @@ export class Client {
    * [`noAnswer`], never `null` left to be mistaken for "nothing new" (bug 5 of
    * the M10 gate: a panel kept painting a service that had restarted).
    */
-  state() {
-    return this.call("GET", "/api/state", { strict: true });
+  async state() {
+    const board = await this.call("GET", "/api/state", { strict: true });
+    this.wakeCoordinator(board);
+    return board;
+  }
+
+  /**
+   * A shown repository whose service lists no running coordinator is told it is
+   * shown again (`POST /api/repos`, which prepares the space and starts the
+   * coordinator and does nothing when one runs). The first look at a space does
+   * this once; a coordinator that ended afterwards (stopped by hand, or a space
+   * the window held under another layout) is the case this covers, so a space
+   * never stays without one. At most once per [`WAKE_EVERY_MS`] per repository,
+   * and never awaited: the board does not wait for it.
+   */
+  wakeCoordinator(board) {
+    if (!this.folder || !Array.isArray(board?.live_agents)) return;
+    if (board.live_agents.some((agent) => agent.role === "coordinator" && !agent.ended_ms)) return;
+    const key = `${this.base}|${this.repoId ?? this.folder}`;
+    const now = Date.now();
+    if (now - (woken.get(key) ?? 0) < WAKE_EVERY_MS) return;
+    woken.set(key, now);
+    Promise.resolve(this.register(this.folder)).catch(() => {});
   }
 
   /**

@@ -133,6 +133,14 @@ pub trait Host: Send + Sync {
         false
     }
 
+    /// The tabs another product's agent claims as its own (Shepherdr's
+    /// Assistant names the tab it chats in), by tab id. Such a tab holds that
+    /// agent's conversation even when no terminal is drawn in it, so shprd never
+    /// closes it as an empty one. A host that cannot tell answers none.
+    fn foreign_agent_tabs(&self) -> Vec<TabId> {
+        Vec::new()
+    }
+
     /// Every space the host has, in the host's display order.
     ///
     /// Only where a name cannot be guessed: a refusal is worth reading when it
@@ -566,6 +574,10 @@ macro_rules! forward_a_wrapper {
 
                 fn is_foreign_agent(&self, pane: &PaneId) -> bool {
                     (**self).is_foreign_agent(pane)
+                }
+
+                fn foreign_agent_tabs(&self) -> Vec<TabId> {
+                    (**self).foreign_agent_tabs()
                 }
 
                 fn doc(&self, space: &SpaceId, name: &str, body: &str) -> Result<String> {

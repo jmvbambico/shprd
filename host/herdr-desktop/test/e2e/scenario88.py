@@ -62,6 +62,13 @@ def main():
     for d in [env.app, env.shprd_home, *env.dirs.values()]:
         os.makedirs(d, exist_ok=True)
     failed = False
+    # The window finds `shprd` through the person's login shell (`zsh -lic`), whose profile puts
+    # ~/.cargo/bin first: the binary under test would never run. A private ZDOTDIR puts it first.
+    zdot = f"{base}/zdot"
+    os.makedirs(zdot)
+    open(f"{zdot}/.zprofile", "w").write(f'export PATH="{binary_dir}:$PATH"\n')
+    plain_env = env.env
+    env.env = lambda d: {**plain_env(d), "ZDOTDIR": zdot}
     try:
         shutil.rmtree(env.app)
         shutil.copytree(sc.REAL_APP, env.app, ignore=shutil.ignore_patterns("herdr-app.sock", "*.sock"), symlinks=True)
@@ -182,6 +189,35 @@ def main():
         ok2 = bool(got) and len(shown) == 1 and "shprd-coordinator" in str(shown[0]["id"]) and after == before
         failed |= not sc.record("2 switch to shprd layout", "shprd-coordinator tab shown within the wait; Assistant untouched",
                                 f"tabs {ids}; shown {[t['name'] for t in shown]}; assistants before {before} after {after}", t0, ok2)
+
+        # ---- 2b: the coordinator ends while the layout is shown: the panes' next read starts another ----
+        t0 = time.time()
+        lst = sc.run(["hc", "ls", "--json"], e, timeout=20)
+        old_addr = None
+        for term in json.loads(lst.stdout or "{}").get("terminals", []):
+            got = json.loads(sc.run(["hc", "get", term.get("address"), "--json"], e, timeout=20).stdout or "{}")
+            if (got.get("labels") or {}).get("shprd.role") == "coordinator" and got.get("state") == "live":
+                old_addr = term["address"]
+                sc.run(["hc", "kill", old_addr], e, timeout=20)
+        time.sleep(3)
+
+        def replaced():
+            for term in json.loads(sc.run(["hc", "ls", "--json"], e, timeout=20).stdout or "{}").get("terminals", []):
+                if term.get("address") == old_addr or term.get("state") != "live":
+                    continue
+                got = json.loads(sc.run(["hc", "get", term["address"], "--json"], e, timeout=20).stdout or "{}")
+                if (got.get("labels") or {}).get("shprd.role") == "coordinator":
+                    return term["address"]
+            return None
+
+        new_addr = sc.wait_for(replaced, "a new coordinator", args.wait, 3.0)
+        time.sleep(6)
+        sc.shot(e, out, "2b-coordinator-restarted")
+        tabs = sc.tabs_of(e, NAME)
+        shown = [t for t in tabs if t["active"]]
+        failed |= not sc.record("2b coordinator ended, shown again", "a new shprd coordinator within the wait, shown; Assistant untouched",
+                                f"old {old_addr}, new {new_addr}; tabs {[(t['name'], t['id']) for t in tabs]}; shown {[t['name'] for t in shown]}", t0,
+                                bool(old_addr and new_addr) and len(shown) == 1 and "shprd-coordinator" in str(shown[0]["id"]))
 
         # ---- 3: back to Shepherdr ----
         t0 = time.time()

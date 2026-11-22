@@ -1103,6 +1103,16 @@ impl Host for HcHost {
             .collect())
     }
 
+    fn foreign_agent_tabs(&self) -> Vec<TabId> {
+        let state = self.inner.client.state();
+        state
+            .terminals()
+            .filter(|terminal| is_foreign_agent(terminal))
+            .filter_map(|terminal| terminal.labels.get("herdr.coordinator.tab"))
+            .map(|tab| TabId::new(model::bare(tab)))
+            .collect()
+    }
+
     fn is_foreign_agent(&self, pane: &PaneId) -> bool {
         self.terminal(pane)
             .map(|terminal| is_foreign_agent(&terminal))

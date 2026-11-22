@@ -141,6 +141,8 @@ struct Inner {
     exit_at_start: Option<(Option<i32>, String)>,
     /// Panes that run another product's agent.
     foreign: HashSet<PaneId>,
+    foreign_tabs: Vec<TabId>,
+    mod_tabs: Vec<(WorkspaceId, TabId, String)>,
     /// Spaces a test scripted `close_space` to refuse, with the reason.
     space_close_failures: HashMap<WorkspaceId, String>,
     /// The answer a scripted `exec` gives.
@@ -184,6 +186,8 @@ impl Inner {
             exits: HashMap::new(),
             exit_at_start: None,
             foreign: HashSet::new(),
+            foreign_tabs: Vec::new(),
+            mod_tabs: Vec::new(),
             space_close_failures: HashMap::new(),
             exec_answer: None,
             doc_answer: None,
@@ -481,6 +485,25 @@ impl FakeMux {
     pub fn mark_foreign(&self, pane: &PaneId) {
         if let Ok(mut inner) = self.lock() {
             inner.foreign.insert(pane.clone());
+        }
+    }
+
+    /// A tab the window draws a mod in and no terminal: another product's chat
+    /// tab. [`Host::list_tabs`] does not list it, [`Host::tab_names`] does.
+    pub fn with_mod_tab(&self, space: &WorkspaceId, id: &str, title: &str) -> TabId {
+        if let Ok(mut inner) = self.lock() {
+            inner
+                .mod_tabs
+                .push((space.clone(), TabId::new(id), title.to_string()));
+        }
+        TabId::new(id)
+    }
+
+    /// Say another product's agent claims `tab` as its own
+    /// ([`Host::foreign_agent_tabs`]).
+    pub fn mark_foreign_tab(&self, tab: &TabId) {
+        if let Ok(mut inner) = self.lock() {
+            inner.foreign_tabs.push(tab.clone());
         }
     }
 
@@ -852,9 +875,30 @@ impl Host for FakeMux {
         Ok(())
     }
 
+    fn tab_names(&self, space: &WorkspaceId) -> Result<Vec<(TabId, String)>> {
+        let mut names: Vec<(TabId, String)> = self
+            .list_tabs(space)?
+            .into_iter()
+            .map(|tab| (tab.id, tab.title))
+            .collect();
+        let inner = self.lock()?;
+        names.extend(
+            inner
+                .mod_tabs
+                .iter()
+                .filter(|(owner, _, _)| owner == space)
+                .map(|(_, id, title)| (id.clone(), title.clone())),
+        );
+        Ok(names)
+    }
+
     fn close_tab(&self, tab: &TabId) -> Result<()> {
         let mut inner = self.lock()?;
         inner.calls.push(Call::CloseTab(tab.clone()));
+        if let Some(at) = inner.mod_tabs.iter().position(|(_, id, _)| id == tab) {
+            inner.mod_tabs.remove(at);
+            return Ok(());
+        }
         let kept = self.tab_keep.as_ref() == Some(tab);
         if !kept {
             match &self.tab_close {
@@ -1143,6 +1187,12 @@ impl Host for FakeMux {
         inner.exits.insert(pane.clone(), None);
         inner.states.insert(pane.clone(), AgentState::Done);
         Ok(())
+    }
+
+    fn foreign_agent_tabs(&self) -> Vec<TabId> {
+        self.lock()
+            .map(|inner| inner.foreign_tabs.clone())
+            .unwrap_or_default()
     }
 
     fn is_foreign_agent(&self, pane: &PaneId) -> bool {
