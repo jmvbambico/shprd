@@ -250,6 +250,7 @@ fn reading(
         review_failed: review_failed(task),
         backup: backup(task),
         last_activity_ms,
+        attempt: task.latest_attempt().map(|attempt| attempt.n),
     }
 }
 
