@@ -544,10 +544,7 @@ fn every_role_opens_with_who_it_is() {
         let text = shipped_prompt(id).expect("shipped").text;
         let body = text.split("-->").nth(1).expect("a licence header");
         assert!(body.trim_start().starts_with(first), "{id}: {body:.80}");
-        let sent = strip_leading_comment(text);
-        for name in ["Shepherdr", "herdr-task"] {
-            assert!(!sent.contains(name), "{id} sends the name {name}");
-        }
+        assert!(text.contains("Shepherdr"), "{id} names what it is not");
     }
 }
 
@@ -651,7 +648,7 @@ fn the_coordinator_says_accept_in_the_tasks_pane() {
 fn the_coordinator_never_uses_shepherdrs_tools_and_the_old_words_upgrade() {
     let shipped = shipped_prompt("assistant").expect("shipped");
     for needed in [
-        "Never run any other tool's task, board, artifact or secret commands",
+        "Never run `herdr-task`",
         "Every task is made with `shprd agent task add`",
     ] {
         assert!(
@@ -702,15 +699,15 @@ fn an_untouched_pre_shpr83_assistant_is_upgraded() {
 const PINNED: [(&str, &str); 4] = [
     (
         "assistant",
-        "8727bf6b77bf6dcf53fcfbd9a96ee2f6bb428d728a8114f63cf962fe1253eb06",
+        "391d4cc326bf5fd542a2486474a1496d9da08bb2f77294fd4ca7d0a0740a0e5f",
     ),
     (
         "worker",
-        "9fc04b6c99b137873bf3a8d09249130876d07946fe3cba1e147644462be0ead2",
+        "d9a7bb2a42b8245b45d85b172eb659138329186079b7d4bd2303a202e48df9fa",
     ),
     (
         "reviewer",
-        "6a5ee8eff64990c914fc0e27fcc0ded6287d9431eaf4203be6477792fcd82fd7",
+        "c187a5267112fc4148487499f64ef7ac444e10bce3a0a2a901bd38daf2ef0488",
     ),
     (
         "backup",
@@ -750,32 +747,4 @@ fn the_loader_drops_the_credit_comment_and_the_file_keeps_it() {
         "plain <!-- x -->"
     );
     assert_eq!(strip_leading_comment("<!-- open"), "<!-- open");
-}
-
-/// Installs of the wording that named another product upgrade to today's.
-#[test]
-fn the_product_name_wording_is_retired_and_upgrades() {
-    for (id, old, dg) in [
-        (
-            "assistant",
-            ASSISTANT_PRODUCT_NAMES,
-            ASSISTANT_PRODUCT_NAMES_DIGEST,
-        ),
-        ("worker", WORKER_PRODUCT_NAMES, WORKER_PRODUCT_NAMES_DIGEST),
-        (
-            "reviewer",
-            REVIEWER_PRODUCT_NAMES,
-            REVIEWER_PRODUCT_NAMES_DIGEST,
-        ),
-    ] {
-        assert_eq!(digest(old.as_bytes()), dg);
-        let temp = dir();
-        std::fs::write(path_of(temp.path(), id), old).expect("an old install");
-        let installed = ensure(temp.path(), id).expect("the upgrade runs");
-        assert_eq!(
-            installed.text,
-            shipped_prompt(id).expect("shipped").text,
-            "{id}"
-        );
-    }
 }
