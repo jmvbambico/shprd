@@ -346,25 +346,34 @@ pub fn spawn(
             env.ctx.check(&resource)?;
         }
     }
-    let brief = render_brief(&BriefInput {
-        task,
-        run: &env.run,
-        attempt,
-        agent: &pick.agent,
-        model: pick.model.as_deref(),
-        branch: &branch,
-        worktree: &worktree.display().to_string(),
-        skills: &skills,
-        gates: &env.gates,
-        archive: replaced.as_ref().map(|earlier| earlier.ref_name.as_str()),
-        prompt: Some(&context.prompt),
-        ask,
-        proof: context.proof,
-        settings: Some(&context.settings),
-        role: context.role.as_ref(),
-        warnings: &warnings,
-        program_line: program_line.as_deref(),
-    });
+    let earlier_asks: Vec<_> = state
+        .asks
+        .iter()
+        .filter(|((owner, _), _)| *owner == task.id)
+        .map(|(_, record)| record.clone())
+        .collect();
+    let brief = shprd_views::brief::task_brief_with_asks(
+        &BriefInput {
+            task,
+            run: &env.run,
+            attempt,
+            agent: &pick.agent,
+            model: pick.model.as_deref(),
+            branch: &branch,
+            worktree: &worktree.display().to_string(),
+            skills: &skills,
+            gates: &env.gates,
+            archive: replaced.as_ref().map(|earlier| earlier.ref_name.as_str()),
+            prompt: Some(&context.prompt),
+            ask,
+            proof: context.proof,
+            settings: Some(&context.settings),
+            role: context.role.as_ref(),
+            warnings: &warnings,
+            program_line: program_line.as_deref(),
+        },
+        &earlier_asks,
+    );
     write_brief(&brief_path, &brief)?;
     // The repository's one space comes first: shprd's to make rather than a
     // person's to open, and where a host that keeps tabs puts the agent. A host
@@ -5908,6 +5917,43 @@ project_dirs = []
             ),
             Some(ResourceStatus::Live)
         );
+    }
+
+    /// A retry's brief, written by the spawn path itself, carries the ask the
+    /// person answered in attempt 1, so the worker never asks it again.
+    #[test]
+    fn a_retry_brief_carries_an_ask_answered_in_the_earlier_attempt() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.spawn_env(&ctx);
+        let mux = host(&scratch);
+        let first = spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
+        let first_brief = std::fs::read_to_string(&first.brief).unwrap_or_default();
+        assert!(!first_brief.contains("already answered"), "{first_brief}");
+        ctx.commit(EventKind::AskRaised {
+            task: "T1".to_string(),
+            ask: "dictation".to_string(),
+            ask_kind: shprd_core::ask::AskKind::Question,
+            text: "which microphone?".to_string(),
+            options: vec!["built-in".to_string()],
+            created_at_ms: 1_000,
+            expires_at_ms: None,
+        })
+        .unwrap_or_else(|err| panic!("{err}"));
+        ctx.commit(EventKind::AskAnswered {
+            task: "T1".to_string(),
+            ask: "dictation".to_string(),
+            answer: "use the built-in mic".to_string(),
+        })
+        .unwrap_or_else(|err| panic!("{err}"));
+        fail_review(&ctx, 1);
+
+        let second = spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
+
+        assert_eq!(second.attempt, 2);
+        let brief = std::fs::read_to_string(&second.brief).unwrap_or_default();
+        assert!(brief.contains("which microphone?"), "{brief}");
+        assert!(brief.contains("use the built-in mic"), "{brief}");
     }
 
     /// Blocker 3: a retry carries the earlier attempt's commits forward, and a

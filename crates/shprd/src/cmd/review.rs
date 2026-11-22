@@ -269,7 +269,7 @@ pub fn render_contract(input: &ContractInput<'_>) -> String {
     for path in &task.scope {
         out.push_str(&format!("- {path}\n"));
     }
-    out.push_str(&asks_section(attempt, input.asks));
+    out.push_str(&asks_section(&task.id, attempt, input.asks));
     out.push_str("\n## What the agent reported\n\n");
     let report = attempt.and_then(|attempt| attempt.report.as_ref());
     let Some(report) = report else {
@@ -431,12 +431,25 @@ fn push_ask(out: &mut String, record: &AskRecord) {
 /// a missing section reads like a packet that lost something. An ask answered
 /// in an earlier attempt is shown too, so a later attempt is never judged for
 /// "never asking" when the person already answered.
-fn asks_section(attempt: Option<&Attempt>, asks: &[(TaskId, AskId, AskRecord)]) -> String {
-    let mut records: Vec<&AskRecord> = asks.iter().map(|(_, _, record)| record).collect();
+fn asks_section(
+    task: &str,
+    attempt: Option<&Attempt>,
+    asks: &[(TaskId, AskId, AskRecord)],
+) -> String {
+    let mut records: Vec<&AskRecord> = asks
+        .iter()
+        .filter(|(owner, _, _)| owner == task)
+        .map(|(_, _, record)| record)
+        .collect();
     records.sort_by_key(|record| record.raised_seq);
     let worker = records.iter().copied().filter(|r| !engine_card(r));
     let (this, earlier): (Vec<&AskRecord>, Vec<&AskRecord>) =
         worker.partition(|record| raised_in(attempt, record));
+    // An earlier ask still standing is one the person answered.
+    let earlier: Vec<&AskRecord> = earlier
+        .into_iter()
+        .filter(|record| record.answer.is_some())
+        .collect();
     let cards: Vec<&AskRecord> = records.iter().copied().filter(|r| engine_card(r)).collect();
     let mut out = String::from("\n## Asks raised during this attempt\n\n");
     if this.is_empty() {
@@ -2641,7 +2654,18 @@ project_dirs = []
             )
         })
         .collect();
-        let text = asks_section(Some(&attempt), &asks);
+        let mut asks = asks;
+        asks.push((
+            "T2".to_string(),
+            "foreign".to_string(),
+            ask_record("foreign", 11, Some("no")),
+        ));
+        asks.push((
+            "T1".to_string(),
+            "never-answered".to_string(),
+            ask_record("never-answered", 12, None),
+        ));
+        let text = asks_section("T1", Some(&attempt), &asks);
         let earlier = text
             .find("## Asks raised in earlier attempts")
             .unwrap_or_else(|| panic!("an earlier group: {text}"));
@@ -2663,6 +2687,8 @@ project_dirs = []
             "{text}"
         );
         assert!(!earlier_part.contains("scope-widen"), "{text}");
+        assert!(!text.contains("foreign"), "{text}");
+        assert!(!text.contains("never-answered"), "{text}");
     }
 
     #[test]
