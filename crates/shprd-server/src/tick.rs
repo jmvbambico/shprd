@@ -1842,6 +1842,13 @@ impl Worker {
             .tasks
             .get(task)
             .ok_or_else(|| format!("no task {task:?} in this run"))?;
+        if matches!(
+            found.status,
+            shprd_core::state::TaskStatus::Integrated | shprd_core::state::TaskStatus::Dropped
+        ) {
+            // Already landed: record nothing and open no pull request.
+            return Ok(StepReport::done(&step, "already landed", None));
+        }
         shprd_core::rules::ready_to_land(found).map_err(|err| err.to_string())?;
         let attempt = found
             .latest_attempt()
