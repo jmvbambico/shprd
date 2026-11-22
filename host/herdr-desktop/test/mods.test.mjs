@@ -1527,7 +1527,20 @@ test("the Drop dialog never draws two Drop task controls, and Enter, Esc and a b
     view.taskId = "T1";
     view.state = { tasks: [{ id: "T1", title: "One", status: "reported", derived: { status: "needs_you" }, attempts: [] }] };
     view.handle = { focus() {} };
-    if (drop) view.openDrop("row");
+    if (drop) {
+      view.openDrop("row");
+      // Re-open with a spy: the field has focus at once, and again after layout settles.
+      let focused = 0;
+      const later = [];
+      view.reason.focus = () => {
+        focused += 1;
+      };
+      view.cx.timer.after = (_ms, fn) => later.push(fn);
+      view.openDrop("row");
+      assert.equal(focused, 1);
+      later.forEach((fn) => fn());
+      assert.equal(focused, 2);
+    }
     const sent = [];
     view.verb = (action, extra) => sent.push([action, extra]);
     return { view, sent, draw: () => view.render({}) };

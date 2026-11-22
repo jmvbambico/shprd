@@ -54,7 +54,7 @@ import {
   whereNow,
   words,
 } from "./lib/accept.js";
-import { openAccept, segmented, statusGlyph } from "./lib/panel.js";
+import { button as panelButton, openAccept, segmented, statusGlyph } from "./lib/panel.js";
 import { taskLook } from "./lib/spaces.js";
 import { H, RADIUS, TEXT, ref, tone } from "./lib/tokens.js";
 import { followChanges } from "./lib/watch.js";
@@ -1008,13 +1008,18 @@ export default class Accept extends View {
           )
           .child(this.button(t, "dropback", this.dropFrom === "footer" ? WORDS.back : WORDS.cancel, false, () => this.dropBack()))
           .child(
-            this.button(t, "dropnow", busy ? WORDS.dropping : WORDS.drop, false, () => this.dropNow(), colors),
+            panelButton(t, "accept-dropnow", busy ? WORDS.dropping : WORDS.drop, {
+              kind: "danger",
+              size: "lg",
+              disabled: this.busy !== null,
+              onClick: () => this.dropNow(),
+            }),
           ),
       );
   }
 
   /** One button: the footer's primary or a secondary with the verb's own words. */
-  button(t, id, label, primary, onClick, danger = null) {
+  button(t, id, label, primary, onClick) {
     return h_flex()
       .id(`accept-${id}`)
       .h(H.lg)
@@ -1024,9 +1029,8 @@ export default class Accept extends View {
       .rounded(RADIUS.control)
       .cursor_pointer()
       .text_size(TEXT.label)
-      .when(Boolean(danger), (el) => el.bg(danger.red).text_color(danger.on).hover((style) => style.opacity(0.9)))
       .when(primary, (el) => el.bg(t.solid).text_color(t.solid_foreground).hover((style) => style.opacity(0.9)))
-      .when(!primary && !danger, (el) =>
+      .when(!primary, (el) =>
         el
           .border_1()
           .border_color(t.input)
