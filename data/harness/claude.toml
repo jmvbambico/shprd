@@ -170,6 +170,20 @@ event = "PermissionRequest"
 kind = "plan"
 event = "PermissionRequest"
 
+# G5: Claude reports `blocked` for a permission or a question and does not report
+# again until its next status, so an answered prompt left the header and the
+# sidebar on "Needs you". These hooks write the status word to the agent's own
+# terminal (OSC 7501 through /dev/tty): a tool that runs after an answer says
+# working, a turn that ends says idle. PermissionRequest is never listed, so a
+# prompt that is still open stays blocked.
+[[asks.settle]]
+event = "PostToolUse"
+state = "working"
+
+[[asks.settle]]
+event = "Stop"
+state = "idle"
+
 [records]
 kind = "jsonl"
 location = "~/.claude/projects/{cwd_slug}/{session}.jsonl"

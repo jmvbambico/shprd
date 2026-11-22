@@ -324,6 +324,26 @@ fn install_into_json(
     };
     let timeout = spec.timeout_seconds.unwrap_or(1800);
     let mut changed = false;
+    for settle in &spec.settle {
+        let command = settle_command(&settle.state);
+        let entries = hooks
+            .entry(settle.event.clone())
+            .or_insert_with(|| Value::Array(Vec::new()));
+        let Some(entries) = entries.as_array_mut() else {
+            return Err(AskHookError::Invalid {
+                path: path.to_path_buf(),
+                format: spec.format_name(),
+                reason: format!("hooks.{} is not an array", settle.event),
+            });
+        };
+        if has_command(entries, &command) {
+            continue;
+        }
+        entries.push(json!({
+            "hooks": [{"type": "command", "command": command, "timeout": 5}],
+        }));
+        changed = true;
+    }
     for event in &spec.events {
         let entries = hooks
             .entry(event.event.clone())
@@ -335,16 +355,7 @@ fn install_into_json(
                 reason: format!("hooks.{} is not an array", event.event),
             });
         };
-        let already = entries.iter().any(|entry| {
-            entry
-                .get("hooks")
-                .and_then(Value::as_array)
-                .is_some_and(|list| {
-                    list.iter()
-                        .any(|hook| hook.get("command").and_then(Value::as_str) == Some(command))
-                })
-        });
-        if already {
+        if has_command(entries, command) {
             continue;
         }
         let mut entry = Map::new();
@@ -374,6 +385,26 @@ fn install_into_json(
     })?;
     write_atomic(path, &bytes)?;
     Ok(AskHookInstall::Added)
+}
+
+/// Whether an event's entries already run `command`.
+fn has_command(entries: &[Value], command: &str) -> bool {
+    entries.iter().any(|entry| {
+        entry
+            .get("hooks")
+            .and_then(Value::as_array)
+            .is_some_and(|list| {
+                list.iter()
+                    .any(|hook| hook.get("command").and_then(Value::as_str) == Some(command))
+            })
+    })
+}
+
+/// The hook command that writes `state` to the agent's own terminal as an
+/// OSC 7501 report (`ESC ] 7501 ; state=<word> ESC \`), the same sequence a
+/// program uses to say what it is doing. It fails quietly with no terminal.
+fn settle_command(state: &str) -> String {
+    format!("printf '\\033]7501;state={state}\\033\\\\' > /dev/tty 2>/dev/null || true")
 }
 
 /// Writes the hook script beside the program's config, unless it is there.
@@ -535,6 +566,7 @@ mod tests {
                 matcher: None,
             }],
             timeout_seconds: Some(1800),
+            settle: Vec::new(),
         }
     }
 
@@ -630,6 +662,52 @@ mod tests {
         );
         // Nothing outside the worktree was written.
         assert!(!dir.path().join("home").exists());
+    }
+
+    #[test]
+    fn claude_settles_a_blocked_status_once_the_prompt_is_answered() {
+        use crate::spec::SettleEvent;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut spec = claude_spec();
+        spec.settle = vec![
+            SettleEvent {
+                event: "PostToolUse".to_owned(),
+                state: "working".to_owned(),
+            },
+            SettleEvent {
+                event: "Stop".to_owned(),
+                state: "idle".to_owned(),
+            },
+        ];
+        let installer = ClaudeAskHook::new(&spec, "claude");
+        let (hook, binary) = paths(dir.path());
+        let paths = AskHookPaths::new(&hook, dir.path(), &binary);
+        installer.install(&paths).expect("install");
+        let text = std::fs::read_to_string(dir.path().join(".claude/settings.local.json"))
+            .expect("read settings");
+        let value: serde_json::Value = serde_json::from_str(&text).expect("parse");
+        // blocked -> answered: the tool that runs next says working, the end of the
+        // turn says idle, and each is an OSC 7501 report on the terminal.
+        let working = value["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
+            .as_str()
+            .expect("working command");
+        assert!(working.contains("]7501;state=working"), "{working}");
+        assert!(working.contains("/dev/tty"), "{working}");
+        let idle = value["hooks"]["Stop"][0]["hooks"][0]["command"]
+            .as_str()
+            .expect("idle command");
+        assert!(idle.contains("]7501;state=idle"), "{idle}");
+        // The open prompt is never settled: its event only carries the ask hook.
+        let ask = value["hooks"]["PermissionRequest"][0]["hooks"][0]["command"]
+            .as_str()
+            .expect("ask command");
+        assert!(!ask.contains("7501"), "{ask}");
+        // Installing again adds nothing.
+        assert_eq!(
+            installer.install(&paths).expect("again"),
+            AskHookInstall::AlreadyThere
+        );
+        assert_eq!(value["hooks"]["Stop"].as_array().map(Vec::len), Some(1));
     }
 
     #[test]

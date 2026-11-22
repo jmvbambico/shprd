@@ -1,0 +1,1 @@
+terminal received b'\x1b]7501;state=working\x1b\\'
