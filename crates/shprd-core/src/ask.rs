@@ -526,6 +526,154 @@ pub fn by_task(asks: &[Ask]) -> BTreeMap<TaskId, Vec<Ask>> {
     grouped
 }
 
+/// What every ask id raised by `shprd agent task widen` begins with.
+pub const SCOPE_WIDEN_ASK_PREFIX: &str = "scope-widen-";
+
+/// The choice that leaves a task's scope as it is.
+pub const KEEP_SCOPE_CHOICE: &str = "keep the scope";
+
+/// The id of the `n`th widening card raised for a task.
+pub fn scope_widen_ask(n: usize) -> String {
+    format!("{SCOPE_WIDEN_ASK_PREFIX}{n}")
+}
+
+/// The choices a widening card offers: widen to `paths`, or keep the scope.
+pub fn scope_widen_options(paths: &[String]) -> Vec<String> {
+    vec![
+        format!("{}{}", crate::gate::WIDEN_CHOICE, paths.join(", ")),
+        KEEP_SCOPE_CHOICE.to_string(),
+    ]
+}
+
+/// What a widening card says: the task, the paths and the reason given.
+pub fn scope_widen_body(task: &str, paths: &[String], reason: &str) -> String {
+    format!(
+        "{task}: widen its scope to {}? {}",
+        paths.join(", "),
+        reason.trim()
+    )
+}
+
+/// The paths `answer` widens a scope to, when `ask` is a card that offers a
+/// widening (a refused hand-in's or a widening verb's) and the answer takes it.
+///
+/// `keep the scope`, any other answer and any other ask give `None`, so nothing
+/// is written for them.
+pub fn widening_of(ask: &str, answer: &str) -> Option<Vec<String>> {
+    if !ask.starts_with(SCOPE_WIDEN_ASK_PREFIX)
+        && !ask.starts_with(crate::gate::HAND_IN_REFUSED_ASK_PREFIX)
+    {
+        return None;
+    }
+    let paths: Vec<String> = answer
+        .trim()
+        .strip_prefix(crate::gate::WIDEN_CHOICE)?
+        .split(',')
+        .map(|path| path.trim().to_string())
+        .filter(|path| !path.is_empty())
+        .collect();
+    (!paths.is_empty()).then_some(paths)
+}
+
+/// What a worker is told when its scope was widened.
+pub fn widened_note(paths: &[String]) -> String {
+    format!(
+        "Your scope was widened by the person: you may now also change {}. Carry on, and hand in \
+         again if you were blocked by the scope.",
+        paths.join(", ")
+    )
+}
+
+/// One message waiting to be typed into a task's live worker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerNote {
+    /// The task whose worker is told.
+    pub task: TaskId,
+    /// Where the note's file lives.
+    pub path: PathBuf,
+    /// What is typed.
+    pub text: String,
+}
+
+/// The messages queued for tasks' live workers: `<repo>/.shprd/worker-notes`.
+///
+/// A service writes a note when a decision changes what a running worker may
+/// do; the next step that can reach a terminal types it and marks it `.sent`,
+/// or `.skipped` when no worker was live (the next attempt's brief carries what
+/// the note says). A note is never typed twice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerNotes {
+    root: PathBuf,
+}
+
+impl WorkerNotes {
+    /// The queue beside a repository's event log.
+    pub fn for_repo(repo: &Path) -> Self {
+        Self {
+            root: repo.join(".shprd").join("worker-notes"),
+        }
+    }
+
+    /// Queues `text` for `task`'s worker.
+    pub fn queue(&self, task: &str, text: &str) -> Result<PathBuf, AskError> {
+        let task_name = check_name("task", task)?;
+        let dir = self.root.join(task_name);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_millis());
+        loop {
+            let n = NEXT_NOTE.fetch_add(1, Ordering::Relaxed);
+            let path = dir.join(format!("{now}-{n}.note"));
+            if write_new(&path, text.as_bytes())? {
+                return Ok(path);
+            }
+        }
+    }
+
+    /// Every note still waiting, oldest first.
+    pub fn pending(&self) -> Vec<WorkerNote> {
+        let mut found = Vec::new();
+        let Ok(tasks) = fs::read_dir(&self.root) else {
+            return found;
+        };
+        for task in tasks.flatten() {
+            let Some(name) = task.file_name().to_str().map(str::to_string) else {
+                continue;
+            };
+            let Ok(files) = fs::read_dir(task.path()) else {
+                continue;
+            };
+            for file in files.flatten() {
+                let path = file.path();
+                if path.extension().and_then(|ext| ext.to_str()) != Some("note") {
+                    continue;
+                }
+                if let Ok(text) = fs::read_to_string(&path) {
+                    found.push(WorkerNote {
+                        task: name.clone(),
+                        path,
+                        text,
+                    });
+                }
+            }
+        }
+        found.sort_by(|a, b| a.path.cmp(&b.path));
+        found
+    }
+
+    /// Marks a note handled: `.sent` when it was typed, `.skipped` when it was not.
+    pub fn settle(&self, note: &WorkerNote, sent: bool) {
+        let _ = fs::rename(
+            &note.path,
+            note.path
+                .with_extension(if sent { "sent" } else { "skipped" }),
+        );
+    }
+}
+
+/// Keeps two notes queued in the same millisecond apart.
+static NEXT_NOTE: AtomicU64 = AtomicU64::new(0);
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -533,7 +681,7 @@ mod tests {
     use std::sync::{Arc, Barrier};
     use std::thread;
 
-    use super::{Ask, AskError, AskKind, AskQueue};
+    use super::{Ask, AskError, AskKind, AskQueue, WorkerNotes, widening_of};
 
     fn queue() -> (tempfile::TempDir, AskQueue) {
         let dir = tempfile::tempdir().expect("temp dir");
@@ -665,5 +813,31 @@ mod tests {
             Err(AskError::InvalidName { field, .. }) => assert_eq!(field, "task"),
             other => panic!("expected InvalidName, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn only_a_widen_answer_on_a_widening_card_widens() {
+        assert_eq!(
+            widening_of("scope-widen-1", "widen the scope to a/b.rs, c.rs"),
+            Some(vec!["a/b.rs".to_string(), "c.rs".to_string()])
+        );
+        assert_eq!(
+            widening_of("hand-in-refused-1-1", "widen the scope to x"),
+            Some(vec!["x".to_string()])
+        );
+        assert_eq!(widening_of("scope-widen-1", "keep the scope"), None);
+        assert_eq!(widening_of("ask-1", "widen the scope to x"), None);
+    }
+
+    #[test]
+    fn a_queued_note_is_listed_once_and_settled_once() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let notes = WorkerNotes::for_repo(dir.path());
+        notes.queue("T1", "hello").expect("queue");
+        let pending = notes.pending();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].text, "hello");
+        notes.settle(&pending[0], true);
+        assert!(notes.pending().is_empty());
     }
 }
