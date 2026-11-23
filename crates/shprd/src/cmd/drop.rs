@@ -355,7 +355,7 @@ mod tests {
 
         let err = drop_task(
             &FakeMux::default(),
-            &fixture.ctx,
+            &fixture.ctx.as_actor(shprd_core::event::Actor::Orchestrator),
             &fixture.args(),
             fixture.home(),
         )
