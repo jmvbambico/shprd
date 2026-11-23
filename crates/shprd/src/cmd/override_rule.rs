@@ -20,7 +20,10 @@
 
 use anyhow::anyhow;
 use shprd_core::event::EventKind;
-use shprd_core::rules::{INTEGRATE_AFTER_FAILED_GATE, OVERRIDE_RULES, is_override_rule};
+use shprd_core::rules::{
+    ACCEPT_OUTSIDE_SCOPE, INTEGRATE_AFTER_FAILED_GATE, OVERRIDE_RULES, is_override_rule,
+    scope_override_paths,
+};
 use shprd_core::state::RunState;
 
 use crate::cli::OverrideArgs;
@@ -42,9 +45,23 @@ pub fn override_verb(ctx: &Ctx, args: &OverrideArgs) -> Result<(), CliError> {
         )));
     }
     let task = args.task.as_deref().unwrap_or_default().trim().to_string();
+    if rule == ACCEPT_OUTSIDE_SCOPE
+        && (task.is_empty() || scope_override_paths(&args.reason).is_empty())
+    {
+        return Err(CliError::Invalid(anyhow!(
+            "{ACCEPT_OUTSIDE_SCOPE} needs a task and the paths it lets through: \
+             pass --task <id> and a reason like `paths=src/a.rs,src/b; why`"
+        )));
+    }
     let state = ctx.state()?;
     let question = question(&state, &task, &rule, &args.reason)?;
-    if !confirm::answered(args.yes, "shprd override", &question)? {
+    let risky = rule == ACCEPT_OUTSIDE_SCOPE && has_high_risk_path(&args.reason);
+    let ok = if risky && !confirm::may_skip_tty(args.yes) {
+        typed_confirmation(&task, &question)?
+    } else {
+        confirm::answered(args.yes, "shprd override", &question)?
+    };
+    if !ok {
         return Err(CliError::Invalid(anyhow!(
             "not overridden: nothing was recorded, so nothing about this run changed"
         )));
@@ -88,11 +105,74 @@ pub fn question(
             "task {task} is not in this run's plan: `shprd status` lists the tasks there are"
         ))
     })?;
-    Ok(format!("let {}? [y/N] ", what_it_allows(found, rule)))
+    Ok(format!(
+        "let {}? [y/N] ",
+        what_it_allows(found, rule, reason)
+    ))
+}
+
+/// Path prefixes and names whose change is high-risk: they steer the repo's
+/// rules, build, release or secrets rather than the feature at hand.
+const HIGH_RISK: &[&str] = &[
+    ".github/",
+    ".shprd/",
+    "AGENTS.md",
+    "LICENSE",
+    "Cargo.toml",
+    "Cargo.lock",
+    "rust-toolchain.toml",
+    "data/skills/",
+    "assets/",
+    "docs/",
+];
+
+/// Whether any path an scope override lists is high-risk.
+pub fn has_high_risk_path(reason: &str) -> bool {
+    scope_override_paths(reason).iter().any(|path| {
+        let path = path.trim_start_matches("./");
+        HIGH_RISK.iter().any(|risk| {
+            path == risk.trim_end_matches('/')
+                || path.starts_with(risk)
+                || path.ends_with("/Cargo.toml")
+        }) || path.contains(".env")
+            || path.contains("secret")
+            || path.contains("credential")
+    })
+}
+
+/// Asks for the task id typed back, which a stray `y` cannot answer.
+fn typed_confirmation(task: &str, question: &str) -> Result<bool, CliError> {
+    use std::io::{BufRead, IsTerminal, Write};
+    if !std::io::stdin().is_terminal() {
+        return Err(CliError::Invalid(anyhow!(
+            "shprd override asks a human at a terminal, but stdin is not a terminal: \
+             run it yourself in yours"
+        )));
+    }
+    print!(
+        "{}\nthis touches high-risk paths: type the task id `{task}` to confirm: ",
+        question.trim_end_matches(" [y/N] ")
+    );
+    std::io::stdout()
+        .flush()
+        .map_err(|err| CliError::other(anyhow!(err).context("writing the question")))?;
+    let mut answer = String::new();
+    std::io::stdin()
+        .lock()
+        .read_line(&mut answer)
+        .map_err(|err| CliError::other(anyhow!(err).context("reading the answer")))?;
+    Ok(answer.trim() == task)
 }
 
 /// What the overridden rule lets `task` do, in one clause.
-fn what_it_allows(task: &shprd_core::state::Task, rule: &str) -> String {
+fn what_it_allows(task: &shprd_core::state::Task, rule: &str, reason: &str) -> String {
+    if rule == ACCEPT_OUTSIDE_SCOPE {
+        return format!(
+            "{} hand in changes to {} outside its scope for its current attempt",
+            task.id,
+            scope_override_paths(reason).join(", ")
+        );
+    }
     if rule != INTEGRATE_AFTER_FAILED_GATE {
         // One rule honours an override today, but the sentence is built from
         // the rule so a second one reads as a question and not as a guess.
@@ -262,6 +342,32 @@ mod tests {
             asked.starts_with("let janitor-reviews integrate although its clippy gate failed"),
             "{asked}"
         );
+    }
+
+    #[test]
+    fn the_scope_question_names_the_paths() {
+        let state = state_with_failed_gate("clippy");
+        let asked = question(
+            &state,
+            "janitor-reviews",
+            shprd_core::rules::ACCEPT_OUTSIDE_SCOPE,
+            "paths=src/a.rs,src/b; needed",
+        )
+        .unwrap_or_default();
+        assert_eq!(
+            asked,
+            "let janitor-reviews hand in changes to src/a.rs, src/b outside its scope for its current attempt? [y/N] "
+        );
+    }
+
+    #[test]
+    fn high_risk_paths_need_the_typed_confirmation() {
+        assert!(super::has_high_risk_path(
+            "paths=src/a.rs,.github/ci.yml; x"
+        ));
+        assert!(super::has_high_risk_path("paths=AGENTS.md; x"));
+        assert!(super::has_high_risk_path("paths=crates/x/Cargo.toml; x"));
+        assert!(!super::has_high_risk_path("paths=src/a.rs; x"));
     }
 
     #[test]
