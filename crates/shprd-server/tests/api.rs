@@ -1745,3 +1745,154 @@ async fn a_task_in_a_repo_with_no_commit_is_refused_in_plain_words() {
         "names no command: {message}"
     );
 }
+
+/// A repository with task `T1` and an open `propose-drop-1` card on it, the
+/// shape `shprd agent propose drop T1 --reason stuck` raises.
+fn drop_proposal_repo() -> TempDir {
+    let repo = tempfile::tempdir().expect("repo dir");
+    start_run(repo.path());
+    let path = repo.path().join(".shprd").join("events.jsonl");
+    let mut log = EventLog::open(&path).expect("the log opens");
+    put(
+        &mut log,
+        Actor::Human,
+        EventKind::TaskAdded {
+            task: "T1".into(),
+            title: "t1".into(),
+            scope: vec!["src".into()],
+            acceptance: vec!["it works".into()],
+            tags: Vec::new(),
+            skills: Vec::new(),
+            deps: Vec::new(),
+        },
+    );
+    let ask = "propose-drop-1".to_string();
+    let body = "T1: run `drop`?\nreason: stuck".to_string();
+    let options = vec!["confirm drop".to_string(), "leave it".to_string()];
+    put(
+        &mut log,
+        Actor::Agent {
+            id: "claude".into(),
+        },
+        EventKind::AskRaised {
+            task: "T1".into(),
+            ask: ask.clone(),
+            ask_kind: shprd_core::ask::AskKind::Question,
+            text: body.clone(),
+            options: options.clone(),
+            created_at_ms: 1,
+            expires_at_ms: None,
+        },
+    );
+    shprd_core::ask::AskQueue::for_repo(repo.path())
+        .raise(
+            &shprd_core::ask::Ask::new(ask, "T1", shprd_core::ask::AskKind::Question, body, 1)
+                .with_options(options),
+        )
+        .expect("the ask file");
+    repo
+}
+
+/// Answers the drop proposal on `fixture` and returns the reply and the events.
+async fn answer_drop_proposal(
+    fixture: &Fixture,
+    answer: &str,
+) -> (Reply, Vec<shprd_core::event::Event>) {
+    let reply = fixture
+        .send(
+            Call::post(
+                "/api/asks/answer",
+                json!({"task": "T1", "ask": "propose-drop-1", "answer": answer}),
+            )
+            .with_token(&fixture.token)
+            .with_write_header(),
+        )
+        .await;
+    let events = EventLog::read_all(&fixture.repo.path().join(".shprd").join("events.jsonl"))
+        .expect("read the log")
+        .events;
+    (reply, events)
+}
+
+#[tokio::test]
+async fn confirming_a_proposal_card_runs_the_verb_once_as_the_person() {
+    let fixture = Fixture::prepared(drop_proposal_repo(), tempfile::tempdir().expect("state"));
+    let (reply, events) = answer_drop_proposal(&fixture, "confirm drop").await;
+    assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+    let drops: Vec<_> = events
+        .iter()
+        .filter(|event| matches!(&event.kind, EventKind::TaskDropped { .. }))
+        .collect();
+    assert_eq!(drops.len(), 1, "the verb ran once");
+    assert_eq!(drops[0].actor, Actor::Human);
+    match &drops[0].kind {
+        EventKind::TaskDropped { task, reason } => {
+            assert_eq!(task, "T1");
+            assert_eq!(reason, "stuck", "the card's reason is the drop's");
+        }
+        other => panic!("not a drop: {other:?}"),
+    }
+    // Answering the same card again is refused and runs nothing more.
+    let (again, events) = answer_drop_proposal(&fixture, "confirm drop").await;
+    assert_ne!(again.status, StatusCode::OK, "{:?}", again.body);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(&event.kind, EventKind::TaskDropped { .. }))
+            .count(),
+        1,
+        "a second confirmation runs nothing"
+    );
+}
+
+#[tokio::test]
+async fn declining_a_proposal_card_writes_no_verb_event() {
+    let fixture = Fixture::prepared(drop_proposal_repo(), tempfile::tempdir().expect("state"));
+    let (reply, events) = answer_drop_proposal(&fixture, "leave it").await;
+    assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(&event.kind, EventKind::TaskDropped { .. })),
+        "declining drops nothing"
+    );
+    let state = shprd_core::state::RunState::fold(&events).expect("folds");
+    assert_ne!(
+        state.tasks.get("T1").expect("T1").status,
+        shprd_core::state::TaskStatus::Dropped
+    );
+}
+
+#[tokio::test]
+async fn an_agent_answering_a_proposal_card_is_refused_and_runs_nothing() {
+    let repo = drop_proposal_repo();
+    let state = tempfile::tempdir().expect("state");
+    let app = App::prepare(
+        repo.path(),
+        PORT,
+        &Actor::Agent {
+            id: "claude".into(),
+        },
+        state.path(),
+        None,
+    )
+    .expect("prepare");
+    let info = app.info();
+    let token = std::fs::read_to_string(&info.token_path).expect("the token file");
+    let fixture = Fixture {
+        token: token.trim().to_string(),
+        id: info.id,
+        app,
+        state,
+        repo,
+    };
+    let (reply, events) = answer_drop_proposal(&fixture, "confirm drop").await;
+    assert_ne!(reply.status, StatusCode::OK, "{:?}", reply.body);
+    assert!(
+        !events.iter().any(|event| matches!(
+            &event.kind,
+            EventKind::TaskDropped { .. } | EventKind::AskAnswered { .. }
+        )),
+        "nothing ran and the card is still open"
+    );
+}

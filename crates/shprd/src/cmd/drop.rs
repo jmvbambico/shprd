@@ -26,7 +26,7 @@ use crate::ctx::{CliError, Ctx};
 
 /// Drops a task against the host the human is working in.
 pub fn drop_verb(ctx: &Ctx, args: &DropArgs, home: Option<&Path>) -> Result<(), CliError> {
-    drop_task(&spawn::real_mux(), ctx, args, home, &confirm::named_actor())
+    drop_task(&spawn::real_mux(), ctx, args, home)
 }
 
 /// Drops a task, closing the space it works in first.
@@ -39,13 +39,8 @@ pub fn drop_task(
     ctx: &Ctx,
     args: &DropArgs,
     home: Option<&Path>,
-    actor: &str,
 ) -> Result<(), CliError> {
-    confirm::require_human(
-        actor,
-        "drops a task",
-        "ask the maintainer to run `shprd drop`",
-    )?;
+    ctx.require_human("drops a task", "ask the maintainer to run `shprd drop`")?;
     let state = ctx.state()?;
     let run = state.run.as_ref().ok_or_else(|| {
         CliError::Invalid(anyhow!(
@@ -321,14 +316,7 @@ mod tests {
         let tab = shprd_mux::TabId::new("tab-7");
         fixture.record_tab(&tab)?;
 
-        drop_task(
-            &fake,
-            &fixture.ctx,
-            &fixture.args(),
-            fixture.home(),
-            "human",
-        )
-        .map_err(failed)?;
+        drop_task(&fake, &fixture.ctx, &fixture.args(), fixture.home()).map_err(failed)?;
 
         assert_eq!(status(&fixture)?, TaskStatus::Dropped);
         let state = fixture.ctx.state().map_err(failed)?;
@@ -353,14 +341,7 @@ mod tests {
         fixture.working()?;
         let fake = FakeMux::default();
 
-        drop_task(
-            &fake,
-            &fixture.ctx,
-            &fixture.args(),
-            fixture.home(),
-            "human",
-        )
-        .map_err(failed)?;
+        drop_task(&fake, &fixture.ctx, &fixture.args(), fixture.home()).map_err(failed)?;
 
         assert_eq!(status(&fixture)?, TaskStatus::Dropped);
         Ok(())
@@ -374,10 +355,9 @@ mod tests {
 
         let err = drop_task(
             &FakeMux::default(),
-            &fixture.ctx,
+            &fixture.ctx.as_actor(shprd_core::event::Actor::Orchestrator),
             &fixture.args(),
             fixture.home(),
-            "orchestrator",
         )
         .err()
         .context("an orchestrator may not drop a task")?;
@@ -401,15 +381,9 @@ mod tests {
 
         // The test harness's stdin is not a terminal, which is exactly the case
         // an agent's shell tool is in.
-        let err = drop_task(
-            &FakeMux::default(),
-            &fixture.ctx,
-            &args,
-            fixture.home(),
-            "human",
-        )
-        .err()
-        .context("a drop with no terminal and no --yes must be refused")?;
+        let err = drop_task(&FakeMux::default(), &fixture.ctx, &args, fixture.home())
+            .err()
+            .context("a drop with no terminal and no --yes must be refused")?;
 
         assert_eq!(err.exit_code(), 2, "{err}");
         assert!(err.to_string().contains("shprd drop"), "{err}");
@@ -517,15 +491,9 @@ mod tests {
         fixture.record_tab(&tab)?;
         let before = fixture.log_text()?;
 
-        let err = drop_task(
-            &fake,
-            &fixture.ctx,
-            &fixture.args(),
-            fixture.home(),
-            "human",
-        )
-        .err()
-        .context("a tab the host keeps must refuse the drop")?;
+        let err = drop_task(&fake, &fixture.ctx, &fixture.args(), fixture.home())
+            .err()
+            .context("a tab the host keeps must refuse the drop")?;
 
         assert_eq!(err.exit_code(), 2, "{err}");
         let message = err.to_string();
@@ -545,14 +513,7 @@ mod tests {
         let fake = FakeMux::default();
         fixture.record_tab(&shprd_mux::TabId::new("tab-7"))?;
 
-        drop_task(
-            &fake,
-            &fixture.ctx,
-            &fixture.args(),
-            fixture.home(),
-            "human",
-        )
-        .map_err(failed)?;
+        drop_task(&fake, &fixture.ctx, &fixture.args(), fixture.home()).map_err(failed)?;
 
         assert_eq!(status(&fixture)?, TaskStatus::Dropped);
         Ok(())
@@ -570,14 +531,7 @@ mod tests {
         fixture.record_tab(&worker)?;
         fixture.record_review_tab(&reviewer)?;
 
-        drop_task(
-            &fake,
-            &fixture.ctx,
-            &fixture.args(),
-            fixture.home(),
-            "human",
-        )
-        .map_err(failed)?;
+        drop_task(&fake, &fixture.ctx, &fixture.args(), fixture.home()).map_err(failed)?;
 
         assert!(
             fake.calls().contains(&Call::CloseTab(reviewer)),
@@ -607,14 +561,7 @@ mod tests {
         fixture.record("T1-audit-a1.tab", &neighbour)?;
         fixture.record("T1-audit-a1-review.tab", &neighbour_reviewer)?;
 
-        drop_task(
-            &fake,
-            &fixture.ctx,
-            &fixture.args(),
-            fixture.home(),
-            "human",
-        )
-        .map_err(failed)?;
+        drop_task(&fake, &fixture.ctx, &fixture.args(), fixture.home()).map_err(failed)?;
 
         let calls = fake.calls();
         assert!(
@@ -651,7 +598,6 @@ mod tests {
             &fixture.ctx,
             &fixture.args(),
             fixture.home(),
-            "human",
         )
         .err()
         .context("an integrated task may not be dropped")?;

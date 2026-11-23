@@ -34,8 +34,7 @@ use crate::ctx::{CliError, Ctx, resolve_home, resolve_layout};
 
 /// Approves the run's pull request, or with a task, that task's own.
 pub fn approve_verb(ctx: &Ctx, args: &ApproveArgs, home: Option<&Path>) -> Result<(), CliError> {
-    confirm::require_human(
-        &confirm::named_actor(),
+    ctx.require_human(
         "approves a pull request",
         "ask the maintainer to run `shprd approve`",
     )?;

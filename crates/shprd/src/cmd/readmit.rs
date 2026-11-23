@@ -12,19 +12,19 @@
 //! gate, so `SHPRD_ACTOR` naming a human is the whole condition.
 
 use anyhow::anyhow;
-use shprd_core::event::{Actor, AgentId, EventKind};
+use shprd_core::event::{AgentId, EventKind};
 use shprd_core::state::RunState;
 
 use crate::cli::ReadmitArgs;
 use crate::ctx::{CliError, Ctx};
 
-/// The variable naming who acts, repeated here because the refusal names it.
-const ACTOR_ENV: &str = "SHPRD_ACTOR";
-
 /// Records that `agent` is usable again, which the run's rules only allow a
 /// human or the engine to do.
 pub fn readmit_verb(ctx: &Ctx, args: &ReadmitArgs) -> Result<(), CliError> {
-    require_human(&ctx.actor)?;
+    ctx.require_human(
+        "re-admits an agent",
+        "the maintainer runs `shprd readmit <agent>`",
+    )?;
     let state = ctx.state()?;
     let agent = stored_agent(&state, &args.agent).ok_or_else(|| {
         CliError::Invalid(anyhow!(
@@ -43,20 +43,6 @@ pub fn readmit_verb(ctx: &Ctx, args: &ReadmitArgs) -> Result<(), CliError> {
     Ok(())
 }
 
-/// Refuses unless the actor is a human, whatever the terminal is.
-///
-/// An agent pane always has `SHPRD_ACTOR` set, so this is what keeps a dry
-/// mark from being cleared by whoever it is holding back.
-fn require_human(actor: &Actor) -> Result<(), CliError> {
-    if matches!(actor, Actor::Human) {
-        return Ok(());
-    }
-    Err(CliError::Invalid(anyhow!(
-        "only a human re-admits an agent, and {actor:?} is not one: \
-         the maintainer runs `shprd readmit <agent>` (and {ACTOR_ENV} names the actor)"
-    )))
-}
-
 /// The id the log stores for the agent the human named.
 ///
 /// A `Dry` event is keyed by the program, the harness spec's id (`pi`), while
@@ -64,7 +50,7 @@ fn require_human(actor: &Actor) -> Result<(), CliError> {
 /// both are accepted: the spelling the log holds wins, and a dry one is
 /// preferred over a spelling that is known but already available, which lets
 /// the rules say "not dry" about the right agent.
-fn stored_agent(state: &RunState, named: &str) -> Option<AgentId> {
+pub(crate) fn stored_agent(state: &RunState, named: &str) -> Option<AgentId> {
     let mut candidates: Vec<&str> = vec![named];
     if let Some((program, model)) = named.split_once('/')
         && !program.is_empty()
@@ -87,7 +73,7 @@ fn stored_agent(state: &RunState, named: &str) -> Option<AgentId> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shprd_core::event::Event;
+    use shprd_core::event::{Actor, Event};
 
     fn dried_state(agent: &str) -> RunState {
         let events = vec![
@@ -137,7 +123,11 @@ mod tests {
 
     #[test]
     fn only_a_human_re_admits() {
-        assert!(require_human(&Actor::Human).is_ok());
+        let ctx_as = |actor: Actor| {
+            Ctx::new(std::path::PathBuf::from("."), actor, false, true)
+                .require_human("re-admits an agent", "advice")
+        };
+        assert!(ctx_as(Actor::Human).is_ok());
         for actor in [
             Actor::Engine,
             Actor::Orchestrator,
@@ -145,7 +135,7 @@ mod tests {
                 id: "pi".to_string(),
             },
         ] {
-            match require_human(&actor) {
+            match ctx_as(actor.clone()) {
                 Err(err) => assert!(err.to_string().contains("only a human"), "{err}"),
                 Ok(()) => panic!("{actor:?} must not re-admit an agent"),
             }

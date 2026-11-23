@@ -2156,3 +2156,153 @@ fn the_first_task_in_a_fresh_repo_starts_a_run() {
     );
     assert!(value["tasks"].to_string().contains("T1"), "{state}");
 }
+
+/// Runs the binary with `--as` and `$SHPRD_ACTOR` set as given.
+fn run_with_actor(root: &Path, env_actor: &str, as_flag: &str, args: &[&str]) -> Output {
+    let mut all = vec![
+        "--repo".to_string(),
+        root.display().to_string(),
+        "--as".to_string(),
+        as_flag.to_string(),
+    ];
+    all.extend(args.iter().map(|arg| (*arg).to_string()));
+    let mut command = Command::new(BIN);
+    isolate(&mut command, root);
+    match command
+        .args(&all)
+        .env_remove("SHPRD_ACTOR")
+        .env("SHPRD_ACTOR", env_actor)
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) => panic!("running the binary: {err}"),
+    }
+}
+
+/// Every human verb, as the argument list that reaches its actor check.
+fn human_verbs() -> Vec<(&'static str, Vec<&'static str>)> {
+    vec![
+        (
+            "drop",
+            vec!["drop", "T1", "--reason", "not needed", "--yes"],
+        ),
+        (
+            "override",
+            vec![
+                "override",
+                "--task",
+                "T1",
+                "--rule",
+                OVERRIDE_RULE,
+                "--reason",
+                "cosmetic",
+                "--yes",
+            ],
+        ),
+        ("approve", vec!["approve", "T1", "--yes"]),
+        ("readmit", vec!["readmit", "w1", "--reason", "topped up"]),
+    ]
+}
+
+/// Item 13: `--as human` is honoured by every human verb, whatever
+/// `$SHPRD_ACTOR` says, and `--as` naming a non-human is refused by every one.
+#[test]
+fn every_human_verb_reads_the_actor_the_same_way() {
+    for (verb, args) in human_verbs() {
+        let dir = repo();
+        let root = dir.path();
+        run_that_needs_an_override(root);
+        mark_dry(root, "w1");
+
+        // `--as human` wins over an agent's environment: the actor check
+        // passes, so any refusal is about something else.
+        let output = run_with_actor(root, "agent:w9", "human", &args);
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        assert!(
+            !stderr.contains("only a human"),
+            "{verb}: --as human was ignored: {stderr}"
+        );
+
+        // A non-human `--as` is refused before anything is written, even with
+        // `$SHPRD_ACTOR` naming a human.
+        let before = last_event(root);
+        let output = run_with_actor(root, "human", "orchestrator", &args);
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        assert_eq!(output.status.code(), Some(2), "{verb}: {stderr}");
+        assert!(stderr.contains("only a human"), "{verb}: {stderr}");
+        assert_eq!(last_event(root), before, "{verb}: nothing was logged");
+
+        // And the environment alone says the same thing.
+        let output = run_as(root, "agent:w9", &args);
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        assert!(stderr.contains("only a human"), "{verb}: {stderr}");
+    }
+}
+
+/// Item 13, `sync`: `--as human` wins over an agent's environment too.
+#[test]
+fn sync_reads_the_actor_the_same_way() {
+    let dir = repo();
+    let root = dir.path();
+    start(root);
+    let output = run_with_actor(root, "agent:w9", "human", &["sync"]);
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(
+        !stderr.contains("cannot sync the base"),
+        "--as human was ignored: {stderr}"
+    );
+    let output = run_with_actor(root, "human", "agent:w9", &["sync"]);
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert_eq!(output.status.code(), Some(2), "{stderr}");
+    assert!(stderr.contains("cannot sync the base"), "{stderr}");
+}
+
+/// Item 14: `agent propose` raises a card and writes nothing else; an agent
+/// may raise one, and the verb is not run by raising it.
+#[test]
+fn a_proposal_raises_a_card_and_runs_nothing() {
+    let dir = repo();
+    let root = dir.path();
+    start(root);
+    add_task(root, "T1", "crates/shprd");
+    let output = run_as(
+        root,
+        "agent:w1",
+        &["agent", "propose", "drop", "T1", "--reason", "it is stuck"],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let last = last_event(root);
+    assert_eq!(last["kind"], "ask_raised", "{last}");
+    assert_eq!(last["ask"], "propose-drop-1");
+    assert_eq!(last["options"][0], "confirm drop");
+    assert_eq!(last["options"][1], "leave it");
+    assert!(
+        last["text"]
+            .as_str()
+            .is_some_and(|t| t.contains("reason: it is stuck")),
+        "{last}"
+    );
+    let log = std::fs::read_to_string(log_path(root)).unwrap_or_default();
+    assert!(!log.contains("task_dropped"), "nothing was dropped");
+
+    // A second proposal of the same verb gets the next number; an override
+    // must name a rule the run reads.
+    ok(
+        root,
+        &["agent", "propose", "drop", "T1", "--reason", "still stuck"],
+    );
+    assert_eq!(last_event(root)["ask"], "propose-drop-2");
+    let before = last_event(root);
+    let message = run(
+        root,
+        &[
+            "agent", "propose", "override", "T1", "--reason", "x", "--rule", "nope",
+        ],
+    );
+    assert_eq!(message.status.code(), Some(2));
+    assert_eq!(last_event(root), before);
+}

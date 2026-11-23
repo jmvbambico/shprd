@@ -39,6 +39,7 @@ pub fn dispatch(
         }
         AgentCommand::Handoff(args) => handoff_cmd(ctx, &args, home),
         AgentCommand::Review(args) => crate::cmd::review::review_verb(ctx, &args, home),
+        AgentCommand::Propose(args) => crate::cmd::propose::propose_verb(ctx, &args),
     }
 }
 

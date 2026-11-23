@@ -21,6 +21,7 @@ pub mod live_fallback;
 pub mod live_news;
 pub mod override_rule;
 pub mod prompts;
+pub mod propose;
 pub mod readmit;
 pub mod review;
 pub mod roster;
