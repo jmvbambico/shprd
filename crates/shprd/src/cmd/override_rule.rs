@@ -56,7 +56,8 @@ pub fn override_verb(ctx: &Ctx, args: &OverrideArgs) -> Result<(), CliError> {
     let state = ctx.state()?;
     let question = question(&state, &task, &rule, &args.reason)?;
     let risky = rule == ACCEPT_OUTSIDE_SCOPE && has_high_risk_path(&args.reason);
-    let ok = if risky && !confirm::may_skip_tty(args.yes) {
+    // `--yes` never answers a high-risk question: only the task id typed back.
+    let ok = if risky {
         typed_confirmation(&task, &question)?
     } else {
         confirm::answered(args.yes, "shprd override", &question)?
@@ -111,54 +112,65 @@ pub fn question(
     ))
 }
 
-/// Path prefixes and names whose change is high-risk: they steer the repo's
-/// rules, build, release or secrets rather than the feature at hand.
-const HIGH_RISK: &[&str] = &[
-    ".github/",
-    ".shprd/",
+/// Directories whose whole subtree is high-risk.
+const HIGH_RISK_DIRS: &[&str] = &[".github", ".shprd", "data/skills", "assets", "docs"];
+
+/// File names that are high-risk wherever they sit.
+const HIGH_RISK_FILES: &[&str] = &[
     "AGENTS.md",
     "LICENSE",
     "Cargo.toml",
     "Cargo.lock",
     "rust-toolchain.toml",
-    "data/skills/",
-    "assets/",
-    "docs/",
 ];
 
-/// Whether any path an scope override lists is high-risk.
+/// Whether any path a scope override lists is high-risk: it steers the repo's
+/// rules, build, release or secrets rather than the feature at hand.
 pub fn has_high_risk_path(reason: &str) -> bool {
     scope_override_paths(reason).iter().any(|path| {
         let path = path.trim_start_matches("./");
-        HIGH_RISK.iter().any(|risk| {
-            path == risk.trim_end_matches('/')
-                || path.starts_with(risk)
-                || path.ends_with("/Cargo.toml")
-        }) || path.contains(".env")
-            || path.contains("secret")
-            || path.contains("credential")
+        let name = path.rsplit('/').next().unwrap_or(path);
+        HIGH_RISK_DIRS
+            .iter()
+            .any(|dir| path == *dir || path.strip_prefix(dir).is_some_and(|r| r.starts_with('/')))
+            || HIGH_RISK_FILES.contains(&name)
+            || name.starts_with(".env")
+            || name.contains("secret")
+            || name.contains("credential")
     })
 }
 
 /// Asks for the task id typed back, which a stray `y` cannot answer.
 fn typed_confirmation(task: &str, question: &str) -> Result<bool, CliError> {
-    use std::io::{BufRead, IsTerminal, Write};
-    if !std::io::stdin().is_terminal() {
+    use std::io::{IsTerminal, Write};
+    let tty = std::io::stdin().is_terminal();
+    if tty {
+        print!(
+            "{}\nthis touches high-risk paths: type the task id `{task}` to confirm: ",
+            question.trim_end_matches(" [y/N] ")
+        );
+        std::io::stdout()
+            .flush()
+            .map_err(|err| CliError::other(anyhow!(err).context("writing the question")))?;
+    }
+    typed_answer(task, tty, &mut std::io::stdin().lock())
+}
+
+/// Reads the typed answer from `input`: `true` only when it is the task id.
+/// Without a terminal nothing is read and the question is refused.
+fn typed_answer(
+    task: &str,
+    tty: bool,
+    input: &mut impl std::io::BufRead,
+) -> Result<bool, CliError> {
+    if !tty {
         return Err(CliError::Invalid(anyhow!(
-            "shprd override asks a human at a terminal, but stdin is not a terminal: \
+            "a high-risk override asks a human at a terminal, but stdin is not a terminal: \
              run it yourself in yours"
         )));
     }
-    print!(
-        "{}\nthis touches high-risk paths: type the task id `{task}` to confirm: ",
-        question.trim_end_matches(" [y/N] ")
-    );
-    std::io::stdout()
-        .flush()
-        .map_err(|err| CliError::other(anyhow!(err).context("writing the question")))?;
     let mut answer = String::new();
-    std::io::stdin()
-        .lock()
+    input
         .read_line(&mut answer)
         .map_err(|err| CliError::other(anyhow!(err).context("reading the answer")))?;
     Ok(answer.trim() == task)
@@ -368,6 +380,19 @@ mod tests {
         assert!(super::has_high_risk_path("paths=AGENTS.md; x"));
         assert!(super::has_high_risk_path("paths=crates/x/Cargo.toml; x"));
         assert!(!super::has_high_risk_path("paths=src/a.rs; x"));
+        assert!(!super::has_high_risk_path("paths=AGENTS.md.bak; x"));
+        assert!(!super::has_high_risk_path("paths=src/sesame.rs,docsx/a; x"));
+        assert!(super::has_high_risk_path("paths=docs/a.md; x"));
+        assert!(super::has_high_risk_path("paths=src/secret_sauce.rs; x"));
+    }
+
+    #[test]
+    fn the_typed_answer_is_only_the_task_id() {
+        let ok = |tty: bool, input: &str| super::typed_answer("t1", tty, &mut input.as_bytes());
+        assert!(matches!(ok(true, "t1\n"), Ok(true)));
+        assert!(matches!(ok(true, "y\n"), Ok(false)));
+        assert!(matches!(ok(true, ""), Ok(false)));
+        assert!(ok(false, "t1\n").is_err(), "no terminal: refused");
     }
 
     #[test]
