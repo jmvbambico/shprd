@@ -9,7 +9,7 @@ use crate::config::Review;
 use crate::event::{EventKind, Finding, ReviewSource, Severity};
 use crate::hash;
 use crate::rules::INTEGRATE_AFTER_FAILED_GATE;
-use crate::state::{GateResult, RunState, Task, TaskStatus};
+use crate::state::{Escalation, GateResult, RunState, Task, TaskStatus};
 
 /// The gate name review results are recorded under.
 pub const REVIEW_GATE: &str = "review";
@@ -418,6 +418,80 @@ pub fn granted_rounds(state: &RunState, task: &Task) -> u32 {
 /// every round a person granted by answering its card.
 pub fn allowance(state: &RunState, task: &Task, configured: u32) -> u32 {
     configured.saturating_add(granted_rounds(state, task))
+}
+
+/// The default actions a failed self-update's card carries.
+///
+/// A failed update is a run-wide escalation with no task, so its default action
+/// is what tells it from any other run-wide card. They mirror the three the
+/// self-update pipeline raises (`shprd_server::self_update`).
+pub const UPDATE_FAILED_ACTIONS: [&str; 3] = [
+    "nothing needs doing; shprd is as it was",
+    "nothing needs doing; shprd is back on the version it had",
+    "start shprd again by hand: it may not be running",
+];
+
+/// The words a settled-update record begins with.
+pub const UPDATE_SETTLED_PREFIX: &str = "shprd updated and is running version ";
+
+/// The body of the record a successful update leaves: it settles every failed
+/// update's card raised before it, and is itself no card.
+pub fn update_settled_body(version: &str) -> String {
+    format!("{UPDATE_SETTLED_PREFIX}{version}; earlier update failures are settled")
+}
+
+/// Whether `escalation` is the record a successful update leaves.
+pub fn is_update_settled(escalation: &Escalation) -> bool {
+    escalation.task.is_none() && escalation.body.starts_with(UPDATE_SETTLED_PREFIX)
+}
+
+/// `body` marked as concerning `repo`, the way every update card and settle
+/// record is written, so a success settles only its own repository's failures.
+pub fn tag_update_repo(body: &str, repo: &str) -> String {
+    format!("{body} (repository {repo})")
+}
+
+/// The repository an update card or settle record names, when it was tagged by
+/// [`tag_update_repo`]; `None` for one written before the tag existed.
+pub fn update_repo(escalation: &Escalation) -> Option<&str> {
+    let body = escalation.body.strip_suffix(')')?;
+    let at = body.rfind(" (repository ")?;
+    Some(&body[at + " (repository ".len()..])
+}
+
+/// Whether `settle` (a successful update's record) settles `failed`: it is
+/// newer, and it is for the same repository. An untagged failure belongs to the
+/// log it sits in, so any later success settles it.
+fn settles(settle: &Escalation, failed: &Escalation) -> bool {
+    settle.seq > failed.seq
+        && is_update_settled(settle)
+        && match update_repo(failed) {
+            Some(repo) => update_repo(settle) == Some(repo),
+            None => true,
+        }
+}
+
+/// Whether `escalation` is a failed update's card that a later successful
+/// update of the same repository has settled. A failure newer than that
+/// repository's last success stays open, and so does another repository's.
+pub fn update_failure_settled(state: &RunState, escalation: &Escalation) -> bool {
+    escalation.task.is_none()
+        && UPDATE_FAILED_ACTIONS.contains(&escalation.default_action.as_str())
+        && state
+            .escalations
+            .iter()
+            .any(|later| settles(later, escalation))
+}
+
+/// Whether a failed update's card for `repo` is open in `state`: raised, and
+/// not yet settled by a later success of that repository.
+pub fn has_open_update_failure(state: &RunState, repo: &str) -> bool {
+    state.escalations.iter().any(|escalation| {
+        escalation.task.is_none()
+            && UPDATE_FAILED_ACTIONS.contains(&escalation.default_action.as_str())
+            && update_repo(escalation).is_none_or(|named| named == repo)
+            && !update_failure_settled(state, escalation)
+    })
 }
 
 /// The words every escalation about a send-back that did not start begins with.
@@ -1021,6 +1095,100 @@ mod tests {
         assert!(rounds_spent_verb_ran(
             &dropped,
             "I will look at it tomorrow"
+        ));
+    }
+
+    fn run_wide(seq: u64, body: &str, action: &str) -> super::Escalation {
+        super::Escalation {
+            task: None,
+            body: body.to_string(),
+            default_action: action.to_string(),
+            seq,
+            by_agent: false,
+        }
+    }
+
+    fn state_of(escalations: Vec<super::Escalation>) -> super::RunState {
+        super::RunState {
+            escalations,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_failed_update_card_is_settled_only_by_a_later_success() {
+        use super::{UPDATE_FAILED_ACTIONS, update_failure_settled, update_settled_body};
+        let failed = run_wide(
+            1,
+            "shprd could not build the accepted change",
+            UPDATE_FAILED_ACTIONS[0],
+        );
+        // Failed update alone: one open card.
+        let alone = state_of(vec![failed.clone()]);
+        assert!(!update_failure_settled(&alone, &failed));
+        // A later success settles it.
+        let ok = run_wide(2, &update_settled_body("1.2.3"), "nothing needs doing");
+        let settled = state_of(vec![failed.clone(), ok.clone()]);
+        assert!(update_failure_settled(&settled, &failed));
+        assert!(super::is_update_settled(&ok));
+        // A failure after the success stays open.
+        let again = run_wide(
+            3,
+            "shprd could not build the accepted change",
+            UPDATE_FAILED_ACTIONS[0],
+        );
+        let after = state_of(vec![failed.clone(), ok, again.clone()]);
+        assert!(update_failure_settled(&after, &failed));
+        assert!(!update_failure_settled(&after, &again));
+    }
+
+    #[test]
+    fn a_success_settles_only_its_own_repositorys_failures() {
+        use super::{
+            UPDATE_FAILED_ACTIONS, has_open_update_failure, tag_update_repo,
+            update_failure_settled, update_settled_body,
+        };
+        let fail = |seq, repo: &str| {
+            run_wide(
+                seq,
+                &tag_update_repo("shprd could not build", repo),
+                UPDATE_FAILED_ACTIONS[0],
+            )
+        };
+        let (a_fail, b_fail) = (fail(1, "/repo/a"), fail(2, "/repo/b"));
+        let a_ok = run_wide(
+            3,
+            &tag_update_repo(&update_settled_body("1.0"), "/repo/a"),
+            "nothing needs doing",
+        );
+        let state = state_of(vec![a_fail.clone(), b_fail.clone(), a_ok]);
+        assert!(update_failure_settled(&state, &a_fail));
+        assert!(!update_failure_settled(&state, &b_fail));
+        assert!(!has_open_update_failure(&state, "/repo/a"));
+        assert!(has_open_update_failure(&state, "/repo/b"));
+    }
+
+    /// The recogniser's strings are the pipeline's: a drift in either side
+    /// would leave the fix inert.
+    #[test]
+    fn the_failed_update_actions_are_the_pipelines() {
+        let source = include_str!("../../shprd-server/src/self_update.rs");
+        for action in super::UPDATE_FAILED_ACTIONS {
+            assert!(
+                source.contains(&format!("\"{action}\"")),
+                "the pipeline no longer raises {action:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_success_leaves_other_run_wide_cards_alone() {
+        use super::{update_failure_settled, update_settled_body};
+        let other = run_wide(1, "something else needs you", "do nothing");
+        let ok = run_wide(2, &update_settled_body("1.2.3"), "nothing needs doing");
+        assert!(!update_failure_settled(
+            &state_of(vec![other.clone(), ok]),
+            &other
         ));
     }
 }
