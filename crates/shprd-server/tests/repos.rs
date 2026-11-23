@@ -123,6 +123,18 @@ async fn repositories_are_registered_once_and_answered_by_their_own_slot() {
         StatusCode::BAD_REQUEST,
         "several repositories: name one: {body}"
     );
+    // The asks list and an answer say the same in plain words, for the board to show.
+    let (status, body) = fx.call("GET", "/api/asks", None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.to_string().contains("?repo="), "{body}");
+    let (status, body) = fx
+        .call(
+            "POST",
+            "/api/asks/answer",
+            Some(json!({"task": "T1", "ask": "a", "answer": "yes"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
 
     // By id, by path, and by a folder inside the repository.
     let id = one["id"].as_str().unwrap();

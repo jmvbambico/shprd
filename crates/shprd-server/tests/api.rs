@@ -1619,6 +1619,73 @@ async fn widening_the_scope_from_a_refused_hand_in_card_widens_it() {
     assert!(task.scope.iter().any(|path| path == "tcalc/ops.py"));
 }
 
+/// F13: a widening the rules refuse for overlap (another task in flight holds
+/// the path) reaches the client in the server's words, and the card stays open.
+#[tokio::test]
+async fn a_widening_refused_for_overlap_shows_its_reason_and_keeps_the_card_open() {
+    let repo = refused_hand_in_repo();
+    let path = repo.path().join(".shprd").join("events.jsonl");
+    let mut log = EventLog::open(&path).expect("the log opens");
+    put(
+        &mut log,
+        Actor::Human,
+        EventKind::TaskAdded {
+            task: "T2".into(),
+            title: "t2".into(),
+            scope: vec!["tests".into()],
+            acceptance: vec!["x".into()],
+            tags: Vec::new(),
+            skills: Vec::new(),
+            deps: Vec::new(),
+        },
+    );
+    put(
+        &mut log,
+        Actor::Engine,
+        EventKind::Spawned {
+            task: "T2".into(),
+            attempt: 1,
+            agent: "claude".into(),
+            model: None,
+            worktree: "/wt/T2".into(),
+            branch: "shprd/r1/T2".into(),
+        },
+    );
+    drop(log);
+    let fixture = Fixture::prepared(repo, tempfile::tempdir().expect("state"));
+    let reply = fixture
+        .send(
+            Call::post(
+                "/api/asks/answer",
+                json!({"task": "T1", "ask": "hand-in-refused-1-1",
+                       "answer": "widen the scope to tests/test_ops.py"}),
+            )
+            .with_token(&fixture.token)
+            .with_write_header(),
+        )
+        .await;
+    assert_ne!(reply.status, StatusCode::OK, "{:?}", reply.body);
+    let text = format!("{:?}", reply.body);
+    assert!(
+        text.contains("T2") && text.contains("overlap"),
+        "the refusal names the task and the overlap: {text}"
+    );
+    let events = EventLog::read_all(&path).expect("read the log").events;
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::AskAnswered { .. })),
+        "the card is still open"
+    );
+    let queue = shprd_core::ask::AskQueue::for_repo(fixture.repo.path());
+    assert!(
+        queue
+            .answer_path("T1", "hand-in-refused-1-1")
+            .is_ok_and(|p| !p.exists()),
+        "no answer file is left behind"
+    );
+}
+
 #[tokio::test]
 async fn sending_a_refused_hand_in_back_needs_a_host_and_consumes_nothing_without_one() {
     let (fixture, reply) = answer_refused_card("send it back to a new attempt").await;
