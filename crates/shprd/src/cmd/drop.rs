@@ -26,7 +26,7 @@ use crate::ctx::{CliError, Ctx};
 
 /// Drops a task against the host the human is working in.
 pub fn drop_verb(ctx: &Ctx, args: &DropArgs, home: Option<&Path>) -> Result<(), CliError> {
-    drop_task(&spawn::real_mux(), ctx, args, home, &confirm::named_actor())
+    drop_task(&spawn::real_mux(), ctx, args, home)
 }
 
 /// Drops a task, closing the space it works in first.
@@ -39,13 +39,8 @@ pub fn drop_task(
     ctx: &Ctx,
     args: &DropArgs,
     home: Option<&Path>,
-    actor: &str,
 ) -> Result<(), CliError> {
-    confirm::require_human(
-        actor,
-        "drops a task",
-        "ask the maintainer to run `shprd drop`",
-    )?;
+    ctx.require_human("drops a task", "ask the maintainer to run `shprd drop`")?;
     let state = ctx.state()?;
     let run = state.run.as_ref().ok_or_else(|| {
         CliError::Invalid(anyhow!(
@@ -326,7 +321,6 @@ mod tests {
             &fixture.ctx,
             &fixture.args(),
             fixture.home(),
-            "human",
         )
         .map_err(failed)?;
 
@@ -358,7 +352,6 @@ mod tests {
             &fixture.ctx,
             &fixture.args(),
             fixture.home(),
-            "human",
         )
         .map_err(failed)?;
 
@@ -377,7 +370,6 @@ mod tests {
             &fixture.ctx,
             &fixture.args(),
             fixture.home(),
-            "orchestrator",
         )
         .err()
         .context("an orchestrator may not drop a task")?;
@@ -406,7 +398,6 @@ mod tests {
             &fixture.ctx,
             &args,
             fixture.home(),
-            "human",
         )
         .err()
         .context("a drop with no terminal and no --yes must be refused")?;
@@ -522,7 +513,6 @@ mod tests {
             &fixture.ctx,
             &fixture.args(),
             fixture.home(),
-            "human",
         )
         .err()
         .context("a tab the host keeps must refuse the drop")?;
@@ -550,7 +540,6 @@ mod tests {
             &fixture.ctx,
             &fixture.args(),
             fixture.home(),
-            "human",
         )
         .map_err(failed)?;
 
@@ -575,7 +564,6 @@ mod tests {
             &fixture.ctx,
             &fixture.args(),
             fixture.home(),
-            "human",
         )
         .map_err(failed)?;
 
@@ -612,7 +600,6 @@ mod tests {
             &fixture.ctx,
             &fixture.args(),
             fixture.home(),
-            "human",
         )
         .map_err(failed)?;
 
@@ -651,7 +638,6 @@ mod tests {
             &fixture.ctx,
             &fixture.args(),
             fixture.home(),
-            "human",
         )
         .err()
         .context("an integrated task may not be dropped")?;

@@ -143,6 +143,24 @@ impl Ctx {
         }
     }
 
+    /// Refuses unless the actor this context acts as is a human.
+    ///
+    /// This is the one actor rule of every human verb (`sync`, `drop`,
+    /// `override`, `approve`, `readmit`): the actor is what `--as` says, else
+    /// what `$SHPRD_ACTOR` says, else `human`, resolved once at the edge, so
+    /// the two spellings can never disagree between verbs. The terminal is the
+    /// barrier that holds on top of it. `act` completes "only a human ..."
+    /// and `advice` says what the reader does instead.
+    pub fn require_human(&self, act: &str, advice: &str) -> Result<(), CliError> {
+        if matches!(self.actor, Actor::Human) {
+            return Ok(());
+        }
+        let name = actor_name(&self.actor);
+        Err(CliError::Invalid(anyhow!(
+            "only a human {act}, and the actor {ACTOR_ENV}={name} (or --as {name}) is not one: {advice}"
+        )))
+    }
+
     /// The folded state of the run, or the empty state when no log exists yet.
     pub fn state(&self) -> Result<RunState, CliError> {
         Ok(self.load()?.0)
@@ -503,6 +521,16 @@ pub fn resolve_actor(explicit: Option<&str>) -> Result<Actor, CliError> {
         },
     };
     parse_actor(&raw)
+}
+
+/// The spelling [`parse_actor`] reads back for `actor`.
+pub fn actor_name(actor: &Actor) -> String {
+    match actor {
+        Actor::Engine => "engine".to_string(),
+        Actor::Orchestrator => "orchestrator".to_string(),
+        Actor::Human => "human".to_string(),
+        Actor::Agent { id } => format!("agent:{id}"),
+    }
 }
 
 /// Parses one actor spelling.

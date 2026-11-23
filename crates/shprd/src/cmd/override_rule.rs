@@ -29,8 +29,7 @@ use crate::ctx::{CliError, Ctx};
 
 /// Records a human's override of `rule`, after asking at the terminal.
 pub fn override_verb(ctx: &Ctx, args: &OverrideArgs) -> Result<(), CliError> {
-    confirm::require_human(
-        &confirm::named_actor(),
+    ctx.require_human(
         "overrides a rule",
         "ask the maintainer to run `shprd override`",
     )?;
