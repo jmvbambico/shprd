@@ -870,6 +870,17 @@ impl RunState {
                     }
                 }
             }
+            EventKind::ReviewSkipped { task, attempt } => {
+                // Review is off: the hand-in's own passing checks are all the
+                // verdict there is. The rules admit it only for a Reported task
+                // with no review request.
+                if let Some(entry) = self.tasks.get_mut(task)
+                    && entry.status == TaskStatus::Reported
+                    && entry.latest_attempt().is_some_and(|a| a.n == *attempt)
+                {
+                    entry.status = TaskStatus::Passed;
+                }
+            }
             EventKind::TaskReopened { task, attempt } => {
                 // The attempt is open again: its hand-in, its review requests
                 // and its gate results belong to the work as it was handed in,

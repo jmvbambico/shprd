@@ -1079,6 +1079,98 @@ project_dirs = []
         assert_eq!(report.tab, "pi·T1");
     }
 
+    #[test]
+    fn a_hand_off_reopens_a_reported_task_first() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.env(&ctx, &["sh", "pi"]);
+        let mux = mux_with_workspace(&scratch);
+        seed(&mux, &env);
+        ctx.commit(shprd_core::event::EventKind::Reported {
+            task: "T1".to_string(),
+            attempt: 1,
+            status: shprd_core::event::ReportStatus::Completed,
+            summary: "done".to_string(),
+            tests: Vec::new(),
+            checks: vec![shprd_core::event::CheckReport::passed(
+                "tests",
+                "cargo test",
+            )],
+            changed_paths: Vec::new(),
+            commit: None,
+            skills_used: Vec::new(),
+            proofs: Vec::new(),
+        })
+        .unwrap_or_else(|err| panic!("{err}"));
+        let state = ctx.state().unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(state.tasks["T1"].status, TaskStatus::Reported);
+
+        let report = handoff(&mux, &env, &request(None)).unwrap_or_else(|err| panic!("{err}"));
+
+        assert_eq!(report.to, "pi");
+        let (state, events) = ctx.load().unwrap_or_else(|err| panic!("{err}"));
+        let task = &state.tasks["T1"];
+        assert_eq!(task.status, TaskStatus::Working);
+        assert_eq!(task.attempts.len(), 1, "same attempt");
+        assert_eq!(task.attempts[0].agent, "pi");
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e.kind, shprd_core::event::EventKind::TaskReopened { .. })),
+            "the reopen is on the log"
+        );
+    }
+
+    #[test]
+    fn a_hand_off_reopens_a_passed_task_first() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.env(&ctx, &["sh", "pi"]);
+        let mux = mux_with_workspace(&scratch);
+        let worktree = seed(&mux, &env);
+        ctx.commit(shprd_core::event::EventKind::Reported {
+            task: "T1".to_string(),
+            attempt: 1,
+            status: shprd_core::event::ReportStatus::Completed,
+            summary: "done".to_string(),
+            tests: Vec::new(),
+            checks: vec![shprd_core::event::CheckReport::passed(
+                "tests",
+                "cargo test",
+            )],
+            changed_paths: Vec::new(),
+            commit: None,
+            skills_used: Vec::new(),
+            proofs: Vec::new(),
+        })
+        .unwrap_or_else(|err| panic!("{err}"));
+        let engine = Ctx {
+            actor: shprd_core::event::Actor::Engine,
+            ..ctx.clone()
+        };
+        engine
+            .commit(shprd_core::event::EventKind::ReviewSkipped {
+                task: "T1".to_string(),
+                attempt: 1,
+            })
+            .unwrap_or_else(|err| panic!("{err}"));
+        let state = ctx.state().unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(state.tasks["T1"].status, TaskStatus::Passed);
+
+        handoff(&mux, &env, &request(None)).unwrap_or_else(|err| panic!("{err}"));
+
+        let state = ctx.state().unwrap_or_else(|err| panic!("{err}"));
+        let task = &state.tasks["T1"];
+        assert_eq!(task.status, TaskStatus::Working);
+        assert_eq!(task.attempts.len(), 1);
+        assert_eq!(task.attempts[0].agent, "pi");
+        assert_eq!(
+            task.attempts[0].worktree,
+            worktree.to_string_lossy(),
+            "same worktree"
+        );
+    }
+
     /// A spec whose only status source is the plugin it runs for us, and which
     /// names the line its TUI prints when it can take a turn — the shape of the
     /// real opencode file.

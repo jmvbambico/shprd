@@ -1247,6 +1247,28 @@ mod tests {
         assert!(marker.contains("no review was requested"), "{marker}");
     }
 
+    /// The marker under the new rules: a task can no longer be Passed by a
+    /// worker gate with a review requested and no verdict (it stays Reported),
+    /// so the one pass with no review behind it is review being off, recorded as
+    /// `ReviewSkipped`. A run that landed such a task is `degraded-review`.
+    #[test]
+    fn a_task_passed_with_review_off_is_degraded() {
+        let mut log = reported_log("T1");
+        log.push(ev(
+            5,
+            EventKind::ReviewSkipped {
+                task: "T1".to_string(),
+                attempt: 1,
+            },
+        ));
+        log.push(integrated(6, "T1"));
+        let state = folded(&log);
+        assert_eq!(state.tasks["T1"].status, TaskStatus::Integrated);
+        let marker = review_marker(&state);
+        assert!(marker.starts_with(REVIEW_DEGRADED), "{marker}");
+        assert!(marker.contains("T1: no review was requested"), "{marker}");
+    }
+
     #[test]
     fn an_unproven_verdict_degrades_the_marker() {
         // A pass nothing proves is the bug the marker has to catch: the log

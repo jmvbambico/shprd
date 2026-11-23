@@ -581,6 +581,20 @@ pub enum EventKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         note: Option<String>,
     },
+    /// Review is off for this repository, so a hand-in that passed its own
+    /// checks passes on them alone.
+    ///
+    /// The engine records it, once, for an attempt that no review was ever
+    /// requested for while the repository's review is switched off
+    /// (`tasks.review_rounds = 0`, or no reviewer). It is the one way to
+    /// `Passed` that has no review verdict, and being an event it is on the
+    /// log: a review that merely failed to start never records it.
+    ReviewSkipped {
+        /// The task.
+        task: TaskId,
+        /// Attempt number.
+        attempt: u32,
+    },
     /// An agent was put on cooldown (rate limit, quota, auth).
     Dry {
         /// The agent.
@@ -911,6 +925,7 @@ impl EventKind {
             | Self::TaskStopped { task, .. }
             | Self::TaskReopened { task, .. }
             | Self::ReviewRequested { task, .. }
+            | Self::ReviewSkipped { task, .. }
             | Self::HandedOff { task, .. }
             | Self::Override { task, .. }
             | Self::TaskPrOpened { task, .. }
@@ -1043,6 +1058,10 @@ mod tests {
                 task: "M1.3".to_string(),
                 attempt: 1,
             },
+            EventKind::ReviewSkipped {
+                task: "M1.1".to_string(),
+                attempt: 1,
+            },
             EventKind::ReviewRequested {
                 task: "M1.1".to_string(),
                 attempt: 1,
@@ -1159,7 +1178,7 @@ mod tests {
     #[test]
     fn every_kind_round_trips() {
         let kinds = every_kind();
-        assert_eq!(kinds.len(), 30, "one case per EventKind variant");
+        assert_eq!(kinds.len(), 31, "one case per EventKind variant");
 
         for (index, kind) in kinds.into_iter().enumerate() {
             let event = Event {

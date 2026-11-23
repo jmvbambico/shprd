@@ -447,6 +447,12 @@ pub enum RuleError {
         /// Who tried.
         actor: Actor,
     },
+    /// A review was skipped by something that is not the engine.
+    #[error("{actor:?} cannot skip a review: only the engine can, when review is off")]
+    NotEngine {
+        /// Who tried.
+        actor: Actor,
+    },
     /// A dismissal came from something that is not a person.
     #[error("{actor:?} cannot dismiss a card: only a person can")]
     DismissNotHuman {
@@ -841,6 +847,9 @@ fn check_with(
         EventKind::TaskReopened { task, attempt } => {
             check_task_reopened(state, actor, task, *attempt, provenance)
         }
+        EventKind::ReviewSkipped { task, attempt } => {
+            check_review_skipped(state, actor, task, *attempt, provenance)
+        }
         EventKind::ScopeWidened { task, paths } => {
             check_scope_widened(state, actor, task, paths, provenance)
         }
@@ -1036,6 +1045,51 @@ fn check_task_stopped(
         return Err(RuleError::AlreadyStopped {
             task: task.to_string(),
             attempt,
+        });
+    }
+    Ok(())
+}
+
+/// Rules for passing a task without a review because review is off.
+///
+/// Only the engine records it, for the newest attempt of a `Reported` task
+/// whose hand-in completed with every check green and which no review was ever
+/// requested for: a review that was asked for and never decided still has to
+/// be decided.
+fn check_review_skipped(
+    state: &RunState,
+    actor: &Actor,
+    task: &str,
+    attempt: u32,
+    provenance: Provenance,
+) -> Result<(), RuleError> {
+    if provenance == Provenance::Required && !matches!(actor, Actor::Engine) {
+        return Err(RuleError::NotEngine {
+            actor: actor.clone(),
+        });
+    }
+    check_not_dropped(state, task, provenance)?;
+    let found = task_in(state, task)?;
+    if found.status != TaskStatus::Reported {
+        return Err(RuleError::WrongStatus {
+            task: task.to_string(),
+            expected: "Reported",
+            found: found.status,
+        });
+    }
+    expect_current_attempt(task, found, attempt)?;
+    let current = found.latest_attempt().ok_or_else(|| RuleError::NoAttempt {
+        task: task.to_string(),
+    })?;
+    let green = current.report.as_ref().is_some_and(|report| {
+        report.status == ReportStatus::Completed
+            && !report.checks.is_empty()
+            && report.checks.iter().all(|check| check.exit_code == Some(0))
+    });
+    if !green || !current.reviews.is_empty() {
+        return Err(RuleError::NotPassed {
+            task: task.to_string(),
+            found: found.status,
         });
     }
     Ok(())
@@ -4838,6 +4892,60 @@ mod tests {
             frontier = next;
         }
         assert!(reached > 0, "the invariant never met a Passed task");
+    }
+
+    fn skipped(seq: u64, id: &str, attempt: u32, actor: Actor) -> Event {
+        let mut event = ev(
+            seq,
+            EventKind::ReviewSkipped {
+                task: id.to_string(),
+                attempt,
+            },
+        );
+        event.actor = actor;
+        event
+    }
+
+    /// Review off: a clean hand-in with no review request passes on its checks,
+    /// through a recorded `ReviewSkipped` (engine only), and the result is
+    /// Passed. A review that was requested and never decided cannot be skipped.
+    #[test]
+    fn review_off_passes_a_clean_hand_in_on_its_checks() {
+        let base = vec![
+            started(1),
+            added(2, "a", &["src/a"], &[]),
+            spawned(3, "a", 1, "agent-1"),
+            reported(4, "a", 1, &["src/a/x.rs"]),
+        ];
+        let mut log = base.clone();
+        log.push(skipped(5, "a", 1, Actor::Engine));
+        assert_eq!(status(&folded(&log), "a"), TaskStatus::Passed);
+        // A passing worker gate alone is still not a pass.
+        let mut gated_only = base.clone();
+        gated_only.push(gated(5, "a", 1, "lint", true));
+        assert_eq!(status(&folded(&gated_only), "a"), TaskStatus::Reported);
+        // Only the engine records the skip.
+        for actor in [
+            Actor::Human,
+            Actor::Agent {
+                id: "agent-1".to_string(),
+            },
+        ] {
+            let mut by_other = base.clone();
+            by_other.push(skipped(5, "a", 1, actor));
+            assert!(matches!(
+                refused_append(&by_other),
+                RuleError::NotEngine { .. }
+            ));
+        }
+        // A review that was asked for cannot be skipped: it must be decided.
+        let mut asked = base.clone();
+        asked.push(review_requested(5, "a", 1, "codex/m1", false));
+        asked.push(skipped(6, "a", 1, Actor::Engine));
+        assert!(matches!(
+            refused_append(&asked),
+            RuleError::NotPassed { .. }
+        ));
     }
 
     fn reopened(seq: u64, id: &str, attempt: u32) -> Event {

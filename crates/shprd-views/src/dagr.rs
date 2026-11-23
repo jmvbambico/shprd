@@ -507,6 +507,7 @@ fn event_label(kind: &EventKind) -> &'static str {
         EventKind::TaskStopped { .. } => "task_stopped",
         EventKind::TaskReopened { .. } => "task_reopened",
         EventKind::ReviewRequested { .. } => "review_requested",
+        EventKind::ReviewSkipped { .. } => "review_skipped",
         EventKind::Dry { .. } => "dry",
         EventKind::Available { .. } => "available",
         EventKind::HandedOff { .. } => "handed_off",

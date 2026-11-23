@@ -1248,6 +1248,7 @@ impl Worker {
             // Never reached: `tick` turns a wait into `hold` before it gets here.
             Step::Wait { .. } => Ok(StepReport::done(step, "waiting", None)),
             Step::Review { task } => self.review_task(state, task),
+            Step::SkipReview { task } => self.skip_review(state, task),
             Step::Verdict { task } => self.verdict_task(config, state, task),
             Step::Land { task, policy } => match self.land_task(state, task, *policy) {
                 Ok(report) => Ok(report),
@@ -1627,6 +1628,33 @@ impl Worker {
         self.notify(seq);
         after_write(&self.after_write, &self.repo);
         Ok(StepReport::done(&step, detail, seq))
+    }
+
+    /// Passes a task on its own checks because review is off.
+    ///
+    /// Recorded as a `ReviewSkipped` event, so the log says the pass had no
+    /// review behind it; the rules refuse it for anything but a clean hand-in
+    /// that no review was requested for.
+    fn skip_review(&self, state: &RunState, task: &str) -> Result<StepReport, String> {
+        let step = Step::SkipReview {
+            task: task.to_string(),
+        };
+        let attempt = state
+            .tasks
+            .get(task)
+            .and_then(|found| found.latest_attempt())
+            .ok_or_else(|| format!("task {task:?} has no attempt to pass"))?
+            .n;
+        let seq = self.commit(EventKind::ReviewSkipped {
+            task: task.to_string(),
+            attempt,
+        })?;
+        self.notify(Some(seq));
+        Ok(StepReport::done(
+            &step,
+            format!("{task}: review is off, passed on its checks"),
+            Some(seq),
+        ))
     }
 
     /// Decides the review of a task whose reviewer has written its findings.
