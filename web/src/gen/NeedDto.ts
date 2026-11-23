@@ -24,7 +24,7 @@ seq: number,
 /**
  * Whether the person chooses (`decision`) or is only told (`notice`).
  *
- * A service that sends none is an old one: read it as a decision.
+ * A payload without one comes from an old service: read it as a decision.
  */
 kind: CardKindDto, 
 /**

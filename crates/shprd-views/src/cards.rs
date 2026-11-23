@@ -65,7 +65,11 @@ impl CardAction {
             action::DROP => "Drop task\u{2026}",
             action::ASK_ASSISTANT => "Ask the assistant",
             action::REPLY => "Reply",
-            _ => "Dismiss",
+            action::DISMISS => "Dismiss",
+            other => {
+                debug_assert!(false, "unknown card action id {other}");
+                other
+            }
         };
         Self {
             id: id.to_string(),
@@ -168,13 +172,12 @@ pub fn card_at(state: &RunState, escalation: &Escalation, now_ms: u64) -> Option
         if gate::is_update_settled(escalation) || gate::update_failure_settled(state, escalation) {
             return None;
         }
-        // Only the newest failed update of a repository is drawn.
+        // Only the newest failed update is drawn: every self-update card shares one key.
         if is_update_failure(escalation)
-            && state.escalations.iter().any(|later| {
-                later.seq > escalation.seq
-                    && is_update_failure(later)
-                    && gate::update_repo(later) == gate::update_repo(escalation)
-            })
+            && state
+                .escalations
+                .iter()
+                .any(|later| later.seq > escalation.seq && is_update_failure(later))
         {
             return None;
         }

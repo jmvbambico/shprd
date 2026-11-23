@@ -610,7 +610,7 @@ pub struct NeedDto {
     pub seq: u64,
     /// Whether the person chooses (`decision`) or is only told (`notice`).
     ///
-    /// A service that sends none is an old one: read it as a decision.
+    /// A payload without one comes from an old service: read it as a decision.
     #[serde(default)]
     pub kind: CardKindDto,
     /// The ids of the buttons the card offers, first is the primary: `review`,
