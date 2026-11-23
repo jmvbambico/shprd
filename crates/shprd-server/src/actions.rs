@@ -477,8 +477,7 @@ pub(crate) fn list_asks(repo: &Path, now_ms: u64) -> Result<AskListDto, ApiRejec
         // that offers only paths already in scope is moot.
         .filter(|ask| {
             state.tasks.get(&ask.task).is_none_or(|task| {
-                shprd_core::ask::scope_key_of(&ask.task, &ask.id).is_none()
-                    || !shprd_core::ask::offers_only_scoped_paths(&ask.options, &task.scope)
+                !shprd_core::ask::is_moot_scope_card(&ask.task, &ask.id, &ask.options, &task.scope)
             })
         })
         .collect();

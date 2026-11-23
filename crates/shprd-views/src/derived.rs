@@ -490,8 +490,7 @@ impl TaskSignal {
                 .filter(|ask| ask.task == id && ask.answer.is_none())
                 .filter(|ask| !ask.is_retired_by_newer_attempt(task))
                 .filter(|ask| {
-                    shprd_core::ask::scope_key_of(id, &ask.id).is_none()
-                        || !shprd_core::ask::offers_only_scoped_paths(&ask.options, &task.scope)
+                    !shprd_core::ask::is_moot_scope_card(id, &ask.id, &ask.options, &task.scope)
                 })
                 .map(|ask| AskFacts {
                     kind: ask.kind,
