@@ -526,14 +526,32 @@ mod tests {
     /// The reported task's first gate passed, so it waits to be integrated.
     fn passed_task(ctx: &Ctx) -> Result<()> {
         reported_task(ctx)?;
-        ctx.commit(EventKind::GatePassed {
-            task: "M4.1".to_string(),
-            attempt: 1,
-            gate: "tests".to_string(),
-            findings: Vec::new(),
-            source: None,
-        })
-        .map_err(failed)?;
+        let engine = Ctx {
+            actor: shprd_core::event::Actor::Engine,
+            ..ctx.clone()
+        };
+        let request = engine
+            .commit(EventKind::ReviewRequested {
+                task: "M4.1".to_string(),
+                attempt: 1,
+                reviewer: "codex/m1".to_string(),
+                degraded: false,
+                note: None,
+            })
+            .map_err(failed)?;
+        engine
+            .commit(EventKind::GatePassed {
+                task: "M4.1".to_string(),
+                attempt: 1,
+                gate: "review".to_string(),
+                findings: Vec::new(),
+                source: Some(shprd_core::event::ReviewSource {
+                    reviewer: "codex/m1".to_string(),
+                    findings_sha256: "ba7816bf8f01cfea".to_string(),
+                    request_seq: request.seq,
+                }),
+            })
+            .map_err(failed)?;
         Ok(())
     }
 

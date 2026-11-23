@@ -176,6 +176,15 @@ pub enum Step {
         /// The task to review.
         task: String,
     },
+    /// Pass a task that handed in clean checks while review is off.
+    ///
+    /// Review is off for the repository (`tasks.review_rounds = 0`, or no
+    /// reviewer), so the hand-in's own checks are the only verdict there is.
+    /// The executor records it as a `ReviewSkipped` event.
+    SkipReview {
+        /// The task to pass.
+        task: String,
+    },
     /// Decide the review of a task whose reviewer has written its findings.
     Verdict {
         /// The task whose review is decided.
@@ -240,6 +249,7 @@ impl Step {
         match self {
             Self::Start { task }
             | Self::Review { task }
+            | Self::SkipReview { task }
             | Self::Verdict { task }
             | Self::Wait { task, .. }
             | Self::Land { task, .. }
@@ -256,6 +266,7 @@ impl Step {
             Self::Start { .. } => "start",
             Self::Wait { .. } => "wait",
             Self::Review { .. } => "review",
+            Self::SkipReview { .. } => "skip_review",
             Self::Verdict { .. } => "verdict",
             Self::Land { .. } => "land",
             Self::MarkLanded { .. } => "mark_landed",
@@ -374,6 +385,14 @@ fn step_for(
     // that recorded request is what stops the next pass asking again.
     if input.review && awaiting_review(task) {
         return Some(Step::Review {
+            task: task.id.clone(),
+        });
+    }
+    // Review is off: the hand-in's own checks pass it, on the log. Only when
+    // review is off by configuration; a review that is on and failed to start
+    // never reaches here.
+    if !input.review && awaiting_review(task) {
+        return Some(Step::SkipReview {
             task: task.id.clone(),
         });
     }
@@ -1093,7 +1112,8 @@ mod tests {
             added(2, "A", &[]),
             spawned(3, "A", 1),
             reported(4, "A", 1),
-            gated(5, "A", 1, "lint"),
+            review_requested(5, "A", 1),
+            review_passed(5, "A", 1, 5),
             integrated(6, "A"),
             added(7, "B", &["A"]),
         ];
@@ -1392,7 +1412,12 @@ mod tests {
         let mut facts = Facts::default();
         facts.settled_findings.insert("A".to_string());
         let steps = plan_with(&state, &facts, &config(MergePolicy::Auto, 4), false);
-        assert!(steps.is_empty(), "{steps:?}");
+        assert!(
+            !steps
+                .iter()
+                .any(|step| matches!(step, Step::Verdict { .. })),
+            "{steps:?}"
+        );
     }
 
     #[test]
@@ -1679,8 +1704,9 @@ mod tests {
 
     #[test]
     fn a_hand_in_is_not_reviewed_when_no_reviewer_is_configured() {
-        // With no reviewer in the settings there is nothing to start, so the
-        // pass leaves the hand-in alone rather than failing a step every tick.
+        // With review off (no reviewer, or no rounds) there is nothing to
+        // start: the clean hand-in passes on its checks, recorded as a skip,
+        // rather than failing a review step every tick.
         let log = vec![
             started(1),
             added(2, "A", &[]),
@@ -1689,17 +1715,76 @@ mod tests {
         ];
         let state = folded(&log);
         let steps = plan_for(&state, &Facts::default(), &config(MergePolicy::Auto, 4));
-        assert!(steps.is_empty(), "{steps:?}");
+        assert_eq!(
+            steps,
+            vec![Step::SkipReview {
+                task: "A".to_string()
+            }]
+        );
     }
 
+    /// Review on but never started is not review off: nothing passes the task.
     #[test]
-    fn a_task_that_is_not_ready_to_land_is_left_alone() {
-        // Reported, never reviewed: not ready, and not startable either.
+    fn a_review_that_is_on_is_never_skipped() {
         let log = vec![
             started(1),
             added(2, "A", &[]),
             spawned(3, "A", 1),
             reported(4, "A", 1),
+        ];
+        let state = folded(&log);
+        let steps = plan_with(
+            &state,
+            &Facts::default(),
+            &config(MergePolicy::Auto, 4),
+            true,
+        );
+        assert!(
+            !steps
+                .iter()
+                .any(|step| matches!(step, Step::SkipReview { .. })),
+            "{steps:?}"
+        );
+    }
+
+    /// With review off a repository passes on its gates alone: the skip is
+    /// planned once, and once recorded the task is Passed.
+    #[test]
+    fn review_off_passes_on_the_hand_ins_checks() {
+        let mut log = vec![
+            started(1),
+            added(2, "A", &[]),
+            spawned(3, "A", 1),
+            reported(4, "A", 1),
+        ];
+        log.push(ev(
+            5,
+            EventKind::ReviewSkipped {
+                task: "A".to_string(),
+                attempt: 1,
+            },
+        ));
+        let state = folded(&log);
+        assert_eq!(state.tasks["A"].status, TaskStatus::Passed);
+        let steps = plan_for(&state, &Facts::default(), &config(MergePolicy::Auto, 4));
+        assert!(
+            !steps
+                .iter()
+                .any(|step| matches!(step, Step::SkipReview { .. })),
+            "the skip is recorded once: {steps:?}"
+        );
+    }
+
+    #[test]
+    fn a_task_that_is_not_ready_to_land_is_left_alone() {
+        // Reported, its review out and undecided: not ready, and not startable
+        // either.
+        let log = vec![
+            started(1),
+            added(2, "A", &[]),
+            spawned(3, "A", 1),
+            reported(4, "A", 1),
+            review_requested(5, "A", 1),
         ];
         let state = folded(&log);
         let steps = plan_for(&state, &Facts::default(), &config(MergePolicy::Auto, 4));

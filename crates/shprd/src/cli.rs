@@ -924,6 +924,17 @@ pub struct AskHookArgs {
 pub enum TaskVerb {
     /// Record a short progress line for a task.
     Status(TaskStatusArgs),
+    /// Move a handed-in (Reported or Passed) task back to Working, for the same
+    /// attempt and worktree, so its worker can hand in again. A human's verb.
+    Reopen(TaskReopenArgs),
+}
+
+/// Arguments for `task reopen`.
+#[derive(Debug, Args)]
+pub struct TaskReopenArgs {
+    /// The task to reopen.
+    #[arg(value_name = "TASK")]
+    pub task: String,
 }
 
 /// Arguments for `task status`.

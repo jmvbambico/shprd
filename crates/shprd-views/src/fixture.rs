@@ -84,9 +84,13 @@ pub fn events() -> Vec<Event> {
             EventKind::GatePassed {
                 task: "M1.1".to_string(),
                 attempt: 1,
-                gate: "lint".to_string(),
+                gate: "review".to_string(),
                 findings: vec![],
-                source: None,
+                source: Some(shprd_core::event::ReviewSource {
+                    reviewer: "codex/m1".to_string(),
+                    findings_sha256: "ba7816bf8f01cfea".to_string(),
+                    request_seq: 0,
+                }),
             },
         ),
         ev(

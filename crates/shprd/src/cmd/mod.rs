@@ -33,6 +33,7 @@ pub mod set;
 pub mod settings;
 pub mod spawn;
 pub mod sync;
+pub mod task;
 pub mod tick;
 pub mod verdict;
 pub mod view;
@@ -122,6 +123,7 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
         Some(Command::Agent { cmd }) => agent::dispatch(&ctx, cmd, cli.global.home.as_deref()),
         Some(Command::Task { cmd }) => match cmd {
             TaskVerb::Status(args) => agent::task_status(&ctx, &args),
+            TaskVerb::Reopen(args) => task::reopen(&ctx, &args),
         },
         Some(Command::Ask { cmd }) => match cmd {
             AskCommand::Hook(args) => ask::hook(&args, cli.global.repo.as_deref()),
@@ -241,7 +243,9 @@ pub fn kind_name(kind: &EventKind) -> &'static str {
         EventKind::TaskDropped { .. } => "task_dropped",
         EventKind::ScopeWidened { .. } => "scope_widened",
         EventKind::TaskStopped { .. } => "task_stopped",
+        EventKind::TaskReopened { .. } => "task_reopened",
         EventKind::ReviewRequested { .. } => "review_requested",
+        EventKind::ReviewSkipped { .. } => "review_skipped",
         EventKind::Dry { .. } => "dry",
         EventKind::Available { .. } => "available",
         EventKind::HandedOff { .. } => "handed_off",

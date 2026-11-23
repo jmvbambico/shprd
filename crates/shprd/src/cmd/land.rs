@@ -1247,25 +1247,26 @@ mod tests {
         assert!(marker.contains("no review was requested"), "{marker}");
     }
 
+    /// The marker under the new rules: a task can no longer be Passed by a
+    /// worker gate with a review requested and no verdict (it stays Reported),
+    /// so the one pass with no review behind it is review being off, recorded as
+    /// `ReviewSkipped`. A run that landed such a task is `degraded-review`.
     #[test]
-    fn an_independent_review_without_a_passed_gate_is_degraded() {
+    fn a_task_passed_with_review_off_is_degraded() {
         let mut log = reported_log("T1");
-        log.push(reviewed(5, "T1", "c1", false));
-        // Its own gates passed; only the review gate is missing.
         log.push(ev(
-            6,
-            EventKind::GatePassed {
+            5,
+            EventKind::ReviewSkipped {
                 task: "T1".to_string(),
                 attempt: 1,
-                gate: "lint".to_string(),
-                findings: Vec::new(),
-                source: None,
             },
         ));
-        log.push(integrated(7, "T1"));
-        let marker = review_marker(&folded(&log));
+        log.push(integrated(6, "T1"));
+        let state = folded(&log);
+        assert_eq!(state.tasks["T1"].status, TaskStatus::Integrated);
+        let marker = review_marker(&state);
         assert!(marker.starts_with(REVIEW_DEGRADED), "{marker}");
-        assert!(marker.contains("no passed review gate"), "{marker}");
+        assert!(marker.contains("T1: no review was requested"), "{marker}");
     }
 
     #[test]

@@ -547,6 +547,20 @@ pub enum EventKind {
         /// The attempt whose agent was stopped.
         attempt: u32,
     },
+    /// A person moved a handed-in task back to Working, for the same attempt.
+    ///
+    /// The recovery for a task stuck at Reported or Passed (a review that
+    /// cannot start, a scope fix the worker has to hand in again): the attempt,
+    /// its worktree and its branch stay, and the attempt's report, review
+    /// requests and gate results are cleared so the worker can hand in again
+    /// and be reviewed afresh. The earlier ones stay in the log. It is a human's
+    /// verb alone.
+    TaskReopened {
+        /// The task.
+        task: TaskId,
+        /// The attempt that is open again.
+        attempt: u32,
+    },
     /// A review was handed to a reviewer for an attempt.
     ///
     /// `degraded` is the fact a landing decision needs: it records that the
@@ -566,6 +580,20 @@ pub enum EventKind {
         /// instead". Empty for an ordinary review.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         note: Option<String>,
+    },
+    /// Review is off for this repository, so a hand-in that passed its own
+    /// checks passes on them alone.
+    ///
+    /// The engine records it, once, for an attempt that no review was ever
+    /// requested for while the repository's review is switched off
+    /// (`tasks.review_rounds = 0`, or no reviewer). It is the one way to
+    /// `Passed` that has no review verdict, and being an event it is on the
+    /// log: a review that merely failed to start never records it.
+    ReviewSkipped {
+        /// The task.
+        task: TaskId,
+        /// Attempt number.
+        attempt: u32,
     },
     /// An agent was put on cooldown (rate limit, quota, auth).
     Dry {
@@ -895,7 +923,9 @@ impl EventKind {
             | Self::TaskDropped { task, .. }
             | Self::ScopeWidened { task, .. }
             | Self::TaskStopped { task, .. }
+            | Self::TaskReopened { task, .. }
             | Self::ReviewRequested { task, .. }
+            | Self::ReviewSkipped { task, .. }
             | Self::HandedOff { task, .. }
             | Self::Override { task, .. }
             | Self::TaskPrOpened { task, .. }
@@ -1024,6 +1054,14 @@ mod tests {
                 task: "M1.3".to_string(),
                 attempt: 1,
             },
+            EventKind::TaskReopened {
+                task: "M1.3".to_string(),
+                attempt: 1,
+            },
+            EventKind::ReviewSkipped {
+                task: "M1.1".to_string(),
+                attempt: 1,
+            },
             EventKind::ReviewRequested {
                 task: "M1.1".to_string(),
                 attempt: 1,
@@ -1140,7 +1178,7 @@ mod tests {
     #[test]
     fn every_kind_round_trips() {
         let kinds = every_kind();
-        assert_eq!(kinds.len(), 29, "one case per EventKind variant");
+        assert_eq!(kinds.len(), 31, "one case per EventKind variant");
 
         for (index, kind) in kinds.into_iter().enumerate() {
             let event = Event {

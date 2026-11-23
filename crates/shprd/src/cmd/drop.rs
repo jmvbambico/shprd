@@ -241,13 +241,33 @@ mod tests {
         /// Drives `T1` on to Passed, with a passing `tests` gate.
         fn passed(&self) -> Result<()> {
             self.reported()?;
-            self.commit(EventKind::GatePassed {
-                task: "T1".to_string(),
-                attempt: 1,
-                gate: "tests".to_string(),
-                findings: Vec::new(),
-                source: None,
-            })
+            let engine = Ctx {
+                actor: shprd_core::event::Actor::Engine,
+                ..self.ctx.clone()
+            };
+            let request = engine
+                .commit(EventKind::ReviewRequested {
+                    task: "T1".to_string(),
+                    attempt: 1,
+                    reviewer: "codex/m1".to_string(),
+                    degraded: false,
+                    note: None,
+                })
+                .map_err(|err| anyhow!("{err}"))?;
+            engine
+                .commit(EventKind::GatePassed {
+                    task: "T1".to_string(),
+                    attempt: 1,
+                    gate: "review".to_string(),
+                    findings: Vec::new(),
+                    source: Some(shprd_core::event::ReviewSource {
+                        reviewer: "codex/m1".to_string(),
+                        findings_sha256: "ba7816bf8f01cfea".to_string(),
+                        request_seq: request.seq,
+                    }),
+                })
+                .map(|_| ())
+                .map_err(|err| anyhow!("{err}"))
         }
 
         /// Writes one tab record under `name`, as a spawn or a review leaves it.

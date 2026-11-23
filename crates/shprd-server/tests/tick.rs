@@ -763,9 +763,10 @@ fn a_hand_in_starts_the_engine_reviewer() {
 }
 
 #[test]
-fn a_pass_without_a_reviewer_leaves_the_hand_in_alone() {
-    // The review path is wired, but the settings name no reviewer, so there is
-    // nothing to start and the pass plans no review step.
+fn a_pass_without_a_reviewer_passes_the_hand_in_on_its_checks() {
+    // The review path is wired, but the settings name no reviewer: review is
+    // off, so there is nothing to start and the clean hand-in passes on its
+    // checks, recorded as a skipped review (never as a review verdict).
     let mut log = vec![started(), added(2, "A")];
     log.extend(handed_in(3));
     let fixture = Fixture::new(log);
@@ -793,7 +794,11 @@ fn a_pass_without_a_reviewer_leaves_the_hand_in_alone() {
 
     let report = worker.tick().expect("the pass ran");
 
-    assert!(report.steps.is_empty(), "{:?}", report.steps);
+    let actions: Vec<&str> = report.steps.iter().map(|s| s.action.as_str()).collect();
+    assert_eq!(actions, ["skip_review"], "{:?}", report.steps);
+    // A second pass has nothing left to do: the skip is recorded once.
+    let again = worker.tick().expect("the pass ran");
+    assert!(again.steps.is_empty(), "{:?}", again.steps);
 }
 
 /// A worker over `fixture` whose review path is `review`.
