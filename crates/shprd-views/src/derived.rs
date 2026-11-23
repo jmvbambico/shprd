@@ -1913,6 +1913,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::expect_used)]
     fn a_clash_reads_needs_you_only_once_the_redo_is_overdue() {
         use shprd_core::state::{Escalation, RunState};
         let mut state = RunState::default();
@@ -1947,9 +1948,9 @@ mod tests {
             seq: 3,
             by_agent: false,
         });
-        let soon = TaskSignal::from_state_at(&state, "T1", 1_000_000 + 60_000).unwrap();
+        let soon = TaskSignal::from_state_at(&state, "T1", 1_000_000 + 60_000).expect("T1");
         assert_ne!(derive_from_fold(&soon, NOW).status, DerivedStatus::NeedsYou);
-        let late = TaskSignal::from_state_at(&state, "T1", 1_000_000 + 11 * 60_000).unwrap();
+        let late = TaskSignal::from_state_at(&state, "T1", 1_000_000 + 11 * 60_000).expect("T1");
         assert_eq!(derive_from_fold(&late, NOW).status, DerivedStatus::NeedsYou);
     }
 
