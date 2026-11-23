@@ -12,14 +12,11 @@
 //! gate, so `SHPRD_ACTOR` naming a human is the whole condition.
 
 use anyhow::anyhow;
-use shprd_core::event::{Actor, AgentId, EventKind};
+use shprd_core::event::{AgentId, EventKind};
 use shprd_core::state::RunState;
 
 use crate::cli::ReadmitArgs;
 use crate::ctx::{CliError, Ctx};
-
-/// The variable naming who acts, repeated here because the refusal names it.
-const ACTOR_ENV: &str = "SHPRD_ACTOR";
 
 /// Records that `agent` is usable again, which the run's rules only allow a
 /// human or the engine to do.
@@ -53,7 +50,7 @@ pub fn readmit_verb(ctx: &Ctx, args: &ReadmitArgs) -> Result<(), CliError> {
 /// both are accepted: the spelling the log holds wins, and a dry one is
 /// preferred over a spelling that is known but already available, which lets
 /// the rules say "not dry" about the right agent.
-fn stored_agent(state: &RunState, named: &str) -> Option<AgentId> {
+pub(crate) fn stored_agent(state: &RunState, named: &str) -> Option<AgentId> {
     let mut candidates: Vec<&str> = vec![named];
     if let Some((program, model)) = named.split_once('/')
         && !program.is_empty()
@@ -76,7 +73,7 @@ fn stored_agent(state: &RunState, named: &str) -> Option<AgentId> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shprd_core::event::Event;
+    use shprd_core::event::{Actor, Event};
 
     fn dried_state(agent: &str) -> RunState {
         let events = vec![

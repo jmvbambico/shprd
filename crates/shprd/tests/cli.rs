@@ -2256,3 +2256,53 @@ fn sync_reads_the_actor_the_same_way() {
     assert_eq!(output.status.code(), Some(2), "{stderr}");
     assert!(stderr.contains("cannot sync the base"), "{stderr}");
 }
+
+/// Item 14: `agent propose` raises a card and writes nothing else; an agent
+/// may raise one, and the verb is not run by raising it.
+#[test]
+fn a_proposal_raises_a_card_and_runs_nothing() {
+    let dir = repo();
+    let root = dir.path();
+    start(root);
+    add_task(root, "T1", "crates/shprd");
+    let output = run_as(
+        root,
+        "agent:w1",
+        &["agent", "propose", "drop", "T1", "--reason", "it is stuck"],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let last = last_event(root);
+    assert_eq!(last["kind"], "ask_raised", "{last}");
+    assert_eq!(last["ask"], "propose-drop-1");
+    assert_eq!(last["options"][0], "confirm drop");
+    assert_eq!(last["options"][1], "leave it");
+    assert!(
+        last["text"]
+            .as_str()
+            .is_some_and(|t| t.contains("reason: it is stuck")),
+        "{last}"
+    );
+    let log = std::fs::read_to_string(log_path(root)).unwrap_or_default();
+    assert!(!log.contains("task_dropped"), "nothing was dropped");
+
+    // A second proposal of the same verb gets the next number; an override
+    // must name a rule the run reads.
+    ok(
+        root,
+        &["agent", "propose", "drop", "T1", "--reason", "still stuck"],
+    );
+    assert_eq!(last_event(root)["ask"], "propose-drop-2");
+    let before = last_event(root);
+    let message = run(
+        root,
+        &[
+            "agent", "propose", "override", "T1", "--reason", "x", "--rule", "nope",
+        ],
+    );
+    assert_eq!(message.status.code(), Some(2));
+    assert_eq!(last_event(root), before);
+}

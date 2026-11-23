@@ -316,13 +316,7 @@ mod tests {
         let tab = shprd_mux::TabId::new("tab-7");
         fixture.record_tab(&tab)?;
 
-        drop_task(
-            &fake,
-            &fixture.ctx,
-            &fixture.args(),
-            fixture.home(),
-        )
-        .map_err(failed)?;
+        drop_task(&fake, &fixture.ctx, &fixture.args(), fixture.home()).map_err(failed)?;
 
         assert_eq!(status(&fixture)?, TaskStatus::Dropped);
         let state = fixture.ctx.state().map_err(failed)?;
@@ -347,13 +341,7 @@ mod tests {
         fixture.working()?;
         let fake = FakeMux::default();
 
-        drop_task(
-            &fake,
-            &fixture.ctx,
-            &fixture.args(),
-            fixture.home(),
-        )
-        .map_err(failed)?;
+        drop_task(&fake, &fixture.ctx, &fixture.args(), fixture.home()).map_err(failed)?;
 
         assert_eq!(status(&fixture)?, TaskStatus::Dropped);
         Ok(())
@@ -393,14 +381,9 @@ mod tests {
 
         // The test harness's stdin is not a terminal, which is exactly the case
         // an agent's shell tool is in.
-        let err = drop_task(
-            &FakeMux::default(),
-            &fixture.ctx,
-            &args,
-            fixture.home(),
-        )
-        .err()
-        .context("a drop with no terminal and no --yes must be refused")?;
+        let err = drop_task(&FakeMux::default(), &fixture.ctx, &args, fixture.home())
+            .err()
+            .context("a drop with no terminal and no --yes must be refused")?;
 
         assert_eq!(err.exit_code(), 2, "{err}");
         assert!(err.to_string().contains("shprd drop"), "{err}");
@@ -508,14 +491,9 @@ mod tests {
         fixture.record_tab(&tab)?;
         let before = fixture.log_text()?;
 
-        let err = drop_task(
-            &fake,
-            &fixture.ctx,
-            &fixture.args(),
-            fixture.home(),
-        )
-        .err()
-        .context("a tab the host keeps must refuse the drop")?;
+        let err = drop_task(&fake, &fixture.ctx, &fixture.args(), fixture.home())
+            .err()
+            .context("a tab the host keeps must refuse the drop")?;
 
         assert_eq!(err.exit_code(), 2, "{err}");
         let message = err.to_string();
@@ -535,13 +513,7 @@ mod tests {
         let fake = FakeMux::default();
         fixture.record_tab(&shprd_mux::TabId::new("tab-7"))?;
 
-        drop_task(
-            &fake,
-            &fixture.ctx,
-            &fixture.args(),
-            fixture.home(),
-        )
-        .map_err(failed)?;
+        drop_task(&fake, &fixture.ctx, &fixture.args(), fixture.home()).map_err(failed)?;
 
         assert_eq!(status(&fixture)?, TaskStatus::Dropped);
         Ok(())
@@ -559,13 +531,7 @@ mod tests {
         fixture.record_tab(&worker)?;
         fixture.record_review_tab(&reviewer)?;
 
-        drop_task(
-            &fake,
-            &fixture.ctx,
-            &fixture.args(),
-            fixture.home(),
-        )
-        .map_err(failed)?;
+        drop_task(&fake, &fixture.ctx, &fixture.args(), fixture.home()).map_err(failed)?;
 
         assert!(
             fake.calls().contains(&Call::CloseTab(reviewer)),
@@ -595,13 +561,7 @@ mod tests {
         fixture.record("T1-audit-a1.tab", &neighbour)?;
         fixture.record("T1-audit-a1-review.tab", &neighbour_reviewer)?;
 
-        drop_task(
-            &fake,
-            &fixture.ctx,
-            &fixture.args(),
-            fixture.home(),
-        )
-        .map_err(failed)?;
+        drop_task(&fake, &fixture.ctx, &fixture.args(), fixture.home()).map_err(failed)?;
 
         let calls = fake.calls();
         assert!(

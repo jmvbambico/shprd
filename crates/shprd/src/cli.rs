@@ -771,6 +771,48 @@ pub enum AgentCommand {
     Handoff(HandoffArgs),
     /// Open a cross-vendor reviewer on a finished attempt's diff.
     Review(ReviewArgs),
+    /// Propose a human-only verb: the person confirms it on a card.
+    ///
+    /// Raises one needs-you card on the task naming the verb and the reason,
+    /// with the choices `confirm <verb>` and `leave it`. Nothing is run by this
+    /// verb: only the person's confirmation runs it, as the person, so
+    /// recovery never needs a terminal of their own.
+    Propose(ProposeArgs),
+}
+
+/// The human-only verbs an agent may propose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum ProposedVerb {
+    /// `shprd drop`: the task will not be done.
+    Drop,
+    /// `shprd task reopen`: a handed-in task is worked on again.
+    Reopen,
+    /// `shprd sync`: bring the base branch into the integration branch.
+    Sync,
+    /// `shprd override`: set a rule aside for the task.
+    Override,
+    /// `shprd readmit`: an agent is usable again.
+    Readmit,
+}
+
+/// Arguments for `agent propose`.
+#[derive(Debug, Args)]
+pub struct ProposeArgs {
+    /// The verb to propose.
+    #[arg(value_enum, value_name = "VERB")]
+    pub verb: ProposedVerb,
+    /// The task whose card carries the proposal.
+    #[arg(value_name = "TASK")]
+    pub task: String,
+    /// Why, in one sentence for the person.
+    #[arg(long, value_name = "TEXT")]
+    pub reason: String,
+    /// For `override`: the rule to set aside.
+    #[arg(long, value_name = "RULE")]
+    pub rule: Option<String>,
+    /// For `readmit`: the agent to bring back.
+    #[arg(long, value_name = "AGENT")]
+    pub agent: Option<String>,
 }
 
 /// Plan verbs.

@@ -557,6 +557,18 @@ pub(crate) fn answer_ask(
             "this service was started without a host, so it cannot start a review",
         ));
     }
+    // A proposal card's `confirm` is the person running the verb the card
+    // names. The rules are asked first, so an answer the rules would refuse is
+    // not consumed; a sync is no event alone, so it is run after the answer.
+    let proposal = match proposal_of(&before, task, ask, answer)? {
+        Some(Proposal::Event(kind)) => {
+            before
+                .check_as(ctx.actor, &kind, SystemClock.now_ms())
+                .map_err(|err| ApiReject::refused(err.to_string()))?;
+            Some(Proposal::Event(kind))
+        }
+        other => other,
+    };
     let queue = shprd_core::ask::AskQueue::for_repo(ctx.repo);
     let now_ms = SystemClock.now_ms();
     let answered: shprd_core::ask::Ask =
@@ -583,6 +595,20 @@ pub(crate) fn answer_ask(
     if let Some(kind) = followup {
         let acted = ledger::commit(ctx.repo, ctx.actor, kind).map_err(commit_error)?;
         ctx.hub.publish(acted.seq);
+    }
+    match proposal {
+        Some(Proposal::Event(kind)) => {
+            let acted = ledger::commit(ctx.repo, ctx.actor, kind).map_err(commit_error)?;
+            ctx.hub.publish(acted.seq);
+        }
+        Some(Proposal::Sync) => {
+            run_sync(ctx.repo)?;
+            // The verb wrote its own event from its own process.
+            if let Ok((state, _)) = ledger::load(ctx.repo) {
+                ctx.hub.publish(state.last_seq);
+            }
+        }
+        None => {}
     }
     if let Some(kind) = widening {
         // The scope is wider now. A worker that is running is told which paths
@@ -640,6 +666,119 @@ pub(crate) fn answer_ask(
         ok: true,
         ask: asked,
     })
+}
+
+/// What a confirmed proposal card runs.
+enum Proposal {
+    /// A verb that is one event, checked by the rules before the answer.
+    Event(EventKind),
+    /// `shprd sync`, which merges in the integration worktree.
+    Sync,
+}
+
+/// The id every `shprd agent propose` card begins with.
+const PROPOSE_ASK_PREFIX: &str = "propose-";
+
+/// What a proposal card's confirming choice begins with.
+const PROPOSE_CONFIRM: &str = "confirm ";
+
+/// The verb a confirmed proposal card stands for, or `None` when `ask` is not
+/// a proposal or `answer` is not its confirmation (`leave it`, anything else).
+///
+/// The card's shape is `shprd agent propose`'s: id `propose-<verb>-<n>`, a
+/// `confirm <verb> [<subject>]` choice and a `reason: ` line in the text. The
+/// answer must be the confirmation for the verb in the id, so a free-typed
+/// answer cannot run another verb.
+fn proposal_of(
+    state: &shprd_core::state::RunState,
+    task: &str,
+    ask: &str,
+    answer: &str,
+) -> Result<Option<Proposal>, ApiReject> {
+    let Some(rest) = ask.strip_prefix(PROPOSE_ASK_PREFIX) else {
+        return Ok(None);
+    };
+    let verb = rest.split('-').next().unwrap_or_default();
+    let Some(chosen) = answer.trim().strip_prefix(PROPOSE_CONFIRM) else {
+        return Ok(None);
+    };
+    let (word, subject) = match chosen.trim().split_once(' ') {
+        Some((word, subject)) => (word, subject.trim()),
+        None => (chosen.trim(), ""),
+    };
+    if word != verb {
+        return Ok(None);
+    }
+    let record = state
+        .asks
+        .get(&(task.to_string(), ask.to_string()))
+        .ok_or_else(|| ApiReject::refused(format!("{ask} is not an ask of {task}")))?;
+    // Only the choices the card offered count: the subject is the card's, not
+    // free text.
+    if !record.options.iter().any(|option| option == answer.trim()) {
+        return Ok(None);
+    }
+    let reason = record
+        .text
+        .split_once("\nreason: ")
+        .map(|(_, reason)| reason.trim().to_string())
+        .unwrap_or_default();
+    let found = state
+        .tasks
+        .get(task)
+        .ok_or_else(|| ApiReject::unknown_task(task))?;
+    let kind = match verb {
+        "drop" => EventKind::TaskDropped {
+            task: task.to_string(),
+            reason,
+        },
+        "reopen" => EventKind::TaskReopened {
+            task: task.to_string(),
+            attempt: found
+                .latest_attempt()
+                .map(|attempt| attempt.n)
+                .ok_or_else(|| ApiReject::refused(format!("{task} has no attempt to reopen")))?,
+        },
+        "override" => EventKind::Override {
+            task: task.to_string(),
+            rule: subject.to_string(),
+            reason,
+        },
+        "readmit" => EventKind::Available {
+            agent: subject.to_string(),
+            reason,
+        },
+        "sync" => return Ok(Some(Proposal::Sync)),
+        other => {
+            return Err(ApiReject::refused(format!(
+                "{other:?} is not a verb a proposal can name"
+            )));
+        }
+    };
+    Ok(Some(Proposal::Event(kind)))
+}
+
+/// Runs `shprd sync` as the person, in `repo`, by the service's own binary.
+///
+/// It is the same verb the CLI runs, so the merge, the lock and the event are
+/// one implementation. A failure is the verb's own words.
+fn run_sync(repo: &Path) -> Result<(), ApiReject> {
+    let exe = std::env::current_exe()
+        .map_err(|err| ApiReject::internal(format!("cannot find the shprd binary: {err}")))?;
+    let output = std::process::Command::new(exe)
+        .arg("--repo")
+        .arg(repo)
+        .args(["--as", "human", "--no-dagr", "sync"])
+        .env_remove("SHPRD_ACTOR")
+        .output()
+        .map_err(|err| ApiReject::internal(format!("could not run `shprd sync`: {err}")))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(ApiReject::refused(format!(
+        "shprd sync failed: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    )))
 }
 
 /// Maps an ask-queue failure to the status a client sees.
@@ -729,4 +868,123 @@ fn commit_error(err: CommitError) -> ApiReject {
 /// problem, not the client's.
 fn read_error(err: ReadError) -> ApiReject {
     ApiReject::internal(err.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use shprd_core::ask::AskKind;
+    use shprd_core::event::Event;
+    use shprd_core::state::RunState;
+
+    use super::*;
+
+    /// A run with task `T1` and one proposal card on it.
+    fn state_with(ask: &str, text: &str, options: &[&str]) -> RunState {
+        let kinds = vec![
+            EventKind::RunStarted {
+                run_id: "r".to_string(),
+                repo: "/tmp/repo".to_string(),
+                base_branch: "main".to_string(),
+                integration_branch: "integration/m1".to_string(),
+            },
+            EventKind::TaskAdded {
+                task: "T1".to_string(),
+                title: "a task".to_string(),
+                scope: vec!["src".to_string()],
+                acceptance: vec!["it works".to_string()],
+                tags: Vec::new(),
+                skills: Vec::new(),
+                deps: Vec::new(),
+            },
+            EventKind::AskRaised {
+                task: "T1".to_string(),
+                ask: ask.to_string(),
+                ask_kind: AskKind::Question,
+                text: text.to_string(),
+                options: options.iter().map(|o| (*o).to_string()).collect(),
+                created_at_ms: 5,
+                expires_at_ms: None,
+            },
+        ];
+        let events: Vec<Event> = kinds
+            .into_iter()
+            .enumerate()
+            .map(|(i, kind)| Event {
+                seq: i as u64 + 1,
+                at_ms: 1,
+                actor: Actor::Engine,
+                kind,
+            })
+            .collect();
+        RunState::fold(&events).expect("fold")
+    }
+
+    #[test]
+    fn confirming_a_drop_proposal_is_the_drop_with_the_cards_reason() {
+        let state = state_with(
+            "propose-drop-1",
+            "T1: run `drop`?\nreason: stuck",
+            &["confirm drop", "leave it"],
+        );
+        match proposal_of(&state, "T1", "propose-drop-1", "confirm drop").unwrap() {
+            Some(Proposal::Event(EventKind::TaskDropped { task, reason })) => {
+                assert_eq!(task, "T1");
+                assert_eq!(reason, "stuck");
+            }
+            _ => panic!("a confirmed drop proposal is a drop"),
+        }
+    }
+
+    #[test]
+    fn leaving_it_or_typing_something_else_runs_nothing() {
+        let state = state_with(
+            "propose-drop-1",
+            "T1: run `drop`?\nreason: stuck",
+            &["confirm drop", "leave it"],
+        );
+        for answer in ["leave it", "yes", "confirm override x", "confirm drop now"] {
+            assert!(
+                proposal_of(&state, "T1", "propose-drop-1", answer)
+                    .unwrap()
+                    .is_none(),
+                "{answer:?} must not run the verb"
+            );
+        }
+    }
+
+    #[test]
+    fn an_override_proposal_carries_the_rule_the_card_offered() {
+        let state = state_with(
+            "propose-override-1",
+            "T1: run `override r1`?\nreason: cosmetic",
+            &["confirm override r1", "leave it"],
+        );
+        match proposal_of(&state, "T1", "propose-override-1", "confirm override r1").unwrap() {
+            Some(Proposal::Event(EventKind::Override { rule, reason, .. })) => {
+                assert_eq!(rule, "r1");
+                assert_eq!(reason, "cosmetic");
+            }
+            _ => panic!("a confirmed override proposal is an override"),
+        }
+    }
+
+    #[test]
+    fn a_sync_proposal_is_run_as_a_verb_and_other_asks_are_not_proposals() {
+        let state = state_with(
+            "propose-sync-1",
+            "T1: run `sync`?\nreason: base moved",
+            &["confirm sync", "leave it"],
+        );
+        assert!(matches!(
+            proposal_of(&state, "T1", "propose-sync-1", "confirm sync").unwrap(),
+            Some(Proposal::Sync)
+        ));
+        assert!(
+            proposal_of(&state, "T1", "scope-widen-1", "confirm drop")
+                .unwrap()
+                .is_none()
+        );
+    }
 }
