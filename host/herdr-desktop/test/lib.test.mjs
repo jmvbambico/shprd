@@ -645,7 +645,7 @@ test("attach looks once more before believing a null", async () => {
 // -- several repositories, one service (SHPR-77) -------------------------------
 
 /** The one service's files, and a fake `fetch` that answers health and registration. */
-function oneService() {
+function oneService(extra = {}) {
   const dir = stateDir("/home/ana", {});
   herdr.setHome("/home/ana");
   herdr.putFile(serviceFile(dir), JSON.stringify({ port: 7001, id: "id-one", pid: 1 }));
@@ -655,7 +655,7 @@ function oneService() {
     "/api/health": { body: { id: "id-one" } },
     "/api/state": { body: { seq: 1, tasks: [] } },
     "/api/roster": { body: {} },
-    "*": { body: {} },
+    ...extra,
     "/api/repos": (_url, init) => {
       const folder = JSON.parse(init.body).folder;
       registered.push(folder);
@@ -696,7 +696,8 @@ test("a repository's calls name it, and a global route does not", async () => {
 const SERVICE_SCOPED = ["state", "changes", "asks", "chat", "terminal", "action", "graph", "tasks", "settings", "coordinator", "agents", "ws"];
 
 test("every client call about a repository names it and every write sends x-shprd", async () => {
-  const doFetch = oneService();
+  // Only this test answers every route: the others fail on a call they did not expect.
+  const doFetch = oneService({ "*": { body: {} } });
   forgetRegistered();
   const { client } = await attach(null, { fetch: doFetch, folder: "/work/shop" });
   doFetch.calls.length = 0;
