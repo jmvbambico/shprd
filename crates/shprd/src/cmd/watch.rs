@@ -776,6 +776,29 @@ fn tick_task(
     // either, so only a start this tick can measure counts.
     let started_at = worker_started_at_ms(events, &task.id, attempt.n);
     let starting_up = started_at <= now_ms && now_ms.saturating_sub(started_at) < EXIT_GRACE_MS;
+    // The first worker of an attempt that ends inside the start window never
+    // started: it is a failed attempt the person restarts, not a worker to hand
+    // on silently, and the board must not go on saying it is working.
+    if starting_up
+        && first_worker(events, &task.id, attempt.n)
+        && let Some(why) = ended_at_start(mux, pane.as_ref())
+    {
+        env.ctx.commit(EventKind::Reported {
+            task: task.id.clone(),
+            attempt: attempt.n,
+            status: ReportStatus::Failed,
+            summary: format!("the worker ended within seconds of starting ({why})"),
+            tests: Vec::new(),
+            checks: Vec::new(),
+            changed_paths: Vec::new(),
+            commit: None,
+            skills_used: Vec::new(),
+            proofs: Vec::new(),
+        })?;
+        lines.push(format!("worker of {} ended at start: {why}", task.id));
+        watcher.watches.remove(&key);
+        return Ok(());
+    }
     let process_exited = process_exited && !starting_up;
     let record_error = record_error(
         program,
@@ -1040,6 +1063,59 @@ fn reported_or_gated_ms(events: &[Event], task: &str, attempt: u32, now_ms: u64)
             _ => false,
         };
         (mine && event.at_ms <= now_ms).then_some(event.at_ms)
+    })
+}
+
+/// Whether the attempt's newest worker is the one its spawn started: no
+/// hand-off has replaced it.
+fn first_worker(events: &[Event], task: &str, attempt: u32) -> bool {
+    events
+        .iter()
+        .rev()
+        .find_map(|event| match &event.kind {
+            EventKind::Spawned {
+                task: id,
+                attempt: n,
+                ..
+            } if id == task => Some(*n == attempt),
+            EventKind::HandedOff { task: id, .. } if id == task => Some(false),
+            _ => None,
+        })
+        .unwrap_or(false)
+}
+
+/// Why a worker's terminal ended, with its exit code and the last lines on its
+/// screen; `None` while it still runs or the host cannot say.
+///
+/// A pane the host no longer has is an end with nothing left to read.
+fn ended_at_start(mux: &dyn Host, pane: Option<&PaneId>) -> Option<String> {
+    let Some(pane) = pane else {
+        return Some(String::from("its terminal closed; no exit code"));
+    };
+    let outcome = match mux.exit_of(pane) {
+        Ok(Some(outcome)) => outcome,
+        Ok(None) => return None,
+        Err(MuxError::NotFound { .. }) => {
+            return Some(String::from("its terminal closed; no exit code"));
+        }
+        Err(_) => return None,
+    };
+    let code = outcome.exit_code.map_or_else(
+        || String::from("no exit code"),
+        |code| format!("exit {code}"),
+    );
+    let screen = mux.read(pane, 40).unwrap_or_default();
+    let tail: Vec<&str> = screen
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    let tail = tail[tail.len().saturating_sub(3)..].join(" | ");
+    let tail: String = tail.chars().take(300).collect();
+    Some(if tail.is_empty() {
+        code
+    } else {
+        format!("{code}; last lines: {tail}")
     })
 }
 
@@ -2089,6 +2165,51 @@ project_dirs = []
                 "a restarted watchdog retried an escalated attempt: {fresh:?}"
             );
         }
+    }
+
+    /// F4: a first worker whose terminal exits about 3 s after it spawned is
+    /// recorded as a failed attempt with its exit code and last screen lines,
+    /// the task is no longer Working, and nothing is handed off in silence.
+    #[test]
+    fn a_worker_that_exits_three_seconds_after_spawn_is_a_failed_attempt() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.env(&ctx, &["sh"]);
+        let mux = mux_with_workspace(&scratch);
+        seed(&mux, &env);
+        let pane = pane_of_tab(&mux, &scratch, &tab_id(&env));
+        mux.set_exited(&pane, Some(127));
+        let started = worker_started_at_ms(&events(&ctx), "T1", 1);
+
+        let mut watcher = Watcher::new(Policy::default());
+        let before = events(&ctx).len();
+        watcher
+            .tick(&mux, &env, started + 3_000)
+            .unwrap_or_else(|err| panic!("{err}"));
+        let fresh = events(&ctx)[before..].to_vec();
+        assert_eq!(count(&fresh, is_handoff), 0, "{fresh:?}");
+        let summary = fresh.iter().find_map(|event| match &event.kind {
+            EventKind::Reported {
+                status: ReportStatus::Failed,
+                summary,
+                ..
+            } => Some(summary.clone()),
+            _ => None,
+        });
+        let summary = summary.unwrap_or_else(|| panic!("no failed report: {fresh:?}"));
+        assert!(summary.contains("exit 127"), "{summary}");
+        let (state, _) = ctx.load().unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(
+            state.tasks.get("T1").map(|task| task.status),
+            Some(TaskStatus::Failed)
+        );
+
+        // Nothing more is recorded on the next pass.
+        let before = events(&ctx).len();
+        watcher
+            .tick(&mux, &env, started + 8_000)
+            .unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(events(&ctx).len(), before);
     }
 
     /// A hand-off that fails is one escalation, not one a tick: the watch parks
