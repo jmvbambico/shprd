@@ -61,6 +61,10 @@ task: string, } | { "kind": "task.stop",
 /**
  * The task whose agent should stop.
  */
+task: string, } | { "kind": "task.reopen", 
+/**
+ * The task to reopen.
+ */
 task: string, } | { "kind": "task.drop", 
 /**
  * The task to drop.

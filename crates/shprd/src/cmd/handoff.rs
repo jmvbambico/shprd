@@ -52,11 +52,15 @@ pub struct HandoffRequest {
     pub opening: Option<String>,
 }
 
-/// The attempt being handed over: the latest one, which must be Working.
+/// The attempt being handed over: the latest one, which must be Working, or
+/// Reported or Passed, which the hand-off reopens first.
 fn working_attempt(task: &Task) -> Result<&Attempt, CliError> {
-    if task.status != TaskStatus::Working {
+    if !matches!(
+        task.status,
+        TaskStatus::Working | TaskStatus::Reported | TaskStatus::Passed
+    ) {
         return Err(CliError::Invalid(anyhow!(
-            "task {:?} is {:?}, not Working: only a task an agent is working on can be handed off",
+            "task {:?} is {:?}, not Working, Reported or Passed: only a task an agent is working on or has handed in can be handed off",
             task.id,
             task.status
         )));
@@ -375,6 +379,14 @@ pub fn handoff(
     let task = spawn::task_of(&state, &req.task)?;
     let attempt = working_attempt(task)?;
     let from = attempt.agent.clone();
+    // A handed-in task has no agent working on it, so the hand-off reopens it
+    // first: the same attempt, back to Working, for the agent that takes over.
+    let reopen = matches!(task.status, TaskStatus::Reported | TaskStatus::Passed).then(|| {
+        EventKind::TaskReopened {
+            task: task.id.clone(),
+            attempt: attempt.n,
+        }
+    });
     let Some(mut to) = pick_to(
         &state,
         &env.programs,
@@ -410,13 +422,33 @@ pub fn handoff(
         to.model = line.model.clone();
     }
     // Refuse before any effect: a refused hand-off must leave nothing behind.
-    env.ctx.check(&EventKind::HandedOff {
+    let handed_off = EventKind::HandedOff {
         task: task.id.clone(),
         from_agent: from.clone(),
         to_agent: to.agent.clone(),
         checkpoint: "<pending>".to_string(),
         reason: Some(req.reason.clone()),
-    })?;
+    };
+    match &reopen {
+        None => env.ctx.check(&handed_off)?,
+        Some(reopen) => {
+            env.ctx.check(reopen)?;
+            // The hand-off itself is judged against the task as reopened.
+            let mut reopened = state.clone();
+            let at_ms = SystemClock.now_ms();
+            reopened
+                .apply(&Event {
+                    seq: reopened.last_seq + 1,
+                    at_ms,
+                    actor: env.ctx.actor.clone(),
+                    kind: reopen.clone(),
+                })
+                .map_err(CliError::Refused)?;
+            reopened
+                .check_as(&env.ctx.actor, &handed_off, at_ms)
+                .map_err(CliError::Refused)?;
+        }
+    }
     let worktree = PathBuf::from(&attempt.worktree);
     let handoff_no = previous_handoffs(&events, &task.id, attempt.n) + 1;
     let brief_path = handoff_brief_path(&env.briefs_dir, &env.run, &task.id, attempt.n, handoff_no);
@@ -598,6 +630,12 @@ pub fn handoff(
         checkpoint: checkpoint.clone(),
         reason: Some(req.reason.clone()),
     };
+    if let Some(reopen) = reopen
+        && let Err(err) = env.ctx.commit(reopen)
+    {
+        spawn::close_tab(mux, &tab_id);
+        return Err(err);
+    }
     if let Err(err) = env.ctx.commit(kind) {
         spawn::close_tab(mux, &tab_id);
         return Err(err);

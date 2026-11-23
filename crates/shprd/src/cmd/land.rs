@@ -1248,27 +1248,6 @@ mod tests {
     }
 
     #[test]
-    fn an_independent_review_without_a_passed_gate_is_degraded() {
-        let mut log = reported_log("T1");
-        log.push(reviewed(5, "T1", "c1", false));
-        // Its own gates passed; only the review gate is missing.
-        log.push(ev(
-            6,
-            EventKind::GatePassed {
-                task: "T1".to_string(),
-                attempt: 1,
-                gate: "lint".to_string(),
-                findings: Vec::new(),
-                source: None,
-            },
-        ));
-        log.push(integrated(7, "T1"));
-        let marker = review_marker(&folded(&log));
-        assert!(marker.starts_with(REVIEW_DEGRADED), "{marker}");
-        assert!(marker.contains("no passed review gate"), "{marker}");
-    }
-
-    #[test]
     fn an_unproven_verdict_degrades_the_marker() {
         // A pass nothing proves is the bug the marker has to catch: the log
         // says a review passed, but no reviewer wrote the findings it decided.

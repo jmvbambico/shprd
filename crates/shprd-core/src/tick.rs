@@ -1093,7 +1093,8 @@ mod tests {
             added(2, "A", &[]),
             spawned(3, "A", 1),
             reported(4, "A", 1),
-            gated(5, "A", 1, "lint"),
+            review_requested(5, "A", 1),
+            review_passed(5, "A", 1, 5),
             integrated(6, "A"),
             added(7, "B", &["A"]),
         ];

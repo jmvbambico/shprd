@@ -1044,6 +1044,17 @@ pub enum Action {
         /// The task whose agent should stop.
         task: String,
     },
+    /// Move a handed-in task back to Working, as `shprd task reopen` does.
+    ///
+    /// The recovery for a task stuck at Reported or Passed: the same attempt
+    /// and worktree stay, the attempt's hand-in and review are cleared, and the
+    /// worker can hand in again. It is the person's verb alone; a task in any
+    /// other status is refused with its reason.
+    #[serde(rename = "task.reopen")]
+    TaskReopen {
+        /// The task to reopen.
+        task: String,
+    },
     /// Drop a task, as `shprd drop` does.
     ///
     /// It is the person's decision that the task will not be done, and it is
@@ -1137,6 +1148,8 @@ impl Action {
         "task_retry",
         "task.stop",
         "task_stop",
+        "task.reopen",
+        "task_reopen",
         "task.drop",
         "task_drop",
         "task.drop_many",
@@ -1174,6 +1187,7 @@ impl Action {
             Self::TaskStart { .. } => "task.start",
             Self::TaskRetry { .. } => "task.retry",
             Self::TaskStop { .. } => "task.stop",
+            Self::TaskReopen { .. } => "task.reopen",
             Self::TaskDrop { .. } => "task.drop",
             Self::TaskDropMany { .. } => "task.drop_many",
             Self::TaskAccept { .. } => "task.accept",
@@ -1197,6 +1211,7 @@ impl Action {
                 "task_start" => Some("task.start"),
                 "task_retry" => Some("task.retry"),
                 "task_stop" => Some("task.stop"),
+                "task_reopen" => Some("task.reopen"),
                 "task_drop" => Some("task.drop"),
                 "task_drop_many" => Some("task.drop_many"),
                 "task_accept" => Some("task.accept"),

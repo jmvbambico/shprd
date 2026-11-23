@@ -463,7 +463,7 @@ mod tests {
             body.contains("| M1.1 | event log | claude | opus | feature/m1-events | abc123 |"),
             "{body}"
         );
-        assert!(body.contains("- M1.1 a1 `lint`: pass"), "{body}");
+        assert!(body.contains("- M1.1 a1 `review`: pass"), "{body}");
         assert!(
             body.contains("## Tests\n\n- cargo test -p shprd-core: ok"),
             "{body}"
@@ -500,7 +500,7 @@ mod tests {
     fn gates_show_their_verdict_and_findings() {
         let body = fixture_body();
         assert!(body.contains("## Gates"), "{body}");
-        assert!(body.contains("- M1.1 a1 `lint`: pass"), "{body}");
+        assert!(body.contains("- M1.1 a1 `review`: pass"), "{body}");
         assert!(body.contains("- M1.2 a1 `clippy`: fail"), "{body}");
         assert!(body.contains("  - major: unwrap used"), "{body}");
     }

@@ -791,11 +791,18 @@ impl RunState {
                     }
                 }
                 if let Some(entry) = self.tasks.get_mut(task) {
-                    entry.status = if passed {
-                        TaskStatus::Passed
-                    } else {
-                        TaskStatus::Failed
-                    };
+                    // Passed is the review's verdict and nothing else: a passing
+                    // lint or test gate (a worker records its own) leaves the
+                    // status alone. The rules (`check_verdict`) are what make a
+                    // new review verdict the engine's, for the latest review
+                    // request of the attempt; a log written before they
+                    // existed still folds. A failed gate fails the task
+                    // whichever gate it is.
+                    if !passed {
+                        entry.status = TaskStatus::Failed;
+                    } else if gate == crate::gate::REVIEW_GATE {
+                        entry.status = TaskStatus::Passed;
+                    }
                     if let Some(current) = entry.attempts.last_mut() {
                         current.gates.push(GateResult {
                             gate: gate.clone(),
@@ -860,6 +867,24 @@ impl RunState {
                         .find(|current| current.n == *attempt)
                     {
                         current.stopped = true;
+                    }
+                }
+            }
+            EventKind::TaskReopened { task, attempt } => {
+                // The attempt is open again: its hand-in, its review requests
+                // and its gate results belong to the work as it was handed in,
+                // so they are cleared and the worker's next hand-in is judged
+                // afresh. The log keeps the earlier ones.
+                if let Some(entry) = self.tasks.get_mut(task) {
+                    entry.status = TaskStatus::Working;
+                    if let Some(current) = entry
+                        .attempts
+                        .iter_mut()
+                        .find(|current| current.n == *attempt)
+                    {
+                        current.report = None;
+                        current.gates.clear();
+                        current.reviews.clear();
                     }
                 }
             }

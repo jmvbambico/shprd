@@ -838,6 +838,9 @@ fn check_with(
         EventKind::TaskStopped { task, attempt } => {
             check_task_stopped(state, task, *attempt, provenance)
         }
+        EventKind::TaskReopened { task, attempt } => {
+            check_task_reopened(state, actor, task, *attempt, provenance)
+        }
         EventKind::ScopeWidened { task, paths } => {
             check_scope_widened(state, actor, task, paths, provenance)
         }
@@ -1035,6 +1038,37 @@ fn check_task_stopped(
             attempt,
         });
     }
+    Ok(())
+}
+
+/// Rules for reopening a handed-in task.
+///
+/// Only a human reopens: it throws away a review the engine may already have
+/// run, which is the person's call. The task must be `Reported` or `Passed`
+/// (anything else is already open, failed, landed or dropped), and the attempt
+/// named must be the newest one.
+fn check_task_reopened(
+    state: &RunState,
+    actor: &Actor,
+    task: &str,
+    attempt: u32,
+    provenance: Provenance,
+) -> Result<(), RuleError> {
+    if provenance == Provenance::Required && !matches!(actor, Actor::Human) {
+        return Err(RuleError::NotHuman {
+            actor: actor.clone(),
+        });
+    }
+    check_not_dropped(state, task, provenance)?;
+    let found = task_in(state, task)?;
+    if !matches!(found.status, TaskStatus::Reported | TaskStatus::Passed) {
+        return Err(RuleError::WrongStatus {
+            task: task.to_string(),
+            expected: "Reported or Passed",
+            found: found.status,
+        });
+    }
+    expect_current_attempt(task, found, attempt)?;
     Ok(())
 }
 
@@ -2352,7 +2386,8 @@ mod tests {
             added(4, "c", &["src/c"], &[]),
             spawned(5, "c", 1, "agent-1"),
             reported(6, "c", 1, &["src/c/x.rs"]),
-            gated(7, "c", 1, "clippy", true),
+            review_requested(7, "c", 1, "codex/m1", false),
+            passed_review(7, "c", 1, 7),
             integrated(8, "c"),
             ev(
                 9,
@@ -2386,7 +2421,8 @@ mod tests {
             let changed = format!("src/{id}/x.rs");
             log.push(spawned(seq, id, 1, agent));
             log.push(reported(seq + 1, id, 1, &[changed.as_str()]));
-            log.push(gated(seq + 2, id, 1, "clippy", true));
+            log.push(review_requested(seq + 2, id, 1, "codex/m1", false));
+            log.push(passed_review(seq + 2, id, 1, seq + 2));
             log.push(integrated(seq + 3, id));
         }
         log.push(ev(
@@ -2408,7 +2444,8 @@ mod tests {
             added(2, "a", &["src/a"], &[]),
             spawned(3, "a", 1, "agent-1"),
             reported(4, "a", 1, &["src/a/x.rs"]),
-            gated(5, "a", 1, "clippy", true),
+            review_requested(5, "a", 1, "codex/m1", false),
+            passed_review(5, "a", 1, 5),
             integrated(6, "a"),
             ev(
                 7,
@@ -2577,11 +2614,13 @@ mod tests {
             added(3, "b", &["src/b"], &["a"]),
             spawned(4, "a", 1, "agent-1"),
             reported(5, "a", 1, &["src/a/x.rs"]),
-            gated(6, "a", 1, "clippy", true),
+            review_requested(6, "a", 1, "codex/m1", false),
+            passed_review(6, "a", 1, 6),
             integrated(7, "a"),
             spawned(8, "b", 1, "agent-2"),
             reported(9, "b", 1, &["src/b"]),
-            gated(10, "b", 1, "clippy", true),
+            review_requested(10, "b", 1, "codex/m1", false),
+            passed_review(10, "b", 1, 10),
             integrated(11, "b"),
             finished(12),
         ];
@@ -2597,7 +2636,7 @@ mod tests {
                 assert_eq!(task.scope, strings(&["src/a"]));
                 assert_eq!(task.attempts.len(), 1);
                 assert_eq!(task.attempts[0].gates.len(), 1);
-                assert_eq!(task.attempts[0].gates[0].gate, "clippy");
+                assert_eq!(task.attempts[0].gates[0].gate, "review");
                 assert!(task.attempts[0].gates[0].passed);
             }
             None => panic!("task a missing"),
@@ -2763,7 +2802,8 @@ mod tests {
                 started(1),
                 added(2, "a", &["src/a"], &[]),
                 spawned(3, "a", 1, "agent-1"),
-                gated(4, "a", 1, "clippy", true),
+                review_requested(4, "a", 1, "codex/m1", false),
+                passed_review(4, "a", 1, 4),
             ]),
             RuleError::WrongStatus { .. }
         ));
@@ -2788,7 +2828,7 @@ mod tests {
                 added(2, "a", &["src/a"], &[]),
                 spawned(3, "a", 1, "agent-1"),
                 blocked,
-                gated(5, "a", 1, "clippy", true),
+                passed_review(5, "a", 1, 5),
             ]),
             RuleError::ReportNotCompleted { .. }
         ));
@@ -3046,6 +3086,20 @@ mod tests {
         ));
     }
 
+    /// A real review verdict (a pass) for `id`'s attempt, answering the request at `request_seq`.
+    fn passed_review(seq: u64, id: &str, attempt: u32, request_seq: u64) -> Event {
+        ev(
+            seq,
+            EventKind::GatePassed {
+                task: id.to_string(),
+                attempt,
+                gate: "review".to_string(),
+                findings: Vec::new(),
+                source: Some(provenance_for("codex/m1", request_seq)),
+            },
+        )
+    }
+
     fn review_requested(seq: u64, id: &str, attempt: u32, reviewer: &str, degraded: bool) -> Event {
         ev(
             seq,
@@ -3187,22 +3241,23 @@ mod tests {
             reported(4, "a", 1, &["src/a/x.rs"]),
         ];
         let mut failed_then_passed = base.to_vec();
-        failed_then_passed.push(gated(5, "a", 1, "clippy", false));
+        failed_then_passed.push(review_requested(5, "a", 1, "codex/m1", false));
+        failed_then_passed.push(gated(6, "a", 1, "clippy", false));
         assert!(matches!(
             refused(&[failed_then_passed.clone(), vec![integrated(6, "a")]].concat()),
             RuleError::NotPassed { .. }
         ));
         let mut clean = failed_then_passed.clone();
-        clean.push(gated(6, "a", 1, "clippy", true));
+        clean.push(passed_review(7, "a", 1, 5));
         assert_eq!(status(&folded(&clean), "a"), TaskStatus::Passed);
         assert!(matches!(
-            refused(&[clean.clone(), vec![integrated(7, "a")]].concat()),
+            refused(&[clean.clone(), vec![integrated(8, "a")]].concat()),
             RuleError::FailedGate { .. }
         ));
 
         let mut overridden = clean.clone();
-        overridden.push(overrode(7, "a", INTEGRATE_AFTER_FAILED_GATE));
-        let overridden = [overridden, vec![integrated(8, "a")]].concat();
+        overridden.push(overrode(8, "a", INTEGRATE_AFTER_FAILED_GATE));
+        let overridden = [overridden, vec![integrated(9, "a")]].concat();
         assert_eq!(status(&folded(&overridden), "a"), TaskStatus::Integrated);
     }
 
@@ -3214,9 +3269,10 @@ mod tests {
             overrode(3, "a", INTEGRATE_AFTER_FAILED_GATE),
             spawned(4, "a", 1, "agent-1"),
             reported(5, "a", 1, &["src/a/x.rs"]),
-            gated(6, "a", 1, "clippy", false),
-            gated(7, "a", 1, "clippy", true),
-            integrated(8, "a"),
+            review_requested(6, "a", 1, "codex/m1", false),
+            gated(7, "a", 1, "clippy", false),
+            passed_review(8, "a", 1, 6),
+            integrated(9, "a"),
         ];
         assert!(matches!(refused(&log), RuleError::FailedGate { .. }));
     }
@@ -3244,7 +3300,8 @@ mod tests {
             added(2, "a", &["src/a"], &[]),
             spawned(3, "a", 1, "agent-1"),
             reported(4, "a", 1, &["src/a/x.rs"]),
-            gated(5, "a", 1, "clippy", true),
+            review_requested(5, "a", 1, "codex/m1", false),
+            passed_review(5, "a", 1, 5),
         ])
     }
 
@@ -3338,8 +3395,9 @@ mod tests {
             added(2, "a", &["src/a"], &[]),
             spawned(3, "a", 1, "agent-1"),
             reported(4, "a", 1, &["src/a/x.rs"]),
-            gated(5, "a", 1, "clippy", false),
-            gated(6, "a", 1, "clippy", true),
+            review_requested(5, "a", 1, "codex/m1", false),
+            gated(6, "a", 1, "clippy", false),
+            passed_review(7, "a", 1, 5),
             old,
             integrated(8, "a"),
         ];
@@ -4528,7 +4586,7 @@ mod tests {
         };
         assert!(matches!(
             ready_to_land(task),
-            Err(RuleError::NoReviewRequest { .. })
+            Err(RuleError::NotPassed { .. })
         ));
     }
 
@@ -4576,8 +4634,8 @@ mod tests {
 
     #[test]
     fn a_task_whose_latest_review_failed_is_not_ready_to_land() {
-        // The failed review is settled by a later passing lint gate, so the
-        // task is Passed: readiness has to look at the review itself.
+        // A passing lint gate after the failed review does not settle it: the
+        // task stays Failed, and readiness looks at the review itself.
         let mut log = reviewable();
         log.push(ev(
             6,
@@ -4585,14 +4643,14 @@ mod tests {
         ));
         log.push(gated(7, "a", 1, "lint", true));
         let state = folded(&log);
-        assert_eq!(status(&state, "a"), TaskStatus::Passed);
+        assert_eq!(status(&state, "a"), TaskStatus::Failed);
         let task = match state.tasks.get("a") {
             Some(task) => task,
             None => panic!("task a must exist"),
         };
         assert!(matches!(
             ready_to_land(task),
-            Err(RuleError::ReviewNotPassed { .. })
+            Err(RuleError::NotPassed { .. })
         ));
     }
 
@@ -4682,7 +4740,175 @@ mod tests {
                 source: None,
             },
         ));
-        assert_eq!(status(&folded(&log), "a"), TaskStatus::Passed);
+        // Not a verdict: the task stays Reported until a review decides it.
+        assert_eq!(status(&folded(&log), "a"), TaskStatus::Reported);
+    }
+
+    /// Item 1: a review that never started never passes a task. Worker gates
+    /// and a verdict with no request behind it leave the task Reported.
+    #[test]
+    fn a_task_whose_review_never_started_never_passes() {
+        let mut log = reviewable();
+        log.pop(); // the review request: none was ever recorded
+        log.push(gated(5, "a", 1, "lint", true));
+        log.push(gated(6, "a", 1, "server-test", true));
+        assert_eq!(status(&folded(&log), "a"), TaskStatus::Reported);
+        // A verdict no request answers is refused where it is recorded.
+        let state = folded(&log);
+        assert!(matches!(
+            state.check_as(&Actor::Engine, &passed_review(7, "a", 1, 5).kind, 7_000),
+            Err(RuleError::StaleReviewVerdict { .. })
+        ));
+    }
+
+    /// Invariant: whatever sequence of events the rules accept as written
+    /// (each checked as its actor, as the engine does), a Passed task has a
+    /// recorded review request and a passed review verdict for its attempt.
+    #[test]
+    fn no_path_reaches_passed_without_a_review_and_its_verdict() {
+        let pool: Vec<(Actor, Event)> = vec![
+            (
+                Actor::Engine,
+                review_requested(5, "a", 1, "codex/m1", false),
+            ),
+            (
+                Actor::Engine,
+                review_requested(6, "a", 1, "codex/m2", false),
+            ),
+            (
+                Actor::Agent {
+                    id: "agent-1".to_string(),
+                },
+                gated(7, "a", 1, "lint", true),
+            ),
+            (Actor::Human, gated(7, "a", 1, "lint", true)),
+            (Actor::Engine, gated(7, "a", 1, "lint", false)),
+            (Actor::Engine, passed_review(8, "a", 1, 5)),
+            (
+                Actor::Agent {
+                    id: "agent-1".to_string(),
+                },
+                passed_review(8, "a", 1, 5),
+            ),
+            (Actor::Engine, passed_review(8, "a", 1, 6)),
+            (
+                Actor::Engine,
+                ev(8, review_gate(false, Some(provenance_for("codex/m1", 5)))),
+            ),
+            (Actor::Human, reopened(9, "a", 1)),
+        ];
+        let mut frontier: Vec<RunState> = vec![folded(&[
+            started(1),
+            added(2, "a", &["src/a"], &[]),
+            spawned(3, "a", 1, "agent-1"),
+            reported(4, "a", 1, &["src/a/x.rs"]),
+        ])];
+        let mut reached = 0;
+        for _ in 0..5 {
+            let mut next = Vec::new();
+            for state in &frontier {
+                for (actor, event) in &pool {
+                    // A step the rules refuse is not a path the engine can take.
+                    if state.check_as(actor, &event.kind, 9_000).is_err() {
+                        continue;
+                    }
+                    let mut after = state.clone();
+                    let mut event = event.clone();
+                    event.actor = actor.clone();
+                    if after.apply(&event).is_err() {
+                        continue;
+                    }
+                    if let Some(task) = after.tasks.get("a")
+                        && task.status == TaskStatus::Passed
+                    {
+                        reached += 1;
+                        let attempt = task.latest_attempt();
+                        let Some(attempt) = attempt else {
+                            panic!("a passed task has an attempt")
+                        };
+                        assert!(!attempt.reviews.is_empty(), "Passed with no review request");
+                        assert!(
+                            attempt.gates.iter().any(|g| g.gate == "review" && g.passed),
+                            "Passed with no review verdict"
+                        );
+                    }
+                    next.push(after);
+                }
+            }
+            frontier = next;
+        }
+        assert!(reached > 0, "the invariant never met a Passed task");
+    }
+
+    fn reopened(seq: u64, id: &str, attempt: u32) -> Event {
+        ev(
+            seq,
+            EventKind::TaskReopened {
+                task: id.to_string(),
+                attempt,
+            },
+        )
+    }
+
+    /// Item 2: a human reopens a Reported or Passed task, for the same attempt;
+    /// the hand-in and the review are cleared so a new hand-in is reviewed afresh.
+    #[test]
+    fn a_human_reopens_a_handed_in_task_for_the_same_attempt() {
+        for (extra, from) in [
+            (Vec::new(), TaskStatus::Reported),
+            (vec![passed_review(6, "a", 1, 5)], TaskStatus::Passed),
+        ] {
+            let mut log = reviewable();
+            log.extend(extra);
+            assert_eq!(status(&folded(&log), "a"), from);
+            let kind = reopened(9, "a", 1).kind;
+            let state = folded(&log);
+            assert!(state.check_as(&Actor::Human, &kind, 9_000).is_ok());
+            log.push(reopened(9, "a", 1));
+            let state = folded(&log);
+            assert_eq!(status(&state, "a"), TaskStatus::Working);
+            let attempt = state.tasks.get("a").and_then(|t| t.latest_attempt());
+            let Some(attempt) = attempt else {
+                panic!("the attempt stays")
+            };
+            assert_eq!(attempt.n, 1);
+            assert!(
+                attempt.report.is_none() && attempt.gates.is_empty() && attempt.reviews.is_empty()
+            );
+            // The worker hands in again, and the review runs afresh.
+            log.push(reported(10, "a", 1, &["src/a/x.rs"]));
+            log.push(review_requested(11, "a", 1, "codex/m1", false));
+            log.push(passed_review(12, "a", 1, 11));
+            assert_eq!(status(&folded(&log), "a"), TaskStatus::Passed);
+        }
+    }
+
+    #[test]
+    fn only_a_human_reopens_and_only_a_handed_in_task() {
+        let state = folded(&reviewable());
+        let kind = reopened(9, "a", 1).kind;
+        for actor in [Actor::Engine, Actor::Orchestrator] {
+            assert!(matches!(
+                state.check_as(&actor, &kind, 9_000),
+                Err(RuleError::NotHuman { .. })
+            ));
+        }
+        // Wrong attempt.
+        assert!(
+            state
+                .check_as(&Actor::Human, &reopened(9, "a", 2).kind, 9_000)
+                .is_err()
+        );
+        // A working task is already open.
+        let working = folded(&[
+            started(1),
+            added(2, "a", &["src/a"], &[]),
+            spawned(3, "a", 1, "agent-1"),
+        ]);
+        assert!(matches!(
+            working.check_as(&Actor::Human, &kind, 9_000),
+            Err(RuleError::WrongStatus { .. })
+        ));
     }
 
     fn ask_raised(seq: u64, id: &str, ask: &str) -> Event {

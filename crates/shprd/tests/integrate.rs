@@ -229,17 +229,7 @@ impl Fixture {
             "--changed",
             scope,
         ]);
-        self.ok(&[
-            "agent",
-            "gate",
-            "pass",
-            "--task",
-            id,
-            "--attempt",
-            "1",
-            "--gate",
-            "lint",
-        ]);
+        support::pass_review(&self.root, id);
     }
 
     /// The run's event log as text.

@@ -109,6 +109,7 @@ pub(crate) fn run(ctx: &Context<'_>, action: Action) -> Result<ActionReply, ApiR
         Action::TaskStart { task } => spawn(ctx, &task, "start"),
         Action::TaskRetry { task } => spawn(ctx, &task, "retry"),
         Action::TaskStop { task } => stop(ctx, &task),
+        Action::TaskReopen { task } => reopen(ctx, &task),
         Action::TaskDrop { task, reason } => {
             let kind = EventKind::TaskDropped { task, reason };
             commit(ctx, kind)
@@ -358,6 +359,34 @@ fn stop(ctx: &Context<'_>, task: &str) -> Result<ActionReply, ApiReject> {
         .map_err(|err| ApiReject::refused(err.to_string()))?;
     engine.stop(ctx.repo, task).map_err(ApiReject::refused)?;
     commit(ctx, kind)
+}
+
+/// Moves a handed-in task back to Working, as `shprd task reopen` does.
+///
+/// The rules decide: only a human, only a Reported or Passed task, only its
+/// newest attempt. Nothing outside the log is touched: the worktree and branch
+/// stay, and the worker hands in again.
+fn reopen(ctx: &Context<'_>, task: &str) -> Result<ActionReply, ApiReject> {
+    let (folded, _) = ledger::load(ctx.repo).map_err(read_error)?;
+    let found = folded
+        .tasks
+        .get(task)
+        .ok_or_else(|| ApiReject::unknown_task(task))?;
+    let attempt = found
+        .latest_attempt()
+        .map(|attempt| attempt.n)
+        .ok_or_else(|| {
+            ApiReject::refused(format!(
+                "{task} has no attempt to reopen: nothing has been started on it"
+            ))
+        })?;
+    commit(
+        ctx,
+        EventKind::TaskReopened {
+            task: task.to_string(),
+            attempt,
+        },
+    )
 }
 
 /// Accepts a task's work at the head its branch is at, as `shprd approve` does.
@@ -662,6 +691,7 @@ fn event_task(kind: &EventKind) -> Option<String> {
         | EventKind::TaskStatus { task, .. }
         | EventKind::TaskDropped { task, .. }
         | EventKind::TaskStopped { task, .. }
+        | EventKind::TaskReopened { task, .. }
         | EventKind::TaskApproved { task, .. } => Some(task.clone()),
         _ => None,
     }

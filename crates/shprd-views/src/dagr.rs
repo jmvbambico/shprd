@@ -505,6 +505,7 @@ fn event_label(kind: &EventKind) -> &'static str {
         EventKind::TaskDropped { .. } => "task_dropped",
         EventKind::ScopeWidened { .. } => "scope_widened",
         EventKind::TaskStopped { .. } => "task_stopped",
+        EventKind::TaskReopened { .. } => "task_reopened",
         EventKind::ReviewRequested { .. } => "review_requested",
         EventKind::Dry { .. } => "dry",
         EventKind::Available { .. } => "available",
@@ -838,20 +839,24 @@ mod tests {
     }
 
     fn gate(task: &str, attempt: u32, passed: bool, findings: Vec<Finding>) -> EventKind {
-        let gate = "full".to_string();
         if passed {
+            // Only a review verdict passes a task.
             EventKind::GatePassed {
                 task: task.to_string(),
                 attempt,
-                gate,
+                gate: "review".to_string(),
                 findings,
-                source: None,
+                source: Some(shprd_core::event::ReviewSource {
+                    reviewer: "codex/m1".to_string(),
+                    findings_sha256: "ba7816bf8f01cfea".to_string(),
+                    request_seq: 0,
+                }),
             }
         } else {
             EventKind::GateFailed {
                 task: task.to_string(),
                 attempt,
-                gate,
+                gate: "full".to_string(),
                 findings,
                 source: None,
             }

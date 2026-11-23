@@ -547,6 +547,20 @@ pub enum EventKind {
         /// The attempt whose agent was stopped.
         attempt: u32,
     },
+    /// A person moved a handed-in task back to Working, for the same attempt.
+    ///
+    /// The recovery for a task stuck at Reported or Passed (a review that
+    /// cannot start, a scope fix the worker has to hand in again): the attempt,
+    /// its worktree and its branch stay, and the attempt's report, review
+    /// requests and gate results are cleared so the worker can hand in again
+    /// and be reviewed afresh. The earlier ones stay in the log. It is a human's
+    /// verb alone.
+    TaskReopened {
+        /// The task.
+        task: TaskId,
+        /// The attempt that is open again.
+        attempt: u32,
+    },
     /// A review was handed to a reviewer for an attempt.
     ///
     /// `degraded` is the fact a landing decision needs: it records that the
@@ -895,6 +909,7 @@ impl EventKind {
             | Self::TaskDropped { task, .. }
             | Self::ScopeWidened { task, .. }
             | Self::TaskStopped { task, .. }
+            | Self::TaskReopened { task, .. }
             | Self::ReviewRequested { task, .. }
             | Self::HandedOff { task, .. }
             | Self::Override { task, .. }
@@ -1024,6 +1039,10 @@ mod tests {
                 task: "M1.3".to_string(),
                 attempt: 1,
             },
+            EventKind::TaskReopened {
+                task: "M1.3".to_string(),
+                attempt: 1,
+            },
             EventKind::ReviewRequested {
                 task: "M1.1".to_string(),
                 attempt: 1,
@@ -1140,7 +1159,7 @@ mod tests {
     #[test]
     fn every_kind_round_trips() {
         let kinds = every_kind();
-        assert_eq!(kinds.len(), 29, "one case per EventKind variant");
+        assert_eq!(kinds.len(), 30, "one case per EventKind variant");
 
         for (index, kind) in kinds.into_iter().enumerate() {
             let event = Event {

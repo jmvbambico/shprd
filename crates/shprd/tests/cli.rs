@@ -210,20 +210,7 @@ fn happy_path_reaches_integrated() {
             "tdd",
         ],
     );
-    ok(
-        root,
-        &[
-            "agent",
-            "gate",
-            "pass",
-            "--task",
-            "T1",
-            "--attempt",
-            "1",
-            "--gate",
-            "lint",
-        ],
-    );
+    support::pass_review(root, "T1");
     ok(
         root,
         &["agent", "integrate", "--task", "T1", "--record-only"],
@@ -633,21 +620,7 @@ fn a_scripted_run_writes_the_document_and_the_views() {
         ],
         bin_dir,
     );
-    ok_with_path(
-        root,
-        &[
-            "agent",
-            "gate",
-            "pass",
-            "--task",
-            "T1",
-            "--attempt",
-            "1",
-            "--gate",
-            "lint",
-        ],
-        bin_dir,
-    );
+    support::pass_review(root, "T1");
     ok_with_path(
         root,
         &["agent", "integrate", "--task", "T1", "--record-only"],
@@ -1211,20 +1184,7 @@ fn integrated_task(root: &Path, branch: &str) {
             "crates/x/a.rs",
         ],
     );
-    ok(
-        root,
-        &[
-            "agent",
-            "gate",
-            "pass",
-            "--task",
-            "T1",
-            "--attempt",
-            "1",
-            "--gate",
-            "lint",
-        ],
-    );
+    support::pass_review(root, "T1");
     ok(
         root,
         &["agent", "integrate", "--task", "T1", "--record-only"],
@@ -1877,34 +1837,7 @@ fn run_that_needs_an_override(root: &Path) {
             "did it",
         ],
     );
-    ok(
-        root,
-        &[
-            "agent",
-            "gate",
-            "fail",
-            "--task",
-            "T1",
-            "--attempt",
-            "1",
-            "--gate",
-            "clippy",
-        ],
-    );
-    ok(
-        root,
-        &[
-            "agent",
-            "gate",
-            "pass",
-            "--task",
-            "T1",
-            "--attempt",
-            "1",
-            "--gate",
-            "clippy",
-        ],
-    );
+    support::pass_review_after_failed_gate(root, "T1", "clippy");
     let message = refused(
         root,
         &["agent", "integrate", "--task", "T1", "--record-only"],

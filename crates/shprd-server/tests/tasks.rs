@@ -757,6 +757,57 @@ fn with_a_working_task() -> Fixture {
 }
 
 #[tokio::test]
+async fn a_reopen_moves_a_handed_in_task_back_to_working_and_refuses_a_working_one() {
+    let fixture = with_a_working_task();
+    // A task that is still working is already open.
+    let early = fixture
+        .act(json!({"kind": "task.reopen", "task": "T1"}))
+        .await;
+    assert_eq!(early.status, StatusCode::CONFLICT, "{:?}", early.body);
+    assert_eq!(early.code(), "refused");
+
+    append(
+        &fixture,
+        EventKind::Reported {
+            task: "T1".to_string(),
+            attempt: 1,
+            status: shprd_core::event::ReportStatus::Completed,
+            summary: "done".to_string(),
+            tests: Vec::new(),
+            checks: vec![shprd_core::event::CheckReport {
+                gate: "unit".to_string(),
+                command: "cargo test".to_string(),
+                exit_code: Some(0),
+                output_tail: String::new(),
+            }],
+            changed_paths: vec!["kept.txt".to_string()],
+            commit: None,
+            skills_used: Vec::new(),
+            proofs: Vec::new(),
+        },
+    );
+    let reopened = fixture
+        .act(json!({"kind": "task.reopen", "task": "T1"}))
+        .await;
+    assert_eq!(reopened.status, StatusCode::OK, "{:?}", reopened.body);
+    assert_eq!(reopened.json()["task"]["status"], json!("working"));
+    let recorded = fixture
+        .events()
+        .into_iter()
+        .find_map(|event| match event.kind {
+            EventKind::TaskReopened { task, attempt } => Some((event.actor, task, attempt)),
+            _ => None,
+        })
+        .expect("the reopen is recorded");
+    assert_eq!(recorded, (Actor::Human, "T1".to_string(), 1));
+
+    let unknown = fixture
+        .act(json!({"kind": "task.reopen", "task": "nope"}))
+        .await;
+    assert_eq!(unknown.status, StatusCode::NOT_FOUND, "{:?}", unknown.body);
+}
+
+#[tokio::test]
 async fn a_resend_delivers_the_brief_again_and_clears_the_lost_brief_card() {
     let fixture = with_a_working_task();
     append(
