@@ -107,11 +107,16 @@ const MODS: &str = "host/herdr-desktop/mods";
 /// - an entry under `crates/<crate>/` implies that crate's `tests/` folder;
 /// - an entry `host/herdr-desktop/mods/lib/<file>` implies each synced copy
 ///   `host/herdr-desktop/mods/<mod>/lib/<file>`;
-/// - an entry under `host/herdr-desktop/mods/` implies `host/herdr-desktop/test/`.
+/// - an entry under `host/herdr-desktop/mods/` implies `host/herdr-desktop/test/`;
+/// - a source file implies its sibling tests in the same folder, in any language
+///   (see [`sibling_test`]).
 ///
 /// Only [`within`] uses it: [`overlaps`] compares declared paths, so two tasks
 /// whose implied paths meet still run in parallel.
 fn implied(path: &str, entry: &str) -> bool {
+    if sibling_test(path, entry) {
+        return true;
+    }
     if let Some(rest) = entry.strip_prefix("crates/")
         && let Some((krate, below)) = rest.split_once('/')
         && !krate.is_empty()
@@ -148,6 +153,79 @@ fn implied(path: &str, entry: &str) -> bool {
         };
     }
     false
+}
+
+/// True when `entry` is a source file and `path` is a test file beside it:
+///
+/// - Go: `foo.go` implies `foo_test.go` and any `*_test.go` in the same folder;
+/// - TypeScript/JavaScript: `x.ts` implies `x.test.ts` and `x.spec.ts` (also
+///   for `tsx`, `js`, `jsx`, `mts`, `mjs`);
+/// - Python: `x.py` implies `test_x.py` and `x_test.py`.
+fn sibling_test(path: &str, entry: &str) -> bool {
+    let (edir, efile) = entry.rsplit_once('/').unwrap_or(("", entry));
+    let (pdir, pfile) = path.rsplit_once('/').unwrap_or(("", path));
+    if edir != pdir {
+        return false;
+    }
+    let Some((stem, ext)) = efile.rsplit_once('.') else {
+        return false;
+    };
+    if stem.is_empty() || efile == pfile {
+        return false;
+    }
+    match ext {
+        "go" => !stem.ends_with("_test") && pfile.ends_with("_test.go"),
+        "ts" | "tsx" | "js" | "jsx" | "mts" | "mjs" => {
+            !stem.ends_with(".test")
+                && !stem.ends_with(".spec")
+                && [".test", ".spec"]
+                    .iter()
+                    .any(|mid| pfile == format!("{stem}{mid}.{ext}"))
+        }
+        "py" => pfile == format!("test_{stem}.py") || pfile == format!("{stem}_test.py"),
+        _ => false,
+    }
+}
+
+/// The nearest real path for a scope `entry` that matches nothing under `root`.
+///
+/// Returns `None` when the entry exists (as a path, or as a folder or file),
+/// otherwise the first sibling of its last component that shares its stem
+/// (`client/src/components/icons` -> `client/src/components/icons.tsx`), or
+/// else the deepest existing ancestor folder.
+pub fn nearest_existing(root: &std::path::Path, entry: &str) -> Option<String> {
+    if root.join(entry).exists() {
+        return None;
+    }
+    let (dir, name) = entry.rsplit_once('/').unwrap_or(("", entry));
+    if let Ok(read) = std::fs::read_dir(root.join(dir)) {
+        let mut hits: Vec<String> = read
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|f| {
+                f.strip_prefix(name)
+                    .is_some_and(|rest| rest.starts_with('.') || rest.starts_with('/'))
+            })
+            .collect();
+        hits.sort();
+        if let Some(hit) = hits.first() {
+            return Some(if dir.is_empty() {
+                hit.clone()
+            } else {
+                format!("{dir}/{hit}")
+            });
+        }
+    }
+    let mut parent = dir;
+    loop {
+        if parent.is_empty() {
+            return Some(String::new());
+        }
+        if root.join(parent).is_dir() {
+            return Some(parent.to_string());
+        }
+        parent = parent.rsplit_once('/').map_or("", |(up, _)| up);
+    }
 }
 
 /// True when any entry of `a` and any entry of `b` are equal or one contains
@@ -291,5 +369,47 @@ mod tests {
         let a = paths(&["crates/shprd-core/src/a.rs"]);
         let b = paths(&["crates/shprd-core/tests/x.rs"]);
         assert!(!overlaps(&a, &b));
+    }
+
+    #[test]
+    fn sibling_tests_are_implied_in_every_language() {
+        let scope = paths(&["pkg/foo.go", "web/x.ts", "tools/x.py"]);
+        for yes in [
+            "pkg/foo_test.go",
+            "pkg/other_test.go",
+            "web/x.test.ts",
+            "web/x.spec.ts",
+            "tools/test_x.py",
+        ] {
+            assert!(within(yes, &scope), "{yes}");
+        }
+        for no in [
+            "pkg/other.go",
+            "pkg/sub/foo_test.go",
+            "web/y.test.ts",
+            "web/x.test.tsx",
+            "tools/test_y.py",
+        ] {
+            assert!(!within(no, &scope), "{no}");
+        }
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn nearest_existing_suggests_the_real_path() {
+        let dir = std::env::temp_dir().join(format!("shprd-scope-near-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("client/src/components")).unwrap();
+        std::fs::write(dir.join("client/src/components/icons.tsx"), "").unwrap();
+        assert_eq!(nearest_existing(&dir, "client/src/components"), None);
+        assert_eq!(
+            nearest_existing(&dir, "client/src/components/icons").as_deref(),
+            Some("client/src/components/icons.tsx")
+        );
+        assert_eq!(
+            nearest_existing(&dir, "client/src/components/zzz/a.rs").as_deref(),
+            Some("client/src/components")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
