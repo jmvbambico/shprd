@@ -117,6 +117,7 @@ pub(crate) fn run(ctx: &Context<'_>, action: Action) -> Result<ActionReply, ApiR
         Action::TaskAccept { task } => accept(ctx, &task),
         Action::TaskResendBrief { task } => resend_brief(ctx, &task),
         Action::TaskReviewAgain { task } => review_again(ctx, &task),
+        Action::NeedDismiss { seq } => commit(ctx, EventKind::NeedDismissed { need: seq }),
     }
 }
 

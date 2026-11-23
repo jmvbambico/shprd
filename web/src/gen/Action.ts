@@ -81,7 +81,11 @@ reason: string, } | { "kind": "task.accept",
 /**
  * The task to accept.
  */
-task: string, } | { "kind": "task.resend_brief", 
+task: string, } | { "kind": "need.dismiss", 
+/**
+ * The card's sequence number.
+ */
+seq: number, } | { "kind": "task.resend_brief", 
 /**
  * The task whose brief should be delivered again.
  */

@@ -167,6 +167,10 @@ pub(crate) fn wall_ms() -> u64 {
 /// A card about no single task (a run's own) is kept unless it is a self-update
 /// card that a success or a newer failure settled.
 pub fn card_at(state: &RunState, escalation: &Escalation, now_ms: u64) -> Option<Card> {
+    // A person dismissed it: nothing more is asked of them.
+    if state.dismissed_needs.contains(&escalation.seq) {
+        return None;
+    }
     let Some(id) = escalation.task.as_deref() else {
         // A successful update settles the failed updates before it; its record is no card.
         if gate::is_update_settled(escalation) || gate::update_failure_settled(state, escalation) {

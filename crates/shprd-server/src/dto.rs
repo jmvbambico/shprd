@@ -1086,6 +1086,16 @@ pub enum Action {
         /// The task to accept.
         task: String,
     },
+    /// Dismiss a card: remove it from the needs and from its task's reason.
+    ///
+    /// `seq` is the card's sequence number (`NeedDto.seq`). Only a person may
+    /// dismiss; an unknown `seq` is refused with a plain reason. Spelled
+    /// `need.dismiss`, with `need_dismiss` accepted.
+    #[serde(rename = "need.dismiss")]
+    NeedDismiss {
+        /// The card's sequence number.
+        seq: u64,
+    },
     /// Deliver a task's brief to its agent again, for a card that says the first
     /// delivery was lost (`brief not delivered`).
     ///
@@ -1137,6 +1147,8 @@ impl Action {
         "task_resend_brief",
         "task.review_again",
         "task_review_again",
+        "need.dismiss",
+        "need_dismiss",
     ];
 
     /// Whether this action undoes something a person cannot get back, or lands
@@ -1167,6 +1179,7 @@ impl Action {
             Self::TaskAccept { .. } => "task.accept",
             Self::TaskResendBrief { .. } => "task.resend_brief",
             Self::TaskReviewAgain { .. } => "task.review_again",
+            Self::NeedDismiss { .. } => "need.dismiss",
         }
     }
 
@@ -1189,6 +1202,7 @@ impl Action {
                 "task_accept" => Some("task.accept"),
                 "task_resend_brief" => Some("task.resend_brief"),
                 "task_review_again" => Some("task.review_again"),
+                "need_dismiss" => Some("need.dismiss"),
                 _ => None,
             };
             if let (Some(canonical), Some(object)) = (canonical, value.as_object_mut()) {
