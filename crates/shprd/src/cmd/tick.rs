@@ -94,7 +94,8 @@ pub(crate) fn worker_with_hub(
 ) -> Result<Worker, CliError> {
     let repo = ctx.root.clone();
     let actor = shprd_core::event::Actor::Engine;
-    let forge: shprd_server::SharedForge = std::sync::Arc::from(forge(&repo)?);
+    let forge: shprd_server::SharedForge =
+        std::sync::Arc::from(forge(&repo, &crate::cmd::land::gh_user(home, &repo))?);
     // The live overlay is the host's word: a task with an agent in its tab is
     // at work, and a pass must not land a commit an agent is still writing. A
     // host that cannot be asked answers "nothing is live", which is what a
@@ -304,7 +305,7 @@ pub(crate) fn load_config(ctx: &Ctx, home: &Path) -> Result<config::Config, CliE
 ///
 /// A release binary ignores the variable entirely, so nothing but a real merge
 /// can ever be recorded as one.
-fn forge(dir: &Path) -> Result<Box<dyn Forge + Send + Sync>, CliError> {
+fn forge(dir: &Path, gh_user: &str) -> Result<Box<dyn Forge + Send + Sync>, CliError> {
     let env_value =
         std::env::var_os(FAKE_FORGE_ENV).map(|value| value.to_string_lossy().into_owned());
     match env_value {
@@ -313,7 +314,7 @@ fn forge(dir: &Path) -> Result<Box<dyn Forge + Send + Sync>, CliError> {
             let fake = ScriptedForge::new(Path::new(&path))?;
             Ok(Box::new(fake))
         }
-        _ => Ok(Box::new(GhForge::new(dir))),
+        _ => Ok(Box::new(GhForge::new(dir).with_user(gh_user))),
     }
 }
 

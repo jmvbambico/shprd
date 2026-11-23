@@ -163,12 +163,26 @@ pub trait Forge {
 ///
 /// The directory decides which repository `gh` talks about, so it is always an
 /// explicit path and never the caller's working directory.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct GhForge {
     /// The directory `gh` runs in.
     dir: PathBuf,
     /// The program to run: `gh`, or a test double naming itself `gh`.
     program: String,
+    /// The `gh` account every call is pinned to, when one is.
+    user: Option<String>,
+    /// The pinned account's token, fetched once on first use.
+    token: std::sync::Arc<std::sync::OnceLock<Token>>,
+}
+
+/// A token from `gh auth token`: it is only ever handed to a child's
+/// environment, so it has no way to be printed or logged.
+struct Token(String);
+
+impl std::fmt::Debug for Token {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Token(..)")
+    }
 }
 
 impl GhForge {
@@ -177,7 +191,19 @@ impl GhForge {
         Self {
             dir: dir.into(),
             program: String::from("gh"),
+            user: None,
+            token: std::sync::Arc::default(),
         }
+    }
+
+    /// The same forge, pinned to `user`: every call passes `GH_TOKEN` from
+    /// `gh auth token -u <user>` instead of using whichever account is active.
+    /// An empty name pins nothing.
+    #[must_use]
+    pub fn with_user(mut self, user: &str) -> Self {
+        let user = user.trim();
+        self.user = (!user.is_empty()).then(|| user.to_string());
+        self
     }
 
     /// The same forge, running `program` instead of `gh`.
@@ -189,6 +215,8 @@ impl GhForge {
         Self {
             dir: dir.into(),
             program: program.to_string(),
+            user: None,
+            token: std::sync::Arc::default(),
         }
     }
 
@@ -201,7 +229,49 @@ impl GhForge {
             .env("GH_PROMPT_DISABLED", "1")
             .env("LC_ALL", "C")
             .stdin(Stdio::null());
+        if let Some(token) = self.pinned_token()? {
+            command.env("GH_TOKEN", token);
+        }
         spawn::output(&mut command).map_err(|source| ForgeError::Spawn { source })
+    }
+
+    /// The pinned account's token, read once with `gh auth token -u <user>`;
+    /// `None` when no account is pinned. The token is never printed or logged,
+    /// and a failure names the account, not the token.
+    fn pinned_token(&self) -> Result<Option<&str>, ForgeError> {
+        let Some(user) = &self.user else {
+            return Ok(None);
+        };
+        if let Some(token) = self.token.get() {
+            return Ok(Some(&token.0));
+        }
+        let args = vec![
+            "auth".to_string(),
+            "token".to_string(),
+            "-u".to_string(),
+            user.clone(),
+        ];
+        let mut command = Command::new(&self.program);
+        command
+            .args(&args)
+            .current_dir(&self.dir)
+            .env("GH_PROMPT_DISABLED", "1")
+            .env("LC_ALL", "C")
+            .env_remove("GH_TOKEN")
+            .stdin(Stdio::null());
+        let output = spawn::output(&mut command).map_err(|source| ForgeError::Spawn { source })?;
+        let token = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !output.status.success() || token.is_empty() {
+            return Err(ForgeError::Failed {
+                args,
+                code: output.status.code(),
+                stderr: format!(
+                    "no token for the gh account {user} (is it logged in?): {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ),
+            });
+        }
+        Ok(Some(&self.token.get_or_init(|| Token(token)).0))
     }
 
     /// Runs the program and returns its trimmed stdout, or why it failed.
@@ -739,7 +809,9 @@ mod tests {
                 #!/bin/sh\n\
                 dir=$(dirname \"$0\")\n\
                 echo \"$*\" >> \"$dir/calls\"\n\
+                echo \"${GH_TOKEN:-}\" >> \"$dir/tokens\"\n\
                 case \"$2\" in\n\
+                  token) if [ \"$4\" = nobody ]; then echo 'no oauth token found for nobody' >&2; exit 1; fi; echo \"tok-$4\" ;;\n\
                   list) cat \"$dir/list.json\" ;;\n\
                   create) echo 'https://example.invalid/pull/8' ;;\n\
                   view) cat \"$dir/view.json\" ;;\n\
@@ -793,6 +865,70 @@ mod tests {
                 Err(err) => panic!("read the call log: {err}"),
             }
         }
+    }
+
+    /// The `GH_TOKEN` each fake `gh` call saw, one line per call.
+    fn tokens(script: &Script) -> String {
+        std::fs::read_to_string(script.dir.join("tokens")).unwrap_or_default()
+    }
+
+    #[test]
+    fn a_pinned_account_passes_its_token_to_every_call_and_fetches_it_once() {
+        let script = Script::new("0");
+        let forge = match script.forge() {
+            Ok(forge) => forge.with_user("alice"),
+            Err(err) => panic!("forge: {err}"),
+        };
+        if let Err(err) = forge.find_open("b") {
+            panic!("find_open: {err}");
+        }
+        if let Err(err) = forge.status(7) {
+            panic!("status: {err}");
+        }
+        let calls = script.calls();
+        assert_eq!(
+            calls.matches("auth token -u alice").count(),
+            1,
+            "one fetch: {calls}"
+        );
+        let tokens = tokens(&script);
+        // The fetch itself ran without a token; every later call saw alice's.
+        let seen: Vec<&str> = tokens.lines().skip(1).collect();
+        assert!(
+            seen.len() >= 2 && seen.iter().all(|t| *t == "tok-alice"),
+            "{tokens}"
+        );
+        assert!(!format!("{forge:?}").contains("tok-alice"), "never printed");
+    }
+
+    #[test]
+    fn an_unpinned_forge_leaves_the_environment_alone() {
+        let script = Script::new("0");
+        let forge = match script.forge() {
+            Ok(forge) => forge,
+            Err(err) => panic!("forge: {err}"),
+        };
+        if let Err(err) = forge.find_open("b") {
+            panic!("find_open: {err}");
+        }
+        assert!(!script.calls().contains("auth token"), "{}", script.calls());
+    }
+
+    #[test]
+    fn a_pinned_account_with_no_token_fails_naming_the_account() {
+        let script = Script::new("0");
+        let forge = match script.forge() {
+            Ok(forge) => forge.with_user("nobody"),
+            Err(err) => panic!("forge: {err}"),
+        };
+        match forge.find_open("b") {
+            Err(ForgeError::Failed { stderr, .. }) => {
+                assert!(stderr.contains("nobody"), "{stderr}");
+                assert!(stderr.contains("no oauth token"), "{stderr}");
+            }
+            other => panic!("expected a failure, got {other:?}"),
+        }
+        assert!(!script.calls().contains("pr list"), "no forge call ran");
     }
 
     fn status_of(script: &Script) -> PrStatus {

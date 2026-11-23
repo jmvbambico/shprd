@@ -477,6 +477,7 @@ fn a_repo_committed_file_may_not_widen_a_guard() {
         ("[roles.worker]\nagent = \"codex\"\n", "roles"),
         ("[tasks]\nmerge = \"auto\"\n", "tasks.merge"),
         ("[tasks]\nmax_running = 10\n", "tasks.max_running"),
+        ("[tasks]\ngh_user = \"someone\"\n", "tasks.gh_user"),
         ("[review]\ncross_vendor = false\n", "review"),
     ] {
         std::fs::write(&path, document).expect("the file is written");
@@ -653,6 +654,7 @@ fn keys_parse_from_their_names_and_their_old_names() {
     let cases = [
         ("tasks.merge", "tasks.merge"),
         ("land.merge", "tasks.merge"),
+        ("land.gh_user", "tasks.gh_user"),
         ("tick.max_running", "tasks.max_running"),
         ("tick.interval_secs", "tasks.tick_secs"),
         ("janitor.archive_days", "tasks.archive_after"),
@@ -1244,4 +1246,31 @@ fn an_old_reviewer_with_a_fallback_reads_as_two_lines() {
     let lines = resolved.role("reviewer").expect("reviewer").lines();
     assert_eq!(lines.len(), 2);
     assert_eq!(lines[1].agent, "pi");
+}
+
+#[test]
+fn the_gh_account_is_pinned_per_repo_and_empty_by_default() {
+    let file = File::parse(
+        r#"
+        [repos.mine.tasks]
+        gh_user = " alice "
+        "#,
+    )
+    .expect("the file parses");
+    let ask = |repo: &str| {
+        resolve(
+            &file,
+            &Request {
+                repo: Some(repo),
+                repo_file: None,
+                task: None,
+            },
+        )
+        .tasks()
+        .gh_user
+    };
+    assert_eq!(ask("mine"), "alice");
+    assert_eq!(ask("another"), "");
+    let key = Key::parse("land.gh_user").expect("the alias parses");
+    assert_eq!(key.kind(), Kind::Text);
 }
