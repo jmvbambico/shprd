@@ -1958,6 +1958,95 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::expect_used)]
+    fn a_widened_scope_leaves_no_open_scope_card_offering_only_scoped_paths() {
+        use shprd_core::ask::{AskKind, scope_widen_options};
+        let at = |seq: u64, kind: EventKind| Event {
+            seq,
+            at_ms: NOW + seq,
+            actor: Actor::Engine,
+            kind,
+        };
+        let ask = |seq: u64, id: &str, options: Vec<String>| {
+            at(
+                seq,
+                EventKind::AskRaised {
+                    task: String::from("T1"),
+                    ask: id.to_string(),
+                    ask_kind: AskKind::Question,
+                    text: String::from("widen?"),
+                    options,
+                    expires_at_ms: None,
+                    created_at_ms: NOW,
+                },
+            )
+        };
+        // The refused-hand-in card offers two widen choices; the person's
+        // question is not a scope card and stays whatever the scope.
+        let mut options = scope_widen_options(&[String::from("docs/a.md")]);
+        options.insert(
+            1,
+            scope_widen_options(&[String::from("docs/b.md")])[0].clone(),
+        );
+        let mut events = vec![
+            at(
+                1,
+                EventKind::RunStarted {
+                    run_id: String::from("r"),
+                    repo: String::from("/tmp/repo"),
+                    base_branch: String::from("main"),
+                    integration_branch: String::from("integration/m1"),
+                },
+            ),
+            at(
+                2,
+                EventKind::TaskAdded {
+                    task: String::from("T1"),
+                    title: String::from("a task"),
+                    scope: vec![String::from("crates/x")],
+                    acceptance: vec![String::from("done")],
+                    tags: vec![],
+                    skills: vec![],
+                    deps: vec![],
+                },
+            ),
+            ask(3, "hand-in-refused-1-1", options),
+            ask(
+                4,
+                "scope-widen-1",
+                scope_widen_options(&[String::from("docs/a.md")]),
+            ),
+            ask(5, "ask-1", vec![]),
+        ];
+        let open = |events: &[Event]| {
+            let state = shprd_core::state::RunState::fold(events).expect("folds");
+            TaskSignal::from_state_at(&state, "T1", NOW)
+                .expect("T1")
+                .open_asks
+                .len()
+        };
+        assert_eq!(open(&events), 3);
+        // docs/a.md is widened: the widen card is moot, but the refused card
+        // still offers docs/b.md.
+        events.push(at(
+            6,
+            EventKind::ScopeWidened {
+                task: String::from("T1"),
+                paths: vec![String::from("docs/a.md")],
+            },
+        ));
+        assert_eq!(open(&events), 2);
+        events.push(at(
+            7,
+            EventKind::ScopeWidened {
+                task: String::from("T1"),
+                paths: vec![String::from("docs/b.md")],
+            },
+        ));
+        assert_eq!(open(&events), 1, "only the person's own question is left");
+    }
+
+    #[test]
     fn a_log_only_reader_sees_an_open_card_as_needs_you() {
         // Gate run #4, bug 4: a task whose review could not start read
         // `Working · In review` while its card sat in `/api/state`'s `needs`,
