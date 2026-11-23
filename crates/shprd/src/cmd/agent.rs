@@ -201,6 +201,37 @@ fn task_widen(ctx: &Ctx, args: &TaskWidenArgs) -> Result<(), CliError> {
             "`--reason` is empty: tell the person why the task needs the paths"
         )));
     }
+    // An open scope card that already offers these paths is the one question:
+    // say which, and raise nothing.
+    let task = &state.tasks[&args.task];
+    if let Some(open) = state.asks.values().find(|ask| {
+        ask.task == args.task
+            && ask.answer.is_none()
+            && shprd_core::ask::scope_key_of(&ask.task, &ask.id).is_some()
+            && {
+                let offered = shprd_core::ask::offered_paths(&ask.options);
+                paths.iter().all(|path| offered.contains(path))
+            }
+    }) {
+        println!(
+            "ask {} already covers {} ({}): nothing new was raised",
+            open.id,
+            paths.join(", "),
+            shprd_core::ask::scope_key(&args.task)
+        );
+        return Ok(());
+    }
+    if paths
+        .iter()
+        .all(|path| shprd_core::scope::within(path, &task.scope))
+    {
+        println!(
+            "{} is already in {}'s scope: nothing was raised",
+            paths.join(", "),
+            args.task
+        );
+        return Ok(());
+    }
     let earlier = state
         .asks
         .values()
@@ -559,6 +590,18 @@ fn raise_refused_hand_in(ctx: &Ctx, args: &ReportArgs, refused: &shprd_core::rul
         .filter_map(|path| shprd_core::scope::normalize(path).ok())
         .filter(|path| !shprd_core::scope::within(path, &task.scope))
         .collect();
+    // The coordinator's widen card may already ask for these paths: one scope
+    // question, one card.
+    if state.asks.values().any(|ask| {
+        ask.task == args.task && ask.answer.is_none() && {
+            let offered = shprd_core::ask::offered_paths(&ask.options);
+            !outside.is_empty()
+                && shprd_core::ask::scope_key_of(&ask.task, &ask.id).is_some()
+                && outside.iter().all(|path| offered.contains(path))
+        }
+    }) {
+        return;
+    }
     let id = shprd_core::gate::hand_in_refused_ask(args.attempt, earlier + 1);
     let text =
         shprd_core::gate::hand_in_refused_body(&args.task, args.attempt, &refused.to_string());

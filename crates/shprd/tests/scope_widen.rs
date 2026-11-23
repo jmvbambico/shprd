@@ -368,3 +368,168 @@ fn a_free_typed_answer_is_normalised_before_the_widening_is_written() {
         .expect("the widening");
     assert_eq!(widened["paths"], json!(["docs/extra.md", "crates/other"]));
 }
+
+#[test]
+fn a_widen_for_a_subset_of_an_open_card_raises_nothing_and_names_the_card() {
+    let (repo, _state, _home) = fixture();
+    assert!(raise(repo.path(), "T1").status.success());
+    let output = run(
+        repo.path(),
+        Some("agent:coordinator"),
+        &[
+            "agent",
+            "task",
+            "widen",
+            "--task",
+            "T1",
+            "--scope",
+            "docs/extra.md",
+            "--reason",
+            "again",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let said = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        said.contains("scope-widen-1") && said.contains("scope:T1"),
+        "{said}"
+    );
+    assert_eq!(count(repo.path(), "ask_raised"), 1, "no second card");
+}
+
+#[test]
+fn a_widened_path_leaves_no_open_card_offering_only_scoped_paths() {
+    let (repo, state, home) = fixture();
+    assert!(raise(repo.path(), "T1").status.success());
+    let _service = Service::start(repo.path(), state.path(), home.path());
+    assert_eq!(
+        answer(
+            state.path(),
+            repo.path(),
+            "widen the scope to docs/extra.md, crates/other"
+        ),
+        200
+    );
+    // The same paths again: they are in scope, so nothing is raised.
+    let output = raise(repo.path(), "T1");
+    assert!(output.status.success());
+    assert_eq!(count(repo.path(), "ask_raised"), 1);
+}
+
+/// A document the service serves at `path`, as JSON.
+fn api_get(state: &Path, path: &str) -> Value {
+    let record: Value = serde_json::from_str(
+        &fs::read_to_string(service_dir(state).join("service.json")).expect("the record"),
+    )
+    .expect("the record is JSON");
+    let port = record["port"].as_u64().expect("a port");
+    let token = fs::read_to_string(service_dir(state).join("token"))
+        .expect("the token")
+        .trim()
+        .to_string();
+    let mut response = ureq::get(&format!("http://127.0.0.1:{port}{path}"))
+        .header("authorization", &format!("Bearer {token}"))
+        .call()
+        .expect("the service answers");
+    let text = response
+        .body_mut()
+        .read_to_string()
+        .expect("the answer is text");
+    serde_json::from_str(&text).expect("the answer is JSON")
+}
+
+/// The ids of the open asks `/api/asks` and `/api/state` list, in that order.
+fn open_ask_ids(state: &Path) -> (Vec<String>, Vec<String>) {
+    let ids = |value: &Value| -> Vec<String> {
+        value
+            .as_array()
+            .map(|asks| {
+                asks.iter()
+                    .filter_map(|ask| ask["id"].as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let asks = api_get(state, "/api/asks");
+    let snapshot = api_get(state, "/api/state");
+    (
+        ids(asks.get("asks").unwrap_or(&asks)),
+        ids(snapshot.get("asks").unwrap_or(&snapshot)),
+    )
+}
+
+#[test]
+fn the_asks_and_the_state_agree_a_widened_card_is_gone() {
+    let (repo, state, home) = fixture();
+    assert!(raise(repo.path(), "T1").status.success());
+    let _service = Service::start(repo.path(), state.path(), home.path());
+    let (asks, snapshot) = open_ask_ids(state.path());
+    assert_eq!(asks, ["scope-widen-1"]);
+    assert_eq!(snapshot, ["scope-widen-1"]);
+    assert_eq!(
+        answer(
+            state.path(),
+            repo.path(),
+            "widen the scope to docs/extra.md, crates/other"
+        ),
+        200
+    );
+    let (asks, snapshot) = open_ask_ids(state.path());
+    assert!(
+        asks.is_empty() && snapshot.is_empty(),
+        "{asks:?} {snapshot:?}"
+    );
+}
+
+#[test]
+fn a_refused_hand_in_raises_no_card_when_a_widen_card_already_offers_the_path() {
+    let (repo, _state, _home) = fixture();
+    let widen = run(
+        repo.path(),
+        Some("agent:coordinator"),
+        &[
+            "agent",
+            "task",
+            "widen",
+            "--task",
+            "T1",
+            "--scope",
+            "stray.txt",
+            "--reason",
+            "the change needs it",
+        ],
+    );
+    assert!(widen.status.success());
+    assert_eq!(count(repo.path(), "ask_raised"), 1);
+    let refused = run(
+        repo.path(),
+        None,
+        &[
+            "agent",
+            "report",
+            "--task",
+            "T1",
+            "--attempt",
+            "1",
+            "--status",
+            "completed",
+            "--summary",
+            "did it",
+            "--check",
+            "tests|cargo test|0",
+            "--changed",
+            "stray.txt",
+        ],
+    );
+    assert_eq!(
+        refused.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert_eq!(count(repo.path(), "ask_raised"), 1, "still one card");
+}

@@ -473,6 +473,13 @@ pub(crate) fn list_asks(repo: &Path, now_ms: u64) -> Result<AskListDto, ApiRejec
                 .get(&ask.task)
                 .is_none_or(|task| !ask.is_retired_by_newer_attempt(task))
         })
+        // One scope question, one card: once a widening is answered, a card
+        // that offers only paths already in scope is moot.
+        .filter(|ask| {
+            state.tasks.get(&ask.task).is_none_or(|task| {
+                !shprd_core::ask::is_moot_scope_card(&ask.task, &ask.id, &ask.options, &task.scope)
+            })
+        })
         .collect();
     asks.sort_by(|left, right| {
         left.created_at_ms

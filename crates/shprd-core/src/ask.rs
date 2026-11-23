@@ -575,6 +575,49 @@ pub fn widening_of(ask: &str, answer: &str) -> Option<Vec<String>> {
     (!paths.is_empty()).then_some(paths)
 }
 
+/// The key both scope cards of a task share: a refused hand-in's and a widening
+/// verb's. One key is one question, so a client draws one card for it.
+pub fn scope_key(task: &str) -> String {
+    format!("scope:{task}")
+}
+
+/// The key of the scope question `ask` raises for `task`, when it is one.
+pub fn scope_key_of(task: &str, ask: &str) -> Option<String> {
+    (ask.starts_with(SCOPE_WIDEN_ASK_PREFIX)
+        || ask.starts_with(crate::gate::HAND_IN_REFUSED_ASK_PREFIX))
+    .then(|| scope_key(task))
+}
+
+/// The paths a scope card offers to widen to: those of every `widen` choice,
+/// normalised the way a scope is, without repeats.
+pub fn offered_paths(options: &[String]) -> Vec<String> {
+    let mut paths: Vec<String> = Vec::new();
+    for path in options
+        .iter()
+        .filter_map(|option| widening_of(SCOPE_WIDEN_ASK_PREFIX, option))
+        .flatten()
+    {
+        let path = crate::scope::normalize(&path).unwrap_or(path);
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
+    paths
+}
+
+/// Whether a scope card offering `options` is moot because every path it offers
+/// is already in `scope`. A card that offers no paths is never moot.
+pub fn offers_only_scoped_paths(options: &[String], scope: &[String]) -> bool {
+    let paths = offered_paths(options);
+    !paths.is_empty() && paths.iter().all(|path| crate::scope::within(path, scope))
+}
+
+/// Whether the open ask `ask` of `task` is a scope card made moot by `scope`:
+/// every client lists asks through this, so they agree on which cards to draw.
+pub fn is_moot_scope_card(task: &str, ask: &str, options: &[String], scope: &[String]) -> bool {
+    scope_key_of(task, ask).is_some() && offers_only_scoped_paths(options, scope)
+}
+
 /// What a worker is told when its scope was widened.
 pub fn widened_note(paths: &[String]) -> String {
     format!(
@@ -839,5 +882,48 @@ mod tests {
         assert_eq!(pending[0].text, "hello");
         notes.settle(&pending[0], true);
         assert!(notes.pending().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod scope_key_tests {
+    use super::*;
+
+    #[test]
+    fn both_scope_asks_share_one_key_and_moot_cards_are_found() {
+        assert_eq!(
+            scope_key_of("T", "scope-widen-1").as_deref(),
+            Some("scope:T")
+        );
+        assert_eq!(
+            scope_key_of("T", "hand-in-refused-1-1").as_deref(),
+            Some("scope:T")
+        );
+        assert_eq!(scope_key_of("T", "ask-1"), None);
+        let options = scope_widen_options(&["a/b.rs".to_string()]);
+        assert!(offers_only_scoped_paths(&options, &["a".to_string()]));
+        assert!(!offers_only_scoped_paths(&options, &["c".to_string()]));
+        assert!(!offers_only_scoped_paths(
+            &["other".to_string()],
+            &["a".to_string()]
+        ));
+        let scope = ["a".to_string()];
+        assert!(is_moot_scope_card("T", "scope-widen-1", &options, &scope));
+        assert!(!is_moot_scope_card("T", "ask-1", &options, &scope));
+    }
+
+    #[test]
+    fn every_widen_choice_counts_and_paths_are_normalised() {
+        let options = vec![
+            format!("{}./a/b.rs/", crate::gate::WIDEN_CHOICE),
+            format!("{}c/d.rs, a/b.rs", crate::gate::WIDEN_CHOICE),
+        ];
+        assert_eq!(offered_paths(&options), vec!["a/b.rs", "c/d.rs"]);
+        // One path out of scope keeps the card alive.
+        assert!(!offers_only_scoped_paths(&options, &["a".to_string()]));
+        assert!(offers_only_scoped_paths(
+            &options,
+            &["a".to_string(), "c".to_string()]
+        ));
     }
 }
