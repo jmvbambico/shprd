@@ -525,10 +525,12 @@ pub enum TaskKey {
     NewsSettleSecs,
     /// Whether shprd rebuilds and restarts itself after a landed task changes it.
     SelfUpdate,
+    /// The `gh` account every forge call uses; empty uses whichever is active.
+    GhUser,
 }
 
 /// Every `tasks.*` key, in the order a settings UI lists them.
-pub const TASK_KEYS: [TaskKey; 15] = [
+pub const TASK_KEYS: [TaskKey; 16] = [
     TaskKey::Merge,
     TaskKey::ReviewRounds,
     TaskKey::MustFix,
@@ -544,6 +546,7 @@ pub const TASK_KEYS: [TaskKey; 15] = [
     TaskKey::TickSecs,
     TaskKey::NewsSettleSecs,
     TaskKey::SelfUpdate,
+    TaskKey::GhUser,
 ];
 
 impl TaskKey {
@@ -565,6 +568,7 @@ impl TaskKey {
             Self::TickSecs => "tick_secs",
             Self::NewsSettleSecs => "news_settle_secs",
             Self::SelfUpdate => "self_update",
+            Self::GhUser => "gh_user",
         }
     }
 
@@ -717,6 +721,7 @@ impl Key {
             ["host"] => Ok(Self::Host),
             ["web", name] => WebKey::parse(name).map(Self::Web).ok_or_else(unknown),
             ["land", "merge"] => Ok(Self::Task(TaskKey::Merge)),
+            ["land", "gh_user"] => Ok(Self::Task(TaskKey::GhUser)),
             ["tick", "max_running"] => Ok(Self::Task(TaskKey::MaxRunning)),
             ["tick", "interval_secs"] => Ok(Self::Task(TaskKey::TickSecs)),
             ["janitor", "archive_days"] => Ok(Self::Task(TaskKey::ArchiveAfter)),
@@ -1531,6 +1536,7 @@ pub fn builtin() -> Layer {
     layer.set(Key::Task(TaskKey::Worktrees), Value::Switch(true));
     layer.set(Key::Task(TaskKey::SelfUpdate), Value::Switch(false));
     layer.set(Key::Task(TaskKey::Base), Value::Text(String::new()));
+    layer.set(Key::Task(TaskKey::GhUser), Value::Text(String::new()));
     layer.set(
         Key::Task(TaskKey::Branch),
         Value::Text(DEFAULT_BRANCH.to_owned()),
@@ -2072,6 +2078,8 @@ pub struct Tasks {
     pub self_update: bool,
     /// The branch new tasks start from and merge into.
     pub base: String,
+    /// The `gh` account pinned for forge calls; empty means the active one.
+    pub gh_user: String,
     /// The pattern new tasks' branches are named after.
     pub branch: String,
     /// Words put into a task's brief when it starts.
@@ -2235,6 +2243,11 @@ impl Resolved {
             worktrees: self.on(TaskKey::Worktrees, true),
             self_update: self.on(TaskKey::SelfUpdate, false),
             base: self.text(TaskKey::Base).unwrap_or_default().to_owned(),
+            gh_user: self
+                .text(TaskKey::GhUser)
+                .unwrap_or_default()
+                .trim()
+                .to_owned(),
             branch: self
                 .text(TaskKey::Branch)
                 .unwrap_or(DEFAULT_BRANCH)

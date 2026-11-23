@@ -422,14 +422,41 @@ pub fn conflict_finding(base: &str, files: &[String]) -> shprd_core::event::Find
 }
 
 /// What a forge client's own complaint comes to, in plain words.
+///
+/// The forge's own error is never swallowed: a complaint shprd cannot name
+/// (a missing repository, a read-only account) is shown as GitHub said it.
 fn forge_reason(stderr: &str) -> String {
     let said = stderr.to_ascii_lowercase();
+    let real = forge_words(stderr);
     if said.contains("known github host") || said.contains("not a github") {
         String::from("this repository has no GitHub remote")
     } else if said.contains("auth") || said.contains("log in") || said.contains("login") {
-        String::from("GitHub is not signed in on this machine")
+        if real.is_empty() {
+            String::from("GitHub is not signed in on this machine")
+        } else {
+            format!("GitHub is not signed in on this machine (GitHub said: {real})")
+        }
+    } else if real.is_empty() {
+        String::from("GitHub did not accept it and gave no reason")
     } else {
-        String::from("GitHub did not accept it")
+        format!("GitHub said: {real}")
+    }
+}
+
+/// The most telling line of a forge client's stderr: the last non-empty one,
+/// with the `gh:` prefix, backticks and runs of spaces taken out, cut at 240
+/// characters. Empty when it said nothing.
+fn forge_words(stderr: &str) -> String {
+    let line = stderr
+        .lines()
+        .map(str::trim)
+        .rfind(|line| !line.is_empty())
+        .unwrap_or_default();
+    let line = line.strip_prefix("gh:").unwrap_or(line).replace('`', "");
+    let line = line.split_whitespace().collect::<Vec<_>>().join(" ");
+    match line.char_indices().nth(240) {
+        Some((at, _)) => format!("{}...", &line[..at]),
+        None => line,
     }
 }
 
@@ -1763,6 +1790,31 @@ mod tests {
                 "{text}"
             );
         }
+    }
+
+    #[test]
+    fn a_land_failure_shows_the_forges_own_words() {
+        for said in [
+            "GraphQL: Could not resolve to a Repository with the name 'o/r'. (repository)",
+            "pull request create failed: GraphQL: o (createPullRequest)\nmust be a collaborator (createPullRequest)",
+        ] {
+            let line = LandError::Forge(ForgeError::Failed {
+                args: vec!["pr".into(), "create".into()],
+                code: Some(1),
+                stderr: said.into(),
+            })
+            .plain("T1");
+            let last = said.lines().last().unwrap_or_default();
+            assert!(line.contains(last), "{line}");
+            assert!(!line.contains("did not accept it"), "{line}");
+        }
+        let silent = LandError::Forge(ForgeError::Failed {
+            args: vec![],
+            code: Some(1),
+            stderr: String::new(),
+        })
+        .plain("T1");
+        assert!(silent.contains("gave no reason"), "{silent}");
     }
 
     #[test]

@@ -107,9 +107,9 @@ pub fn land_verb(ctx: &Ctx, args: &LandArgs, home: Option<&Path>) -> Result<(), 
     check_full_gate(&state, &head)?;
 
     if args.merge {
-        return merge(ctx, &config, &worktree, &head);
+        return merge(ctx, &config, &home, &worktree, &head);
     }
-    open(ctx, &state, &events, &worktree, &integrated)
+    open(ctx, &home, &state, &events, &worktree, &integrated)
 }
 
 /// Lands one task through its own pull request, as `[land] merge` says.
@@ -243,7 +243,7 @@ fn land_task(
         body: &body_file,
         has_work,
     };
-    let forge = forge(&worktree)?;
+    let forge = forge(&worktree, &gh_user(&home, &ctx.root))?;
     let policy = config.land.policy_for(&base);
     let landed = match land::land(forge.as_ref(), &git, &landing, policy, approved) {
         Ok(landed) => landed,
@@ -661,6 +661,7 @@ fn check_full_gate(state: &RunState, head: &str) -> Result<(), CliError> {
 /// Pushes the branch, refreshes or opens the pull request, records it.
 fn open(
     ctx: &Ctx,
+    home: &Path,
     state: &RunState,
     events: &[Event],
     worktree: &integrate::IntegrationWorktree,
@@ -677,7 +678,7 @@ fn open(
         None => run.run_id.clone(),
     };
     push(worktree, state, ctx)?;
-    let forge = forge(&worktree.path)?;
+    let forge = forge(&worktree.path, &gh_user(home, &ctx.root))?;
     let branch = worktree.branch.clone();
     let pr = match forge.find_open(&branch).map_err(|err| {
         CliError::other(anyhow!(err).context("asking the forge for the pull request"))
@@ -861,6 +862,7 @@ pub(crate) fn short(sha: &str) -> &str {
 fn merge(
     ctx: &Ctx,
     config: &Config,
+    home: &Path,
     worktree: &integrate::IntegrationWorktree,
     head: &str,
 ) -> Result<(), CliError> {
@@ -880,7 +882,7 @@ fn merge(
     // The ledger's head is the branch, not the sha: the janitor deletes a
     // remote branch only when the merged pull request names it as its head.
     let branch = worktree.branch.clone();
-    let forge = forge(&worktree.path)?;
+    let forge = forge(&worktree.path, &gh_user(home, &ctx.root))?;
     let status = forge.status(number).map_err(|err| {
         CliError::other(anyhow!(err).context("asking the forge for the pull request"))
     })?;
@@ -972,9 +974,20 @@ fn choose_forge(env_value: Option<String>, debug: bool) -> ForgeChoice {
     }
 }
 
+/// The `gh` account this repository pins (`tasks.gh_user`, also written
+/// `land.gh_user`), or an empty string for whichever account is active.
+///
+/// A settings file that cannot be read pins nothing: the forge then reports
+/// its own error rather than the landing failing on settings.
+pub(crate) fn gh_user(home: &Path, repo: &Path) -> String {
+    shprd_core::settings::Loaded::read(home, Some(repo))
+        .map(|loaded| loaded.resolve(None).tasks().gh_user)
+        .unwrap_or_default()
+}
+
 /// The forge to drive: `gh` here, or, in a debug build, the script
 /// `SHPRD_FAKE_FORGE` names.
-fn forge(dir: &Path) -> Result<Box<dyn Forge>, CliError> {
+fn forge(dir: &Path, gh_user: &str) -> Result<Box<dyn Forge>, CliError> {
     let env_value =
         std::env::var_os(FAKE_FORGE_ENV).map(|value| value.to_string_lossy().into_owned());
     match choose_forge(env_value, cfg!(debug_assertions)) {
@@ -985,7 +998,7 @@ fn forge(dir: &Path) -> Result<Box<dyn Forge>, CliError> {
             })?;
             Ok(Box::new(fake))
         }
-        ForgeChoice::Gh => Ok(Box::new(GhForge::new(dir))),
+        ForgeChoice::Gh => Ok(Box::new(GhForge::new(dir).with_user(gh_user))),
     }
 }
 

@@ -926,6 +926,12 @@ export const WORKFLOW = [
     kind: "switch",
   },
   {
+    key: "tasks.gh_user",
+    title: "GitHub account",
+    about: "The gh account landing and every forge call use for this repository (also written land.gh_user); empty uses whichever account gh has active.",
+    kind: "text",
+  },
+  {
     key: "review.cross_vendor",
     title: "Cross-vendor review",
     about: "A reviewer never shares the worker's vendor, so the review is independent.",
