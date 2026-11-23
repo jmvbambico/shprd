@@ -544,17 +544,54 @@ pub fn scope_widen_ask(n: usize) -> String {
 }
 
 /// The choices a widening card offers: widen to `paths`, or keep the scope.
+///
+/// High-risk paths (see [`crate::gate::is_high_risk_path`]) are never in the
+/// one-click option; they need the typed confirmation, and at most five folder
+/// entries are named.
 pub fn scope_widen_options(paths: &[String]) -> Vec<String> {
-    vec![
-        format!("{}{}", crate::gate::WIDEN_CHOICE, paths.join(", ")),
-        KEEP_SCOPE_CHOICE.to_string(),
-    ]
+    scope_widen_options_for(paths, &[])
+}
+
+/// [`scope_widen_options`] with the repo's own high-risk `globs`.
+pub fn scope_widen_options_for(paths: &[String], globs: &[String]) -> Vec<String> {
+    let offer = crate::gate::widen_offer(paths, globs);
+    let mut options = Vec::new();
+    if !offer.entries.is_empty() {
+        options.push(format!(
+            "{}{}",
+            crate::gate::WIDEN_CHOICE,
+            offer.entries.join(", ")
+        ));
+    }
+    options.push(KEEP_SCOPE_CHOICE.to_string());
+    options
+}
+
+/// The repo's own `high_risk_paths` globs, from `<root>/.agents/orchestration.yaml`
+/// (none when the file or the key is missing).
+pub fn high_risk_globs_in(root: &Path) -> Vec<String> {
+    fs::read_to_string(root.join(".agents").join("orchestration.yaml"))
+        .map(|text| crate::gate::high_risk_globs_from_yaml(&text))
+        .unwrap_or_default()
 }
 
 /// What a widening card says: the task, the paths and the reason given.
 pub fn scope_widen_body(task: &str, paths: &[String], reason: &str) -> String {
+    scope_widen_body_for(task, paths, reason, &[])
+}
+
+/// [`scope_widen_body`] that also says what the card does not offer: paths
+/// left off for length, and high-risk paths with the phrase to type to widen to
+/// them anyway.
+pub fn scope_widen_body_for(
+    task: &str,
+    paths: &[String],
+    reason: &str,
+    globs: &[String],
+) -> String {
+    let note = crate::gate::widen_note(&crate::gate::widen_offer(paths, globs));
     format!(
-        "{task}: widen its scope to {}? {}",
+        "{task}: widen its scope to {}? {}{note}",
         paths.join(", "),
         reason.trim()
     )
@@ -573,7 +610,8 @@ pub fn widening_of(ask: &str, answer: &str) -> Option<Vec<String>> {
     }
     let paths: Vec<String> = answer
         .trim()
-        .strip_prefix(crate::gate::WIDEN_CHOICE)?
+        .strip_prefix(crate::gate::WIDEN_CHOICE)
+        .or_else(|| answer.trim().strip_prefix(crate::gate::HIGH_RISK_CONFIRM))?
         .split(',')
         .map(|path| path.trim().to_string())
         .filter(|path| !path.is_empty())
@@ -782,7 +820,37 @@ mod tests {
     use std::sync::{Arc, Barrier};
     use std::thread;
 
-    use super::{Ask, AskError, AskKind, AskQueue, WorkerNotes, option_refusal, widening_of};
+    use super::{
+        Ask, AskError, AskKind, AskQueue, WorkerNotes, high_risk_globs_in, option_refusal,
+        scope_widen_body_for, scope_widen_options_for, widening_of,
+    };
+
+    #[test]
+    fn the_widen_card_applies_the_repos_high_risk_paths_and_says_how_to_confirm() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".agents")).unwrap();
+        std::fs::write(
+            dir.path().join(".agents/orchestration.yaml"),
+            "high_risk_paths:\n  - infra/**\n",
+        )
+        .unwrap();
+        let globs = high_risk_globs_in(dir.path());
+        let paths = vec!["src/a.rs".to_string(), "infra/prod/main.tf".to_string()];
+        let options = scope_widen_options_for(&paths, &globs);
+        assert_eq!(options.len(), 2, "{options:?}");
+        assert!(!options[0].contains("infra"), "{options:?}");
+        let body = scope_widen_body_for("t", &paths, "needed", &globs);
+        assert!(body.contains(crate::gate::HIGH_RISK_CONFIRM), "{body}");
+        assert!(body.contains("infra/prod/main.tf"));
+        // The typed phrase widens to the high-risk path.
+        let typed = format!("{}infra/prod/main.tf", crate::gate::HIGH_RISK_CONFIRM);
+        assert_eq!(
+            widening_of("scope-widen-1", &typed),
+            Some(vec!["infra/prod/main.tf".to_string()])
+        );
+        // Without the fixture's globs the same path is one click.
+        assert!(scope_widen_options_for(&paths, &[])[0].contains("infra"));
+    }
 
     #[test]
     fn the_widened_note_tells_the_worker_to_report_again() {

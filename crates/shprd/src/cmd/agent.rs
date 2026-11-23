@@ -263,8 +263,9 @@ fn task_widen(ctx: &Ctx, args: &TaskWidenArgs) -> Result<(), CliError> {
         })
         .count();
     let id = shprd_core::ask::scope_widen_ask(earlier + 1);
-    let text = shprd_core::ask::scope_widen_body(&args.task, &paths, &args.reason);
-    let options = shprd_core::ask::scope_widen_options(&paths);
+    let globs = shprd_core::ask::high_risk_globs_in(&ctx.root);
+    let text = shprd_core::ask::scope_widen_body_for(&args.task, &paths, &args.reason, &globs);
+    let options = shprd_core::ask::scope_widen_options_for(&paths, &globs);
     let now_ms = shprd_core::log::Clock::now_ms(&shprd_core::log::SystemClock);
     let ask = shprd_core::ask::Ask::new(
         id.clone(),
@@ -642,9 +643,14 @@ fn raise_refused_hand_in(ctx: &Ctx, args: &ReportArgs, refused: &shprd_core::rul
         return;
     }
     let id = shprd_core::gate::hand_in_refused_ask(args.attempt, earlier + 1);
-    let text =
-        shprd_core::gate::hand_in_refused_body(&args.task, args.attempt, &refused.to_string());
-    let options = shprd_core::gate::hand_in_refused_options(&outside);
+    let globs = shprd_core::ask::high_risk_globs_in(&ctx.root);
+    let note = shprd_core::gate::widen_note(&shprd_core::gate::widen_offer(&outside, &globs));
+    let text = shprd_core::gate::hand_in_refused_body(
+        &args.task,
+        args.attempt,
+        &format!("{refused}{note}"),
+    );
+    let options = shprd_core::gate::hand_in_refused_options_for(&outside, &globs);
     let now_ms = shprd_core::log::Clock::now_ms(&shprd_core::log::SystemClock);
     let ask = shprd_core::ask::Ask::new(
         id.clone(),

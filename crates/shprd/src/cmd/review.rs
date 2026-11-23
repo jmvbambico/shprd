@@ -612,7 +612,7 @@ fn diff_against_merge_base(
     })?;
     // The scope is judged on this real diff, never on the worker's `--changed`
     // list: a file it left off the list still stops the review here.
-    let changed = shprd_git::changed::changed_paths(repo, &merge_base, branch).map_err(|err| {
+    let changed = shprd_git::changed::task_changes(repo, base, branch).map_err(|err| {
         CliError::other(anyhow!(err).context(format!("listing what {branch} changed")))
     })?;
     let outside = shprd_git::changed::outside_scope(&changed, scope);
@@ -651,8 +651,12 @@ fn raise_out_of_scope_card(ctx: &Ctx, task: &str, attempt: u32, outside: &[Strin
         "the branch changes paths outside the task's scope: {}",
         outside.join(", ")
     );
-    let text = gate::hand_in_refused_body(task, attempt, &reason);
-    let options = gate::hand_in_refused_options(outside);
+    // The repo's own high-risk list is never one click: those paths need the
+    // typed confirmation, and the card says so.
+    let globs = shprd_core::ask::high_risk_globs_in(&ctx.root);
+    let note = gate::widen_note(&gate::widen_offer(outside, &globs));
+    let text = gate::hand_in_refused_body(task, attempt, &format!("{reason}.{note}"));
+    let options = gate::hand_in_refused_options_for(outside, &globs);
     let now_ms = shprd_core::log::Clock::now_ms(&shprd_core::log::SystemClock);
     let ask = Ask::new(
         id.clone(),

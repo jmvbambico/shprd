@@ -320,3 +320,73 @@ fn reopening_an_integration_worktree_repairs_its_state_exclusions() {
         "shprd's own state still shows as a change: {status}"
     );
 }
+
+#[test]
+fn a_task_that_merged_a_moved_main_is_not_refused_for_scope() {
+    let repo = Repo::new();
+    let layout = repo.layout();
+    let t = task(&repo, &layout, "T1", &[("src/a.txt", "a\n")]);
+    for n in 0..100 {
+        repo.commit(
+            &format!("gained/f{n}.txt"),
+            "x\n",
+            &format!("main gains {n}"),
+        );
+    }
+    git_in(&t.path, &["merge", "--no-edit", "main"]);
+    let own = commit_in(&t.path, "src/b.txt", "b\n", "T1: b");
+    let int = open(&repo, &layout);
+    let mut claim = t.claim(&["src"]);
+    claim.claimed = git_in(
+        &t.path,
+        &["rev-list", "--reverse", &format!("{}..HEAD", t.base_sha)],
+    )
+    .lines()
+    .map(str::to_string)
+    .collect();
+    assert!(claim.claimed.contains(&own));
+    // Whatever else the pick does with main's own commits, the scope is not
+    // what stops it: the hundred files main gained are not the task's.
+    if let Err(IntegrateError::OutsideScope { outside }) = integrate::integrate(&int, &claim) {
+        panic!("main's files were blamed on the task: {outside:?}");
+    }
+}
+
+#[test]
+fn two_such_tasks_neither_overlap_nor_blame_each_other() {
+    use shprd_git::changed::task_changes;
+    let repo = Repo::new();
+    repo.git(&["branch", "t3"]);
+    repo.git(&["branch", "t4"]);
+    for n in 0..100 {
+        repo.commit(
+            &format!("gained/g{n}.txt"),
+            "x\n",
+            &format!("main gains {n}"),
+        );
+    }
+    let scopes = [("t3", "a"), ("t4", "b")];
+    for (name, dir) in scopes {
+        repo.git(&["checkout", name]);
+        repo.git(&["merge", "--no-edit", "main"]);
+        for file in ["one.rs", "two.rs"] {
+            repo.commit(&format!("{dir}/{file}"), name, &format!("{name}: {file}"));
+        }
+    }
+    repo.git(&["checkout", "main"]);
+    let mut changes = Vec::new();
+    for (name, _) in scopes {
+        match task_changes(&repo.path, "main", name) {
+            Ok(paths) => changes.push(paths),
+            Err(err) => panic!("task changes: {err}"),
+        }
+    }
+    assert_eq!(changes[0].len(), 2);
+    assert_eq!(changes[1].len(), 2);
+    // The engine's overlap check compares what each task claims (its scope);
+    // the real changes sit inside those claims, so the check stays clear.
+    let scope_a = vec!["a".to_string()];
+    let scope_b = vec!["b".to_string()];
+    assert!(!shprd_core::scope::overlaps(&scope_a, &scope_b));
+    assert!(!shprd_core::scope::overlaps(&changes[0], &changes[1]));
+}

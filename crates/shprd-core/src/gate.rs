@@ -263,12 +263,156 @@ pub fn hand_in_refused_ask(attempt: u32, n: usize) -> String {
     format!("{HAND_IN_REFUSED_ASK_PREFIX}{attempt}-{n}")
 }
 
+/// The words that start a typed confirmation to widen a scope to high-risk
+/// paths; the paths follow. It is never an offered option: the person types it.
+pub const HIGH_RISK_CONFIRM: &str = "confirm high-risk widening to ";
+
+/// The most paths one widening option names.
+const MAX_OFFERED: usize = 5;
+
+/// The longest a widening option's text may be, in characters.
+const MAX_OPTION_CHARS: usize = 200;
+
+/// Whether `path` is one a widening is never offered as one click: deploy
+/// workflows, `AGENTS.md`, `go.mod`/`go.sum`, `package.json`, anything under
+/// `.agents/`, and anything matching one of the repo's own `globs` (its
+/// `high_risk_paths`).
+pub fn is_high_risk_path(path: &str, globs: &[String]) -> bool {
+    let path = path.trim_start_matches("./");
+    let name = path.rsplit('/').next().unwrap_or_default();
+    let builtin = path.starts_with(".agents/")
+        || (path.starts_with(".github/workflows/") && path.to_lowercase().contains("deploy"))
+        || matches!(name, "AGENTS.md" | "go.mod" | "go.sum" | "package.json");
+    builtin || globs.iter().any(|glob| glob_matches(glob, path))
+}
+
+/// A small glob: `*` matches within a segment, `**` across segments, and a
+/// pattern ending in `/` matches everything under it.
+fn glob_matches(glob: &str, path: &str) -> bool {
+    fn go(pattern: &[u8], text: &[u8]) -> bool {
+        match pattern.split_first() {
+            None => text.is_empty(),
+            Some((b'*', rest)) if rest.first() == Some(&b'*') => {
+                let rest = &rest[1..];
+                let rest = rest.strip_prefix(b"/").unwrap_or(rest);
+                (0..=text.len()).any(|at| go(rest, &text[at..]))
+            }
+            Some((b'*', rest)) => {
+                let end = text.iter().position(|c| *c == b'/').unwrap_or(text.len());
+                (0..=end).any(|at| go(rest, &text[at..]))
+            }
+            Some((c, rest)) => text.first() == Some(c) && go(rest, &text[1..]),
+        }
+    }
+    let glob = glob.trim().trim_start_matches("./");
+    if let Some(dir) = glob.strip_suffix('/') {
+        return path.starts_with(&format!("{dir}/"));
+    }
+    go(glob.as_bytes(), path.as_bytes())
+}
+
+/// The `high_risk_paths` globs of an `.agents/orchestration.yaml` text.
+///
+/// Reads only the one block list under that key; a missing key is no globs.
+pub fn high_risk_globs_from_yaml(text: &str) -> Vec<String> {
+    let mut globs = Vec::new();
+    let mut inside = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("high_risk_paths:") {
+            inside = true;
+            continue;
+        }
+        if !inside || trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let Some(item) = trimmed.strip_prefix("- ") else {
+            break;
+        };
+        let item = item.split(" #").next().unwrap_or(item);
+        let item = item.trim().trim_matches(|c| c == '"' || c == '\'');
+        if !item.is_empty() {
+            globs.push(item.to_string());
+        }
+    }
+    globs
+}
+
+/// What a widening card offers for `paths`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct WidenOffer {
+    /// The entries the one-click option widens to: folders, at most five.
+    pub entries: Vec<String>,
+    /// How many more entries were left off the option to keep it short.
+    pub more: usize,
+    /// High-risk paths, never one click: they need the typed confirmation.
+    pub high_risk: Vec<String>,
+}
+
+/// Splits `paths` into the one-click entries and the high-risk ones.
+///
+/// Paths are folded into their folders (`dir/`) when there are more than five,
+/// at most five entries are offered, and the option stays under about 200
+/// characters; what does not fit is counted in `more`.
+pub fn widen_offer(paths: &[String], globs: &[String]) -> WidenOffer {
+    let (high, plain): (Vec<&String>, Vec<&String>) =
+        paths.iter().partition(|p| is_high_risk_path(p, globs));
+    let mut entries: Vec<String> = Vec::new();
+    let fold = plain.len() > MAX_OFFERED;
+    for path in plain {
+        let entry = match path.rsplit_once('/') {
+            Some((dir, _)) if fold => format!("{dir}/"),
+            _ => path.clone(),
+        };
+        if !entries.contains(&entry) {
+            entries.push(entry);
+        }
+    }
+    let total = entries.len();
+    let mut kept: Vec<String> = Vec::new();
+    let mut chars = WIDEN_CHOICE.len();
+    for entry in entries {
+        let cost = entry.chars().count() + 2;
+        if kept.len() == MAX_OFFERED || chars + cost > MAX_OPTION_CHARS {
+            break;
+        }
+        chars += cost;
+        kept.push(entry);
+    }
+    WidenOffer {
+        more: total - kept.len(),
+        entries: kept,
+        high_risk: high.into_iter().cloned().collect(),
+    }
+}
+
+/// The line a card adds when some paths are high-risk or did not fit.
+pub fn widen_note(offer: &WidenOffer) -> String {
+    let mut note = String::new();
+    if offer.more > 0 {
+        note.push_str(&format!(" {} more not offered.", offer.more));
+    }
+    if !offer.high_risk.is_empty() {
+        note.push_str(&format!(
+            " High-risk, so not one click: {}. To widen to them type `{HIGH_RISK_CONFIRM}<paths>`.",
+            offer.high_risk.join(", ")
+        ));
+    }
+    note
+}
+
 /// The choices a refused hand-in's card offers: widen the scope to the paths
 /// that fell outside it (when some did), or send the task back.
 pub fn hand_in_refused_options(out_of_scope: &[String]) -> Vec<String> {
+    hand_in_refused_options_for(out_of_scope, &[])
+}
+
+/// [`hand_in_refused_options`] with the repo's own high-risk `globs`.
+pub fn hand_in_refused_options_for(out_of_scope: &[String], globs: &[String]) -> Vec<String> {
     let mut options = Vec::new();
-    if !out_of_scope.is_empty() {
-        options.push(format!("{WIDEN_CHOICE}{}", out_of_scope.join(", ")));
+    let offer = widen_offer(out_of_scope, globs);
+    if !offer.entries.is_empty() {
+        options.push(format!("{WIDEN_CHOICE}{}", offer.entries.join(", ")));
     }
     options.push(SEND_BACK_CHOICE.to_string());
     options
@@ -298,7 +442,10 @@ pub fn hand_in_refused_choice(ask: &str, answer: &str) -> Option<HandInChoice> {
         return None;
     }
     let choice = answer.trim();
-    if let Some(paths) = choice.strip_prefix(WIDEN_CHOICE) {
+    if let Some(paths) = choice
+        .strip_prefix(WIDEN_CHOICE)
+        .or_else(|| choice.strip_prefix(HIGH_RISK_CONFIRM))
+    {
         let paths: Vec<String> = paths
             .split(',')
             .map(|path| path.trim().to_string())
@@ -587,12 +734,13 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::{
-        ESCALATION_ACTION, HandInChoice, Next, REVIEW_GATE, ROUNDS_SPENT_OPTIONS, SEND_BACK_CHOICE,
-        after_failure, answer_leaves_a_verb, answered_rounds_body, card_attempt, decide,
-        failed_review_rounds, hand_in_refused_choice, hand_in_refused_options,
+        ESCALATION_ACTION, HIGH_RISK_CONFIRM, HandInChoice, Next, REVIEW_GATE,
+        ROUNDS_SPENT_OPTIONS, SEND_BACK_CHOICE, WIDEN_CHOICE, after_failure, answer_leaves_a_verb,
+        answered_rounds_body, card_attempt, decide, failed_review_rounds, hand_in_refused_choice,
+        hand_in_refused_options, hand_in_refused_options_for, high_risk_globs_from_yaml,
         latest_failed_review, provenance, rounds_spent_answer, rounds_spent_ask, rounds_spent_body,
         rounds_spent_followup, rounds_spent_prefix, rounds_spent_verb_ran,
-        send_back_failure_prefix, verdict,
+        send_back_failure_prefix, verdict, widen_note, widen_offer,
     };
     use crate::config::Review;
     use crate::event::{EventKind, Finding, ReviewSource, Severity};
@@ -1013,6 +1161,51 @@ mod tests {
         // A retry is the engine's own work; another ask is not this card.
         assert!(rounds_spent_followup(&found, &ask, "retry with another round").is_none());
         assert!(rounds_spent_followup(&found, "plan-1", "take it as it is").is_none());
+    }
+
+    #[test]
+    fn high_risk_paths_are_never_one_click_but_a_typed_confirmation_widens() {
+        let globs = vec![String::from("infra/**"), String::from("*.lock")];
+        let paths = vec![
+            String::from("src/a.rs"),
+            String::from("AGENTS.md"),
+            String::from(".agents/orchestration.yaml"),
+            String::from("infra/deep/main.tf"),
+            String::from("Cargo.lock"),
+            String::from(".github/workflows/deploy.yml"),
+        ];
+        let options = hand_in_refused_options_for(&paths, &globs);
+        assert_eq!(options[0], format!("{WIDEN_CHOICE}src/a.rs"), "{options:?}");
+        let offer = widen_offer(&paths, &globs);
+        assert_eq!(offer.high_risk.len(), 5, "{offer:?}");
+        assert!(widen_note(&offer).contains(HIGH_RISK_CONFIRM));
+        assert_eq!(
+            hand_in_refused_choice(
+                "hand-in-refused-1-1",
+                &format!("{HIGH_RISK_CONFIRM}AGENTS.md")
+            ),
+            Some(HandInChoice::Widen(vec![String::from("AGENTS.md")]))
+        );
+        // Only high-risk paths: nothing is offered to widen to.
+        let only = hand_in_refused_options(&[String::from("go.mod")]);
+        assert_eq!(only, vec![SEND_BACK_CHOICE.to_string()]);
+    }
+
+    #[test]
+    fn many_paths_fold_to_folders_and_stay_short() {
+        let paths: Vec<String> = (0..40).map(|n| format!("dir{n}/sub/file{n}.rs")).collect();
+        let offer = widen_offer(&paths, &[]);
+        assert!(offer.entries.len() <= 5);
+        assert_eq!(offer.entries.len() + offer.more, 40);
+        let options = hand_in_refused_options(&paths);
+        assert!(options[0].chars().count() <= 200, "{}", options[0]);
+    }
+
+    #[test]
+    fn the_orchestration_yaml_gives_its_high_risk_globs() {
+        let yaml = "name: x\nhigh_risk_paths:\n  - \"infra/**\"  # prod\n  - '*.lock'\nother: 1\n";
+        assert_eq!(high_risk_globs_from_yaml(yaml), ["infra/**", "*.lock"]);
+        assert!(high_risk_globs_from_yaml("name: x\n").is_empty());
     }
 
     #[test]
