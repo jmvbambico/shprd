@@ -397,6 +397,8 @@ const VERB_NAMES = {
   "task.drop": "Drop",
   "task.drop_many": "Drop",
   "ask.answer": "Answer",
+  "task.resend_brief": "Resend brief",
+  "need.dismiss": "Dismiss",
 };
 
 /**
@@ -889,6 +891,11 @@ export class Client {
   /** `POST /api/action`: one of the person's actions on a task. */
   action(payload) {
     return this.call("POST", "/api/action", { body: payload });
+  }
+
+  /** `POST /api/action` `need.dismiss`: take one notice or decision card off the board. */
+  dismissNeed(seq) {
+    return this.action({ kind: "need.dismiss", seq });
   }
 
   /** `POST /api/action` `task.resend_brief`: type the task's brief into its agent again. */

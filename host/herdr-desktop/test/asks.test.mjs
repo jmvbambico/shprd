@@ -17,6 +17,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import {
+  HEADING,
   KIND,
   SECTION,
   actionFor,
@@ -26,6 +27,8 @@ import {
   expiry,
   footer,
   freeText,
+  ifNothing,
+  choiceLabel,
   namesOpenAsk,
   quoted,
   section,
@@ -58,7 +61,9 @@ test("an open ask is one card: its question, its choices and its task", () => {
   const shown = card(ask.task, "ask");
   assert.equal(shown.id, `ask:${ask.task}:${ask.id}`);
   assert.equal(shown.kind, "question");
-  assert.equal(shown.title, KIND.question);
+  assert.equal(shown.title, HEADING.decision);
+  assert.equal(shown.notice, false);
+  assert.deepEqual(shown.buttons.map((button) => button.label), ["CLI only", "Both", "Leave it to me"]);
   assert.equal(shown.task, ask.task);
   assert.equal(shown.ask, ask.id);
   assert.match(shown.text, /quickstart/);
@@ -72,12 +77,13 @@ test("an open ask is one card: its question, its choices and its task", () => {
   assert.equal(shown.action, null);
 });
 
-test("a card's footer says what happens if nobody answers", () => {
+test("a card has no grey default or countdown: only a plain default shows, as \"If you do nothing\"", () => {
   const ask = ASKS.asks[0];
   const shown = card(ask.task, "ask");
-  // A hook times out, so the card says how long is left rather than what happens.
-  assert.match(footer(shown, ask.created_at_ms), /left$/);
-  assert.equal(footer(shown, ask.expires_at_ms + 1), "expired");
+  assert.equal(footer(shown), "", "an ask says nothing under its words");
+  assert.equal(ifNothing("the task stays where it is"), "If you do nothing: the task stays where it is");
+  assert.equal(ifNothing("fix it, then the engine retries `start`"), "", "a default with a command in it is the button's job");
+  assert.equal(ifNothing(""), "");
   assert.equal(expiry(undefined), "");
   assert.equal(expiry(ask.created_at_ms + 30_000, ask.created_at_ms), "under a minute left");
   assert.equal(expiry(ask.created_at_ms + 90_000, ask.created_at_ms), "1m left");
@@ -113,22 +119,25 @@ test("an escalation is a card with its words and its default action", () => {
   const shown = cards(STATE, { asks: [] }).find((entry) => entry.id === `need:${need.seq}`);
   assert.equal(shown.from, "escalation");
   assert.equal(shown.task, "T1");
-  assert.equal(shown.title, KIND.escalation);
+  assert.equal(shown.title, HEADING.decision);
   assert.equal(shown.options.length, 0);
   assert.equal(shown.freeText, false);
   assert.equal(shown.ask, null);
   assert.match(shown.text, /`start` step has failed/);
-  assert.equal(footer(shown), need.default_action);
+  assert.equal(footer(shown), "", "its default names a command, so it is not printed");
+  assert.deepEqual(shown.buttons.map((button) => button.label), ["Ask the assistant", "Drop task\u2026"]);
+  assert.equal(shown.key, "need:8");
 });
 
 test("a spent review's card shows the verb a person still has to run", () => {
   const spent = STATE.needs.find((entry) => entry.task === "T2");
   const shown = card("T2", "escalation");
-  assert.equal(shown.verb, "shprd override --task T2 --rule integrate_after_failed_gate --reason …");
+  // The service sent buttons, so the card is drawn with them and without the raw command.
+  assert.equal(shown.verb, null);
+  assert.deepEqual(shown.buttons.map((button) => button.label), ["Send back", "Review", "Drop task\u2026"]);
   assert.match(shown.text, /you answered `take it as it is`/);
-  // The service has no action for `override`, so the card shows the words and
-  // offers no button: a button that did nothing would be worse than the verb.
-  assert.equal(shown.action, null);
+  assert.equal(shown.footer, undefined);
+  assert.equal(footer(shown), "If you do nothing: the task stays where it is");
   assert.deepEqual(commands(spent.body), [
     "shprd override --task T2 --rule integrate_after_failed_gate --reason …",
     "shprd land T2",
@@ -235,7 +244,8 @@ test("a card about no task names the run instead of a blank reference", () => {
     { asks: [] },
   )[0];
   assert.equal(shown.task, null, "a card about no task names the run instead");
-  assert.equal(shown.title, KIND.escalation);
+  assert.equal(shown.title, HEADING.decision);
+  assert.equal(shown.buttons.length, 0, "a service that sends no buttons gets the card as it was");
 });
 
 test("a lost brief's card has a Resend button that posts task.resend_brief", () => {
@@ -243,8 +253,71 @@ test("a lost brief's card has a Resend button that posts task.resend_brief", () 
   const [card] = cards(state, { asks: [] });
   assert.deepEqual(card.action, { kind: "task.resend_brief", task: "T1" });
   assert.equal(card.actionLabel, "Resend");
-  assert.equal(footer(card), "resend the brief");
+  assert.equal(footer(card), "If you do nothing: resend the brief");
+  assert.equal(card.buttons[0].label, "Resend");
+  assert.deepEqual(card.buttons[0].payload, { kind: "task.resend_brief", task: "T1" });
   // A review's lost kickoff is a different card with its own fix: no button.
   const other = cards({ needs: [{ task: "T1", body: "review brief not delivered", default_action: "x", seq: 4 }] }, { asks: [] })[0];
   assert.equal(other.action, null);
+});
+
+// -- every card has a button, a notice dismisses, scope cards are one ------
+
+test("a notice is a Notice with Dismiss and no decision, and a decision with no kind reads as a decision", () => {
+  const state = {
+    needs: [
+      { seq: 5, task: "T1", body: "T1 is back in the queue", default_action: "nothing", kind: "notice", actions: ["dismiss"], key: "need:5" },
+      { seq: 6, task: "T1", body: "pick one", default_action: "wait", kind: "decision", actions: ["ask_assistant", "dismiss"], key: "need:6" },
+      { seq: 7, task: null, body: "an old service's card", default_action: "wait" },
+    ],
+  };
+  const [notice, decision, old] = cards(state, { asks: [] });
+  assert.equal(notice.title, HEADING.notice);
+  assert.equal(notice.notice, true);
+  assert.deepEqual(notice.buttons.map((button) => button.label), ["Dismiss"]);
+  assert.deepEqual(notice.buttons[0].payload, { kind: "need.dismiss", seq: 5 });
+  assert.equal(footer(notice), "", "a notice has no default");
+  assert.equal(decision.title, HEADING.decision);
+  assert.equal(footer(decision), "If you do nothing: wait");
+  assert.equal(old.title, HEADING.decision);
+  assert.equal(old.notice, false);
+});
+
+test("a refused hand-in and the coordinator's widen for one task are one card with the union of their buttons", () => {
+  const asks = {
+    asks: [
+      {
+        id: "hand-in-refused-1-1",
+        task: "T1",
+        kind: "question",
+        text: "T1: the engine refused attempt 1's hand-in",
+        options: ["widen the scope to a/b.rs", "send it back to a new attempt"],
+        created_at_ms: 1,
+      },
+      {
+        id: "scope-widen-1",
+        task: "T1",
+        kind: "question",
+        text: "T1: widen its scope to a/b.rs?",
+        options: ["widen the scope to a/b.rs", "keep the scope"],
+        created_at_ms: 2,
+      },
+    ],
+  };
+  const list = cards({ needs: [] }, asks);
+  assert.equal(list.length, 1);
+  assert.equal(list[0].key, "scope:T1");
+  assert.deepEqual(list[0].buttons.map((button) => button.label), ["Allow these files", "Send back", "Keep the scope"]);
+  // Each button answers the ask that offers its choice.
+  assert.deepEqual(list[0].buttons.map((button) => button.ask), ["hand-in-refused-1-1", "hand-in-refused-1-1", "scope-widen-1"]);
+  assert.equal(choiceLabel("widen the scope to x, y"), "Allow these files");
+  // A key the service sends is believed over the one read from the id.
+  assert.equal(cards({ needs: [] }, { asks: [{ ...asks.asks[0], key: "k:1" }] })[0].key, "k:1");
+  // An ask and an escalation sharing a key are one card too.
+  const both = cards(
+    { needs: [{ seq: 9, task: "T1", body: "T1 needs its scope looked at", default_action: "wait", kind: "decision", actions: ["retry", "drop"], key: "scope:T1" }] },
+    asks,
+  );
+  assert.equal(both.length, 1);
+  assert.deepEqual(both[0].buttons.map((button) => button.label), ["Allow these files", "Send back", "Keep the scope", "Drop task\u2026"]);
 });

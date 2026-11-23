@@ -59,6 +59,8 @@ export const LABELS = {
   "task.drop_many": "Dropping…",
   review: "Reviewing…",
   "ask.answer": "Answered…",
+  "task.resend_brief": "Resending…",
+  "need.dismiss": "Dismissing…",
 };
 
 /** What the chat says under the timeline while an op is pending. */

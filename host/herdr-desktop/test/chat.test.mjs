@@ -788,3 +788,51 @@ test("loaded history is not trimmed away by new messages", () => {
   assert.equal(chat.messages[0].text, "y");
   assert.equal(foldOlder(chat, page({ session: "other" })), chat, "another session's page is dropped");
 });
+
+test("a pressed button shows its busy word at once, then what was chosen; a refusal restores the card", async () => {
+  const { view } = panel();
+  const [card] = cardsOf(
+    { needs: [] },
+    { asks: [{ id: "a1", task: "T1", kind: "question", text: "which?", options: ["CLI only", "Both"], created_at_ms: 1 }] },
+  );
+  let release;
+  view.client.answerAsk = () => new Promise((resolve) => { release = () => resolve({ ok: true }); });
+  const pending = view.choose(card, card.buttons[0]);
+  assert.deepEqual(view.pressed.get(card.id), { label: "CLI only", busy: "Sending…", phase: "busy" });
+  release();
+  await pending;
+  assert.equal(view.pressed.get(card.id).phase, "chose");
+  assert.equal(view.pressed.get(card.id).label, "CLI only");
+
+  herdr.SHARED.clear();
+  const { view: refused } = panel();
+  refused.client.answerAsk = async () => {
+    const error = new Error("the ask was already answered");
+    error.name = "ServiceError";
+    throw error;
+  };
+  await refused.choose(card, card.buttons[1]);
+  assert.equal(refused.pressed.has(card.id), false, "the card is back with its buttons");
+  assert.deepEqual(refused.answerRefusal, { card: card.id, text: "the ask was already answered" });
+});
+
+test("a notice's Dismiss posts need.dismiss, and a Drop asks twice", async () => {
+  const { view } = panel();
+  const actions = [];
+  view.client.action = async (payload) => { actions.push(payload); return { ok: true }; };
+  const [notice, decision] = cardsOf(
+    {
+      needs: [
+        { seq: 5, task: "T1", body: "back in the queue", default_action: "x", kind: "notice", actions: ["dismiss"], key: "need:5" },
+        { seq: 6, task: "T2", body: "pick", default_action: "y", kind: "decision", actions: ["drop"], key: "need:6" },
+      ],
+    },
+    { asks: [] },
+  );
+  await view.choose(notice, notice.buttons[0]);
+  assert.deepEqual(actions, [{ kind: "need.dismiss", seq: 5 }]);
+  await view.choose(decision, decision.buttons[0]);
+  assert.equal(actions.length, 1, "the first press only arms the drop");
+  await view.choose(decision, decision.buttons[0]);
+  assert.equal(actions[1].kind, "task.drop");
+});

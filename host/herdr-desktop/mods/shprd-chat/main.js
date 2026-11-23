@@ -35,7 +35,7 @@ import { closeOverlay, exec, knownAgents, nextCommand, openOverlay, props, setSh
 import { RepoCache, SEND_PROBLEM, activeFolder, attach, downNotice, press, reason, singleFlight } from "./lib/client.js";
 import * as files from "./attach.js";
 import { Dictation, available as dictationAvailable } from "./dictate.js";
-import { iconFile, popupAt, press as clickPress } from "./lib/panel.js";
+import { iconFile, openThread, popupAt, press as clickPress } from "./lib/panel.js";
 import {
   MENU_W,
   PICK_KEY,
@@ -145,6 +145,10 @@ export default class Chat extends View {
     this.typing = null;
     this.answering = null;
     this.answerRefusal = null;
+    /** The buttons pressed, by card id: `{label, busy, phase: "busy" | "chose"}`. */
+    this.pressed = new Map();
+    /** The card whose Drop is waiting for its second press. */
+    this.confirming = null;
     this.draft = null;
     this.scroll = ScrollHandle.new();
     this.pinned = "bottom";
@@ -862,14 +866,54 @@ export default class Chat extends View {
     }
   }
 
+  /** The buttons pressed so far, by card id (made on first use: a view built piecemeal has none). */
+  held() {
+    this.pressed ??= new Map();
+    return this.pressed;
+  }
+
+  /** Shows what a pressed button is doing on its card: its busy word, then what was chosen. */
+  mark(card, button, phase) {
+    this.held().set(card.id, { label: button?.chose ?? button?.label ?? "", busy: button?.busy ?? "Working\u2026", phase });
+    this.cx.notify();
+  }
+
+  /** A refusal puts the card back as it was, with the reason under it. */
+  restore(card, text) {
+    this.held().delete(card.id);
+    this.answerRefusal = { card: card.id, text };
+    this.answering = null;
+    this.cx.notify();
+  }
+
+  /** Presses one button of a card, whatever it does. */
+  async choose(card, button) {
+    if (!button || this.answering !== null) return;
+    if (button.kind === "answer") return this.answer(card, button.answer, button);
+    if (button.action === "reply") return this.type(card);
+    if (button.action === "review") {
+      if (button.task) openThread({ task: button.task, title: "" }, "chat");
+      return;
+    }
+    // Drop is the one button that asks twice: the first press arms it, the second drops.
+    if (button.confirm && this.confirming !== card.id) {
+      this.confirming = card.id;
+      this.cx.notify();
+      return;
+    }
+    this.confirming = null;
+    if (button.action === "ask_assistant") return this.askAssistant(card, button);
+    return this.act(card, button);
+  }
+
   /** Answers one card; the service takes it exactly once. */
-  async answer(card, text) {
-    const body = answerBody(card, text);
+  async answer(card, text, button = null) {
+    const body = answerBody(card, text, button?.ask ?? null);
     if (!body || !this.client || this.answering !== null) return;
     this.answering = card.id;
     this.answerRefusal = null;
-    this.cx.notify();
-    // The card is gone and its task resumes at once; a refusal puts it back.
+    this.mark(card, button ?? { busy: "Sending\u2026", chose: String(text).trim() }, "busy");
+    // The task resumes at once when that was its last question; a refusal puts it back.
     const remaining = (this.asks?.asks ?? []).filter((ask) => ask.task === body.task).length;
     const sent = await press(this, {
       kind: "ask.answer",
@@ -881,30 +925,73 @@ export default class Chat extends View {
       this.typing = null;
       this.draft?.set_value?.("");
       this.answering = null;
+      this.mark(card, button ?? { chose: body.answer }, "chose");
       await this.refresh();
       return;
     }
-    if (!sent.ignored) this.answerRefusal = { card: card.id, text: sent.reason };
-    this.answering = null;
-    this.cx.notify();
+    if (sent.ignored) {
+      this.held().delete(card.id);
+      this.answering = null;
+      this.cx.notify();
+      return;
+    }
+    this.restore(card, sent.reason);
   }
 
-  /** Runs the one action the service has for an escalation, when it has one. */
-  async act(card) {
-    if (!card.action || !this.client || this.answering !== null) return;
+  /** Runs one service action a card's button names. */
+  async act(card, button = null) {
+    const payload = button?.payload ?? card.action;
+    if (!payload || !this.client || this.answering !== null) return;
     this.answering = card.id;
     this.answerRefusal = null;
-    this.cx.notify();
+    this.mark(card, button ?? { busy: "Running\u2026", chose: card.actionLabel ?? "Run" }, "busy");
     try {
-      await this.client.action(card.action);
+      await this.client.action(payload);
       this.answering = null;
+      this.mark(card, button ?? { chose: card.actionLabel ?? "Run" }, "chose");
       await this.refresh();
       return;
     } catch (err) {
-      this.answerRefusal = { card: card.id, text: reason(err) };
+      this.restore(card, reason(err));
     }
-    this.answering = null;
-    this.cx.notify();
+  }
+
+  /** Hands a card to the coordinator in words, so it can say what to do. */
+  async askAssistant(card, button) {
+    const body = outgoing(COORDINATOR, `Help me decide: ${card.text}`);
+    if (!body || !this.client || this.answering !== null) return;
+    this.answering = card.id;
+    this.answerRefusal = null;
+    this.mark(card, button, "busy");
+    try {
+      await this.client.call("POST", "/api/chat", { body });
+      this.answering = null;
+      this.mark(card, button, "chose");
+      await this.refresh();
+    } catch (err) {
+      this.restore(card, reason(err));
+    }
+  }
+
+  /** Sends the words typed on a card: the answer of an ask, or a reply to the agent of a notice. */
+  async respond(card, text) {
+    if ((card.asks ?? []).length > 0 || card.ask) return this.answer(card, text);
+    const body = outgoing(card.task || COORDINATOR, text);
+    if (!body || !this.client || this.answering !== null) return;
+    const button = { busy: "Replying\u2026", chose: `Reply: ${String(text).trim()}` };
+    this.answering = card.id;
+    this.answerRefusal = null;
+    this.mark(card, button, "busy");
+    try {
+      await this.client.call("POST", "/api/chat", { body });
+      this.typing = null;
+      this.draft?.set_value?.("");
+      this.answering = null;
+      this.mark(card, button, "chose");
+      await this.refresh();
+    } catch (err) {
+      this.restore(card, reason(err));
+    }
   }
 
   /**
@@ -943,7 +1030,11 @@ export default class Chat extends View {
     probe("Chat", board);
     const gone = answeredAsks(folder);
     const open = this.asks ? { ...this.asks, asks: (this.asks.asks ?? []).filter((ask) => !gone.has(`${ask.task}/${ask.id}`)) } : this.asks;
-    const list = this.space === null ? [] : forSpace(cardsOf(board, open), this.space);
+    const live = cardsOf(board, open);
+    // A card the person just answered stays, saying what they chose, until the service stops listing it.
+    const every = this.held().size === 0 ? live : cardsOf(board, this.asks).filter((card) => this.held().has(card.id) || live.some((have) => have.id === card.id));
+    for (const id of [...this.held().keys()]) if (!every.some((card) => card.id === id)) this.held().delete(id);
+    const list = this.space === null ? [] : forSpace(every, this.space);
     const rows = timeline(withEchoes(this.chat, this.myEchoes()), list);
     this.reveal(rows, list);
     const said =
@@ -1217,9 +1308,12 @@ export default class Chat extends View {
    * An escalation is the engine's, with the verb a person still has to run.
    */
   card(t, colors, card_) {
-    const tone_ = card_.from === "ask" ? colors.red : colors.amber;
+    const tone_ = card_.notice ? t.muted : card_.from === "ask" ? colors.red : colors.amber;
     const refused = this.answerRefusal?.card === card_.id;
     const busy = this.answering === card_.id;
+    const pressed = this.held().get(card_.id) ?? null;
+    const buttons = card_.buttons ?? [];
+    const line = footer(card_);
     return this.column(
       div()
       .w_full()
@@ -1231,72 +1325,69 @@ export default class Chat extends View {
           .gap(6)
           .rounded(RADIUS.card)
           .border_1()
-          .border_color(refused ? colors.red : tone_)
+          .border_color(refused ? colors.red : card_.notice ? t.border : tone_)
           .bg(t.raised)
-          .child(
-            h_flex()
-              .gap(6)
-              .items_center()
-              .child(div().flex_none().text_size(TEXT.id).font_medium().text_color(tone_).child(card_.title))
-              .child(div().flex_1())
-              .when(footer(card_) !== "", (el) =>
-                el.child(div().flex_none().text_size(TEXT.id).text_color(t.dim).child(footer(card_))),
-              ),
-          )
+          .child(div().text_size(TEXT.id).font_medium().text_color(tone_).child(card_.title))
           .child(div().text_size(TEXT.body).text_color(t.foreground).child(card_.text))
           .when(card_.verb !== null, (el) =>
             el.child(
-              h_flex()
-                .gap(6)
-                .items_center()
-                .child(
-                  div()
-                    .flex_1()
-                    .min_w(0)
-                    .font_family("JetBrains Mono")
-                    .text_size(TEXT.id)
-                    .text_color(colors.amber)
-                    .child(card_.verb),
-                )
-                .when(card_.action !== null, (inner) => inner.child(this.button(t, card_.actionLabel ?? "Run", () => this.act(card_), busy))),
+              div()
+                .min_w(0)
+                .font_family("JetBrains Mono")
+                .text_size(TEXT.id)
+                .text_color(colors.amber)
+                .child(card_.verb),
             ),
           )
-          .when(card_.verb === null && card_.action !== null, (el) =>
+          .when(line !== "" && pressed === null, (el) => el.child(div().text_size(TEXT.label).text_color(t.dim).child(line)))
+          .when(pressed !== null, (el) =>
             el.child(
-              h_flex()
-                .gap(6)
-                .child(this.button(t, card_.actionLabel ?? "Run", () => this.act(card_), busy)),
+              div()
+                .text_size(TEXT.label)
+                .text_color(pressed?.phase === "chose" ? t.foreground : t.dim)
+                .child(pressed?.phase === "chose" ? `You chose: ${pressed.label}` : pressed?.busy ?? ""),
             ),
           )
-          .when(card_.options.length > 0, (el) =>
+          .when(pressed === null && buttons.length > 0, (el) =>
             el.child(
               h_flex()
                 .gap(6)
                 .flex_wrap()
                 .children(
-                  card_.options.map((option) =>
-                    this.button(t, option.label, () => this.answer(card_, option.answer), busy),
+                  buttons.map((button) =>
+                    this.button(
+                      t,
+                      button.confirm && this.confirming === card_.id ? "Drop it" : button.label,
+                      () => this.choose(card_, button),
+                      busy,
+                    ),
                   ),
                 ),
             ),
           )
-          .when(card_.freeText, (el) =>
-            el.child(
-              this.typing === card_.id
-                ? h_flex()
-                    .gap(6)
-                    .items_center()
-                    .child(div().flex_1().min_w(0).child(Input.new(this.draft)))
-                    .child(this.button(t, "Send", () => this.answer(card_, this.draft?.value?.() ?? ""), busy))
-                    .child(this.button(t, "Cancel", () => this.type(card_), false))
-                : this.button(t, "Type an answer", () => this.type(card_), busy),
-            ),
+          .when(pressed === null && card_.freeText, (el) =>
+            el.child(this.typeRow(t, card_, busy)),
+          )
+          .when(pressed === null && !card_.freeText && this.typing === card_.id, (el) =>
+            el.child(this.typeRow(t, card_, busy)),
           )
           .when(refused, (el) =>
             el.child(div().text_size(TEXT.label).text_color(colors.red).child(this.answerRefusal.text)),
           ),
       ),
     );
+  }
+
+  /** The words a card takes: a button that opens the box, then the box with Send and Cancel. */
+  typeRow(t, card_, busy) {
+    return this.typing === card_.id
+      ? h_flex()
+          .gap(6)
+          .items_center()
+          .child(div().flex_1().min_w(0).child(Input.new(this.draft)))
+          .child(this.button(t, "Send", () => this.respond(card_, this.draft?.value?.() ?? ""), busy))
+          .child(this.button(t, "Cancel", () => this.type(card_), false))
+      : this.button(t, "Type an answer", () => this.type(card_), busy);
   }
 
   /** One small text button: the card's only act. */
