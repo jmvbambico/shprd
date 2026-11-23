@@ -368,3 +368,54 @@ fn a_free_typed_answer_is_normalised_before_the_widening_is_written() {
         .expect("the widening");
     assert_eq!(widened["paths"], json!(["docs/extra.md", "crates/other"]));
 }
+
+#[test]
+fn a_widen_for_a_subset_of_an_open_card_raises_nothing_and_names_the_card() {
+    let (repo, _state, _home) = fixture();
+    assert!(raise(repo.path(), "T1").status.success());
+    let output = run(
+        repo.path(),
+        Some("agent:coordinator"),
+        &[
+            "agent",
+            "task",
+            "widen",
+            "--task",
+            "T1",
+            "--scope",
+            "docs/extra.md",
+            "--reason",
+            "again",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let said = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        said.contains("scope-widen-1") && said.contains("scope:T1"),
+        "{said}"
+    );
+    assert_eq!(count(repo.path(), "ask_raised"), 1, "no second card");
+}
+
+#[test]
+fn a_widened_path_leaves_no_open_card_offering_only_scoped_paths() {
+    let (repo, state, home) = fixture();
+    assert!(raise(repo.path(), "T1").status.success());
+    let _service = Service::start(repo.path(), state.path(), home.path());
+    assert_eq!(
+        answer(
+            state.path(),
+            repo.path(),
+            "widen the scope to docs/extra.md, crates/other"
+        ),
+        200
+    );
+    // The same paths again: they are in scope, so nothing is raised.
+    let output = raise(repo.path(), "T1");
+    assert!(output.status.success());
+    assert_eq!(count(repo.path(), "ask_raised"), 1);
+}
