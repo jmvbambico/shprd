@@ -349,9 +349,7 @@ impl<S: Steps> Pipeline<'_, S> {
         let built = match self.steps.build(&head) {
             Ok(built) => built,
             Err(why) => {
-                let line = format!(
-                    "shprd could not build the accepted change ({short}), so it is still running the version it had. Nothing was changed. Reason: {why}"
-                );
+                let line = could_not_update(&short, &why);
                 self.finish(false, &line);
                 self.steps.escalate(&line, NOTHING_TO_DO);
                 return Outcome::BuildFailed(why);
@@ -361,9 +359,7 @@ impl<S: Steps> Pipeline<'_, S> {
             "shprd will restart once to apply the accepted change ({short}). Nothing is lost: the work on the board stays."
         ));
         if let Err(why) = self.steps.swap(&built) {
-            let line = format!(
-                "shprd built the accepted change ({short}) but could not put it in place, so it is still running the version it had. Reason: {why}"
-            );
+            let line = could_not_update(&short, &why);
             self.finish(false, &line);
             self.steps.escalate(&line, NOTHING_TO_DO);
             return Outcome::Stuck(why);
@@ -420,6 +416,16 @@ impl<S: Steps> Pipeline<'_, S> {
             tracing::warn!(%why, "the update's outcome could not be recorded");
         }
     }
+}
+
+/// What a person is told when an update could not be built or put in place:
+/// shprd is as it was, and why. It holds no command and no backtick.
+fn could_not_update(short: &str, why: &str) -> String {
+    let why = why.replace('`', "'");
+    let why = why.trim().trim_end_matches('.');
+    format!(
+        "shprd could not update itself to {short} and is still running the version it had. Nothing was changed. Why: {why}."
+    )
 }
 
 /// Starts a detached helper that runs the pipeline for one repository.
@@ -715,6 +721,12 @@ mod tests {
         assert_eq!(card.len(), 1);
         assert!(
             card[0].contains("still running the version it had"),
+            "{card:?}"
+        );
+        assert!(
+            card[0].starts_with("shprd could not update itself to ")
+                && card[0].contains(" Nothing was changed. Why: ")
+                && !card[0].contains('`'),
             "{card:?}"
         );
         assert!(!read_status(&dirs).unwrap().ok);

@@ -608,6 +608,42 @@ pub struct NeedDto {
     pub default_action: String,
     /// The log sequence that raised it.
     pub seq: u64,
+    /// Whether the person chooses (`decision`) or is only told (`notice`).
+    ///
+    /// A service that sends none is an old one: read it as a decision.
+    #[serde(default)]
+    pub kind: CardKindDto,
+    /// The ids of the buttons the card offers, first is the primary: `review`,
+    /// `retry`, `retry_review`, `resend_brief`, `drop`, `ask_assistant`,
+    /// `reply`, `dismiss`. Never empty for a card the service classified.
+    #[serde(default)]
+    pub actions: Vec<String>,
+    /// Cards with one key are one question: a client draws one card per key.
+    #[serde(default)]
+    pub key: String,
+}
+
+/// Whether a card asks the person to choose or only tells them something.
+///
+/// It is [`shprd_views::cards::CardKind`] with a TypeScript type on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export_to = "CardKindDto.ts")]
+pub enum CardKindDto {
+    /// shprd stopped and the person chooses.
+    #[default]
+    Decision,
+    /// shprd tells; nothing is left to choose, and it never makes a task Needs you.
+    Notice,
+}
+
+impl From<shprd_views::cards::CardKind> for CardKindDto {
+    fn from(kind: shprd_views::cards::CardKind) -> Self {
+        match kind {
+            shprd_views::cards::CardKind::Decision => Self::Decision,
+            shprd_views::cards::CardKind::Notice => Self::Notice,
+        }
+    }
 }
 
 /// The whole board: one snapshot, rebuilt from the fold on every request.
@@ -1820,6 +1856,7 @@ pub(crate) fn exports() -> Result<Vec<(String, String)>, ts_rs::ExportError> {
         one::<TaskStatusDto>()?,
         one::<DerivedStatusDto>()?,
         one::<NeedKindDto>()?,
+        one::<CardKindDto>()?,
         one::<TaskDerivedDto>()?,
         one::<ReportStatusDto>()?,
         one::<SeverityDto>()?,

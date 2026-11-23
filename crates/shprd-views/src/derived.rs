@@ -27,6 +27,7 @@ use shprd_core::ask::AskKind;
 use shprd_core::event::ReportStatus;
 use shprd_core::state::{RunState, Task, TaskStatus};
 
+use crate::cards::CardKind;
 use crate::clock;
 
 /// How long a problem or a quiet agent lasts before the task reads Needs you,
@@ -432,6 +433,8 @@ pub struct TaskSignal {
 pub struct CardFacts {
     /// What needs deciding, in the card's own words.
     pub body: String,
+    /// Whether the person chooses or is only told: a notice never needs them.
+    pub kind: CardKind,
 }
 
 impl Default for TaskSignal {
@@ -468,6 +471,11 @@ impl TaskSignal {
     /// escalation still sitting in the state. A caller with those facts sets
     /// the fields.
     pub fn from_state(state: &RunState, id: &str) -> Option<Self> {
+        Self::from_state_at(state, id, crate::cards::wall_ms())
+    }
+
+    /// [`Self::from_state`] read at `now_ms`: the time a clash notice is aged against.
+    pub fn from_state_at(state: &RunState, id: &str, now_ms: u64) -> Option<Self> {
         let task = state.tasks.get(id)?;
         Some(Self {
             status: task.status,
@@ -491,8 +499,11 @@ impl TaskSignal {
                 .escalations
                 .iter()
                 .filter(|escalation| escalation.task.as_deref() == Some(id))
-                .filter_map(|escalation| crate::cards::card(state, escalation))
-                .map(|card| CardFacts { body: card.body })
+                .filter_map(|escalation| crate::cards::card_at(state, escalation, now_ms))
+                .map(|card| CardFacts {
+                    body: card.body,
+                    kind: card.kind,
+                })
                 .collect(),
             ..Self::default()
         })
@@ -610,7 +621,7 @@ pub fn derive_status(signal: &TaskSignal, live: &LiveAgents, now_ms: u64) -> Der
     if let Some(card) = signal
         .cards
         .iter()
-        .find(|card| !is_ready_to_land(&card.body))
+        .find(|card| card.kind == CardKind::Decision && !is_ready_to_land(&card.body))
     {
         return Derived::needs(Need::Attention, &card.body);
     }
@@ -753,7 +764,7 @@ pub fn derive_from_fold(signal: &TaskSignal, now_ms: u64) -> Derived {
         if let Some(card) = signal
             .cards
             .iter()
-            .find(|card| !is_ready_to_land(&card.body))
+            .find(|card| card.kind == CardKind::Decision && !is_ready_to_land(&card.body))
         {
             return Derived::needs(Need::Attention, &card.body);
         }
@@ -1885,6 +1896,64 @@ mod tests {
     }
 
     #[test]
+    fn a_notice_never_reads_as_needs_you() {
+        for status in [
+            TaskStatus::Working,
+            TaskStatus::Reported,
+            TaskStatus::Failed,
+        ] {
+            let mut signal = task(status);
+            signal.cards.push(CardFacts {
+                body: String::from("T1 clashed with work that landed after it."),
+                kind: CardKind::Notice,
+            });
+            let without = derive_from_fold(&task(status), NOW);
+            assert_eq!(derive_from_fold(&signal, NOW), without, "{status:?}");
+        }
+    }
+
+    #[test]
+    fn a_clash_reads_needs_you_only_once_the_redo_is_overdue() {
+        use shprd_core::state::{Escalation, RunState};
+        let mut state = RunState::default();
+        let mut stuck = shprd_core::state::Task {
+            id: String::from("T1"),
+            title: String::from("a task"),
+            scope: Vec::new(),
+            acceptance: Vec::new(),
+            tags: Vec::new(),
+            skills: Vec::new(),
+            deps: Vec::new(),
+            status: TaskStatus::Failed,
+            attempts: Vec::new(),
+            overrides: Vec::new(),
+            dropped_reason: None,
+            pr: None,
+            approved_head: None,
+            last_status: None,
+            nothing_to_merge: None,
+            fallbacks: Vec::new(),
+            added_at_ms: 0,
+            touched_at_ms: 1_000_000,
+        };
+        stuck.status = TaskStatus::Reported;
+        state.tasks.insert(String::from("T1"), stuck);
+        state.escalations.push(Escalation {
+            task: Some(String::from("T1")),
+            body: String::from(
+                "T1 clashed with work that landed after it; it is being redone on top of the latest (files in conflict: a.rs)",
+            ),
+            default_action: String::from("redo the task on top of the latest"),
+            seq: 3,
+            by_agent: false,
+        });
+        let soon = TaskSignal::from_state_at(&state, "T1", 1_000_000 + 60_000).unwrap();
+        assert_ne!(derive_from_fold(&soon, NOW).status, DerivedStatus::NeedsYou);
+        let late = TaskSignal::from_state_at(&state, "T1", 1_000_000 + 11 * 60_000).unwrap();
+        assert_eq!(derive_from_fold(&late, NOW).status, DerivedStatus::NeedsYou);
+    }
+
+    #[test]
     fn a_log_only_reader_sees_an_open_card_as_needs_you() {
         // Gate run #4, bug 4: a task whose review could not start read
         // `Working · In review` while its card sat in `/api/state`'s `needs`,
@@ -1895,6 +1964,7 @@ mod tests {
             body: String::from(
                 "C1: the engine's review did not start: no workspace \"shprd · repo\" yet",
             ),
+            kind: CardKind::Decision,
         });
         let got = derive_from_fold(&signal, NOW);
         assert_eq!(got.status, DerivedStatus::NeedsYou);
@@ -1911,6 +1981,7 @@ mod tests {
         let mut reported = task(TaskStatus::Reported);
         reported.cards.push(CardFacts {
             body: String::from("C1: its `start` step has failed the same way 3 passes in a row"),
+            kind: CardKind::Decision,
         });
         assert_eq!(
             derive_from_fold(&reported, NOW).status,
@@ -1922,6 +1993,7 @@ mod tests {
         let mut waiting = task(TaskStatus::Reported);
         waiting.cards.push(CardFacts {
             body: String::from("T1 is ready to land: run `shprd approve T1`"),
+            kind: CardKind::Decision,
         });
         assert_eq!(
             derive_from_fold(&waiting, NOW),
@@ -1938,6 +2010,7 @@ mod tests {
             let mut done = task(status);
             done.cards.push(CardFacts {
                 body: String::from("a stale card"),
+                kind: CardKind::Decision,
             });
             let got = derive_from_fold(&done, NOW);
             if status == TaskStatus::Failed {

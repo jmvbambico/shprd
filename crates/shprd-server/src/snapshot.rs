@@ -9,9 +9,9 @@ use shprd_core::state::RunState;
 use shprd_views::status;
 
 use crate::dto::{
-    AgentDto, AskDto, AttemptDto, DerivedStatusDto, FindingDto, GateDto, NeedDto, NeedKindDto,
-    PrStateDto, ReportDto, ReviewDto, RunDto, SnapshotDto, TaskDerivedDto, TaskDto, TaskPrDto,
-    TaskProgressDto,
+    AgentDto, AskDto, AttemptDto, CardKindDto, DerivedStatusDto, FindingDto, GateDto, NeedDto,
+    NeedKindDto, PrStateDto, ReportDto, ReviewDto, RunDto, SnapshotDto, TaskDerivedDto, TaskDto,
+    TaskPrDto, TaskProgressDto,
 };
 
 /// What `GET /api/state` answers with when the repository has no run yet.
@@ -55,11 +55,14 @@ pub fn snapshot(state: &RunState, now_ms: u64) -> SnapshotDto {
             .escalations
             .iter()
             .filter_map(|escalation| {
-                shprd_views::cards::card(state, escalation).map(|card| NeedDto {
+                shprd_views::cards::card_at(state, escalation, now_ms).map(|card| NeedDto {
                     task: escalation.task.clone(),
                     body: card.body,
                     default_action: card.default_action,
                     seq: escalation.seq,
+                    kind: CardKindDto::from(card.kind),
+                    actions: card.actions.into_iter().map(|action| action.id).collect(),
+                    key: card.key,
                 })
             })
             .collect(),

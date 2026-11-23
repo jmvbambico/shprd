@@ -88,13 +88,26 @@
       "task": "T2",
       "body": "T2: its review of attempt 1 failed 2 time(s) and no round is left: one major finding — the count badge overflows its row at ten; you answered `take it as it is`, so run `shprd override --task T2 --rule integrate_after_failed_gate --reason …` then `shprd land T2`",
       "default_action": "the task stays where it is",
-      "seq": 6
+      "seq": 6,
+      "kind": "decision",
+      "actions": [
+        "retry",
+        "review",
+        "drop"
+      ],
+      "key": "need:6"
     },
     {
       "task": "T1",
       "body": "T1: its `start` step has failed the same way 3 passes in a row (attempt 0): opening the space \"shprd · repo · m10c · T1\" for T1: list workspaces: server_not_running: no herdr server is running at /tmp/shs58/home/no-such-herdr.sock; run `herdr` to start or attach it",
       "default_action": "fix what the card names, then the engine retries `start` on its next pass",
-      "seq": 8
+      "seq": 8,
+      "kind": "decision",
+      "actions": [
+        "ask_assistant",
+        "drop"
+      ],
+      "key": "need:8"
     }
   ],
   "asks": [

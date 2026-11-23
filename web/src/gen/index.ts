@@ -13,6 +13,7 @@ export * from "./AskKindDto";
 export * from "./AskListDto";
 export * from "./AskReply";
 export * from "./AttemptDto";
+export * from "./CardKindDto";
 export * from "./ChangeDto";
 export * from "./ChatAttachmentDto";
 export * from "./ChatDto";

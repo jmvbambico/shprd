@@ -115,7 +115,7 @@ pub fn json(state: &RunState, now_ms: u64) -> Value {
 /// CLI and the service's snapshot both come through here, so the two never
 /// disagree about the word a person sees.
 pub fn reading(state: &RunState, id: &str, now_ms: u64) -> Option<Derived> {
-    let signal = TaskSignal::from_state(state, id)?;
+    let signal = TaskSignal::from_state_at(state, id, now_ms)?;
     Some(derived::derive_from_fold(&signal, now_ms))
 }
 
