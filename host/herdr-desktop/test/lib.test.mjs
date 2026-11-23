@@ -655,6 +655,7 @@ function oneService() {
     "/api/health": { body: { id: "id-one" } },
     "/api/state": { body: { seq: 1, tasks: [] } },
     "/api/roster": { body: {} },
+    "*": { body: {} },
     "/api/repos": (_url, init) => {
       const folder = JSON.parse(init.body).folder;
       registered.push(folder);
@@ -689,6 +690,39 @@ test("a repository's calls name it, and a global route does not", async () => {
   assert.ok(urls.some((url) => url.endsWith("/api/state?repo=shop-hash")), urls.join("\n"));
   assert.ok(urls.some((url) => url.endsWith("/api/roster")), "no repo on a global route");
   assert.equal(made.client.dir, `${stateDir("/home/ana", {})}/repos/shop-hash`, "the change file is the repository's own");
+});
+
+// The service's repo-scoped route prefixes (`repos.rs` `is_scoped`).
+const SERVICE_SCOPED = ["state", "changes", "asks", "chat", "terminal", "action", "graph", "tasks", "settings", "coordinator", "agents", "ws"];
+
+test("every client call about a repository names it and every write sends x-shprd", async () => {
+  const doFetch = oneService();
+  forgetRegistered();
+  const { client } = await attach(null, { fetch: doFetch, folder: "/work/shop" });
+  doFetch.calls.length = 0;
+  const run = [
+    () => client.graph(),
+    () => client.asks(),
+    () => client.answerAsk("T1", "ask-1", "yes"),
+    () => client.action({ kind: "task.drop", task: "T1" }),
+    () => client.addTask({ title: "t" }),
+    () => client.taskChanges("T1"),
+    () => client.agentOutput("a1"),
+    () => client.restartCoordinator(),
+    () => client.call("POST", "/api/chat", { body: {} }),
+  ];
+  for (const go of run) await go();
+  assert.ok(doFetch.calls.length >= run.length);
+  for (const { url, init } of doFetch.calls) {
+    const parsed = new URL(url);
+    const first = parsed.pathname.split("/")[2];
+    if (SERVICE_SCOPED.includes(first)) {
+      assert.equal(parsed.searchParams.get("repo"), "shop-hash", `${init.method} ${url} names its repo`);
+    }
+    if (init.method !== "GET") {
+      assert.equal(init.headers["x-shprd"], "1", `${init.method} ${url} sends x-shprd`);
+    }
+  }
 });
 
 test("switching to another space re-points the client: no discovery, no health check", async () => {

@@ -592,7 +592,10 @@ pub(crate) fn answer_ask(
             if let Ok(path) = queue.answer_path(task, ask) {
                 let _ = std::fs::remove_file(path);
             }
-            return Err(commit_error(err));
+            return Err(with_prefix(
+                commit_error(err),
+                "your answer was not recorded and the card is still open: ",
+            ));
         }
     };
     ctx.hub.publish(event.seq);
@@ -600,12 +603,12 @@ pub(crate) fn answer_ask(
     // recorded as theirs: the override `take it as it is` means (the tick lands
     // the task on its own policy afterwards) or the drop.
     if let Some(kind) = followup {
-        let acted = ledger::commit(ctx.repo, ctx.actor, kind).map_err(commit_error)?;
+        let acted = ledger::commit(ctx.repo, ctx.actor, kind).map_err(after_answer)?;
         ctx.hub.publish(acted.seq);
     }
     match proposal {
         Some(Proposal::Event(kind)) => {
-            let acted = ledger::commit(ctx.repo, ctx.actor, kind).map_err(commit_error)?;
+            let acted = ledger::commit(ctx.repo, ctx.actor, kind).map_err(after_answer)?;
             ctx.hub.publish(acted.seq);
         }
         Some(Proposal::Sync) => {
@@ -626,7 +629,7 @@ pub(crate) fn answer_ask(
             return Err(ApiReject::internal("a widening is not a widening"));
         };
         let note = shprd_core::ask::widened_note(paths);
-        let widened = ledger::commit(ctx.repo, ctx.actor, kind).map_err(commit_error)?;
+        let widened = ledger::commit(ctx.repo, ctx.actor, kind).map_err(after_answer)?;
         ctx.hub.publish(widened.seq);
         shprd_core::ask::WorkerNotes::for_repo(ctx.repo)
             .queue(task, &note)
@@ -869,6 +872,21 @@ fn commit_error(err: CommitError) -> ApiReject {
         CommitError::Read(read) => read_error(read),
         CommitError::Log(log) => ApiReject::from(log),
     }
+}
+
+/// A refusal of a step that follows a recorded answer: the answer stands, so
+/// the person is told that and why the step it asked for did not happen.
+fn after_answer(err: CommitError) -> ApiReject {
+    with_prefix(
+        commit_error(err),
+        "your answer was recorded, but what it asked for was refused: ",
+    )
+}
+
+/// The same refusal with `prefix` before its words.
+fn with_prefix(mut reject: ApiReject, prefix: &str) -> ApiReject {
+    reject.body.message = format!("{prefix}{}", reject.body.message);
+    reject
 }
 
 /// Maps a read or fold failure. A log that does not fold is the service's
