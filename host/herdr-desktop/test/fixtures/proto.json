@@ -385,12 +385,24 @@
   {
    "task": "SHPR-23",
    "body": "Reviewer found 2 majors",
-   "seq": 38
+   "seq": 38,
+   "kind": "decision",
+   "actions": [
+    "ask_assistant",
+    "dismiss"
+   ],
+   "key": "need:38"
   },
   {
    "task": "RLY-4",
    "body": "Asks you a question",
-   "seq": 39
+   "seq": 39,
+   "kind": "decision",
+   "actions": [
+    "ask_assistant",
+    "dismiss"
+   ],
+   "key": "need:39"
   }
  ],
  "asks": [],
