@@ -269,6 +269,13 @@ pub fn render_contract(input: &ContractInput<'_>) -> String {
     for path in &task.scope {
         out.push_str(&format!("- {path}\n"));
     }
+    out.push_str(&implied_scope_section(
+        &task.scope,
+        attempt
+            .and_then(|attempt| attempt.report.as_ref())
+            .map(|report| report.changed_paths.as_slice())
+            .unwrap_or(&[]),
+    ));
     out.push_str(&asks_section(&task.id, attempt, input.asks));
     out.push_str("\n## What the agent reported\n\n");
     let report = attempt.and_then(|attempt| attempt.report.as_ref());
@@ -284,6 +291,63 @@ pub fn render_contract(input: &ContractInput<'_>) -> String {
     out.push_str(&proof_section(input.proof_copies));
     if let Some(commit) = &report.commit {
         out.push_str(&format!("- commit: {commit}\n"));
+    }
+    out
+}
+
+/// The paths the scope rules allow without declaring them: the patterns the
+/// declared entries imply, then the reported paths that only those rules allow.
+///
+/// The hand-in check and the diff check use [`shprd_core::scope::within`], so a
+/// reviewer must not call these paths outside the scope.
+fn implied_scope_section(scope: &[String], changed: &[String]) -> String {
+    use shprd_core::scope::{normalize, within};
+    const MODS: &str = "host/herdr-desktop/mods";
+    let mut patterns: Vec<String> = Vec::new();
+    for entry in scope {
+        if let Some(rest) = entry.strip_prefix("crates/")
+            && let Some((krate, below)) = rest.split_once('/')
+            && !krate.is_empty()
+            && !below.is_empty()
+        {
+            patterns.push(format!("crates/{krate}/tests (tests of the crate)"));
+        }
+        if entry == MODS || entry.starts_with(&format!("{MODS}/")) {
+            patterns.push("host/herdr-desktop/test (the desktop tests)".to_string());
+        }
+        if entry == &format!("{MODS}/lib") || entry.starts_with(&format!("{MODS}/lib/")) {
+            let tail = entry.strip_prefix(&format!("{MODS}/lib")).unwrap_or("");
+            patterns.push(format!(
+                "{MODS}/<mod>/lib{tail} (synced copies of a shared file)"
+            ));
+        }
+    }
+    patterns.sort();
+    patterns.dedup();
+    let declared = |path: &str| {
+        scope
+            .iter()
+            .any(|entry| path == entry || path.starts_with(&format!("{entry}/")))
+    };
+    let touched: Vec<&String> = changed
+        .iter()
+        .filter(|path| match normalize(path) {
+            Ok(path) => !declared(&path) && within(&path, scope),
+            Err(_) => false,
+        })
+        .collect();
+    if patterns.is_empty() && touched.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(
+        "\n## Also allowed by the scope rules\n\nThese paths are implied by the scope above, \
+         so a change to one is inside the scope, never outside it:\n\n",
+    );
+    for pattern in &patterns {
+        out.push_str(&format!("- {pattern}\n"));
+    }
+    for path in touched {
+        out.push_str(&format!("- {path} (changed by this attempt)\n"));
     }
     out
 }
@@ -2499,6 +2563,36 @@ project_dirs = []
         );
         assert!(brief.contains("# REVIEW "), "{brief}");
         assert!(!brief.contains(DEGRADED_LABEL), "{brief}");
+    }
+
+    /// `implied_scope_section` lists the synced copy of a shared lib file as allowed.
+    #[test]
+    fn contract_lists_implied_paths_as_allowed() {
+        let scope = vec![
+            "host/herdr-desktop/mods/lib/panel.js".to_string(),
+            "crates/shprd/src/cmd/review.rs".to_string(),
+        ];
+        let copy = "host/herdr-desktop/mods/chat/lib/panel.js".to_string();
+        let text = implied_scope_section(
+            &scope,
+            &[
+                copy.clone(),
+                "crates/shprd/tests/it.rs".to_string(),
+                "crates/shprd/src/cmd/review.rs".to_string(),
+            ],
+        );
+        assert!(
+            text.contains("## Also allowed by the scope rules"),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!("- {copy} (changed by this attempt)")),
+            "{text}"
+        );
+        assert!(text.contains("crates/shprd/tests/it.rs"), "{text}");
+        assert!(text.contains("crates/shprd/tests (tests"), "{text}");
+        assert!(!text.contains("review.rs (changed"), "{text}");
+        assert!(implied_scope_section(&["README.md".to_string()], &[]).is_empty());
     }
 
     /// The contract for a task with one completed attempt, as text.
