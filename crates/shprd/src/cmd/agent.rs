@@ -55,6 +55,9 @@ fn task_add(ctx: &Ctx, args: &TaskAddArgs) -> Result<(), CliError> {
             ctx.commit(event)?;
         }
     }
+    for line in scope_warnings(&ctx.root, &args.scope) {
+        eprintln!("{line}");
+    }
     let kind = EventKind::TaskAdded {
         task: args.id.clone(),
         title: args.title.clone(),
@@ -66,6 +69,26 @@ fn task_add(ctx: &Ctx, args: &TaskAddArgs) -> Result<(), CliError> {
     };
     let event = ctx.commit(kind)?;
     emit(ctx, &event)
+}
+
+/// One warning per scope entry that matches nothing in the repository, with
+/// the nearest real path when there is one.
+fn scope_warnings(root: &Path, scope: &[String]) -> Vec<String> {
+    scope
+        .iter()
+        .filter_map(|raw| {
+            let entry = shprd_core::scope::normalize(raw).ok()?;
+            let near = shprd_core::scope::nearest_existing(root, &entry)?;
+            Some(if near.is_empty() || near == entry {
+                format!("warning: scope path {entry:?} matches nothing in the repository")
+            } else {
+                format!(
+                    "warning: scope path {entry:?} matches nothing in the repository; \
+                     did you mean {near:?}?"
+                )
+            })
+        })
+        .collect()
 }
 
 /// Spawns an agent for a task attempt, or records one a human set up by hand.
@@ -893,7 +916,23 @@ fn override_rule(ctx: &Ctx, args: &OverrideArgs) -> Result<(), CliError> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    use super::{NoteSend, deliver_notes_with, parse_check, refusal_note};
+    use super::{NoteSend, deliver_notes_with, parse_check, refusal_note, scope_warnings};
+
+    #[test]
+    fn a_scope_that_matches_nothing_warns_with_the_nearest_path() {
+        let dir = std::env::temp_dir().join(format!("shprd-scope-warn-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("client/src/components")).unwrap();
+        std::fs::write(dir.join("client/src/components/icons.tsx"), "").unwrap();
+        let scope = vec![
+            "client/src/components/icons".to_string(),
+            "client/src/components".to_string(),
+        ];
+        let warnings = scope_warnings(&dir, &scope);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("icons.tsx"), "{warnings:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn a_refusal_carries_its_seq_and_time() {
