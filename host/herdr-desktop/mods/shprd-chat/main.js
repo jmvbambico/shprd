@@ -892,7 +892,10 @@ export default class Chat extends View {
     if (button.kind === "answer") return this.answer(card, button.answer, button);
     if (button.action === "reply") return this.type(card);
     if (button.action === "review") {
+      this.confirming = null;
+      this.mark(card, { ...button, busy: button.busy ?? "Opening\u2026" }, "busy");
       if (button.task) openThread({ task: button.task, title: "" }, "chat");
+      this.mark(card, button, "chose");
       return;
     }
     // Drop is the one button that asks twice: the first press arms it, the second drops.
