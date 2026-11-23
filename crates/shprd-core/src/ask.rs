@@ -342,6 +342,15 @@ impl AskQueue {
 
     /// Every ask still open at `now_ms`, oldest first.
     pub fn open(&self, now_ms: u64) -> Result<Vec<Ask>, AskError> {
+        Ok(self
+            .all()?
+            .into_iter()
+            .filter(|ask| ask.is_open_at(now_ms))
+            .collect())
+    }
+
+    /// Every ask in the queue, answered or not, oldest first.
+    pub fn all(&self) -> Result<Vec<Ask>, AskError> {
         let mut open = Vec::new();
         let tasks = match fs::read_dir(&self.root) {
             Ok(tasks) => tasks,
@@ -383,10 +392,7 @@ impl AskQueue {
                 if id.ends_with(".answer") || name.starts_with('.') {
                     continue;
                 }
-                let ask = self.read(task, id)?;
-                if ask.is_open_at(now_ms) {
-                    open.push(ask);
-                }
+                open.push(self.read(task, id)?);
             }
         }
         open.sort_by(|left, right| {
@@ -621,10 +627,62 @@ pub fn is_moot_scope_card(task: &str, ask: &str, options: &[String], scope: &[St
 /// What a worker is told when its scope was widened.
 pub fn widened_note(paths: &[String]) -> String {
     format!(
-        "Your scope was widened by the person: you may now also change {}. Carry on, and hand in \
-         again if you were blocked by the scope.",
+        "Your scope was widened by the person: you may now also change {}. Run \
+         `shprd agent report` again now: a refusal you saw before this note is stale (every \
+         refusal names its event seq, so a newer seq is the live one).",
         paths.join(", ")
     )
+}
+
+/// Words that name something only the engine does: a task's state, its scope, a
+/// sync or a landing. An option that has the answerer promise one of these is
+/// not an action the answerer can take on the board.
+const ENGINE_ACTIONS: &[&str] = &[
+    "set ",
+    "setting ",
+    "widen",
+    "apply",
+    "reopen",
+    "re-open",
+    "restart",
+    "resume",
+    "unblock",
+    "drop ",
+    "dropping",
+    "sync",
+    "land ",
+    "landing",
+    "mark ",
+    "move ",
+    "put ",
+    "change the status",
+    "back to ",
+];
+
+/// Why a raised ask's option is refused, or `None` when it is fine.
+///
+/// An option is a button the answerer presses. It must be an action the
+/// answerer can take on the board or one the worker takes itself. One phrased
+/// as the answerer promising an engine action (`I'll set T1 back to Working`,
+/// `I'm applying the widening`) cannot be kept: pressing it changes nothing.
+/// State problems the worker cannot fix belong on an engine card with real
+/// buttons (reopen, sync, drop).
+pub fn option_refusal(option: &str) -> Option<String> {
+    let lower = option.trim().to_lowercase().replace('\u{2019}', "'");
+    let promise = [
+        "i'll ", "i will ", "i'm ", "i am ", "we'll ", "we will ", "i can ", "i'd ",
+    ]
+    .iter()
+    .any(|lead| lower.starts_with(lead));
+    if promise && ENGINE_ACTIONS.iter().any(|word| lower.contains(word)) {
+        return Some(format!(
+            "option {option:?} has the answerer promise an engine action; nothing will do it \
+             when it is pressed. Offer a choice the person can make on the board, or one you take \
+             yourself (`widen the scope to <paths>`, `keep the scope`, `wait`), and put a state \
+             problem you cannot fix in your summary for the engine's own card"
+        ));
+    }
+    None
 }
 
 /// One message waiting to be typed into a task's live worker.
@@ -724,7 +782,35 @@ mod tests {
     use std::sync::{Arc, Barrier};
     use std::thread;
 
-    use super::{Ask, AskError, AskKind, AskQueue, WorkerNotes, widening_of};
+    use super::{Ask, AskError, AskKind, AskQueue, WorkerNotes, option_refusal, widening_of};
+
+    #[test]
+    fn the_widened_note_tells_the_worker_to_report_again() {
+        let note = super::widened_note(&["a.rs".to_string()]);
+        assert!(
+            note.contains("a.rs") && note.contains("shprd agent report"),
+            "{note}"
+        );
+    }
+
+    #[test]
+    fn options_promising_an_engine_action_are_refused() {
+        for bad in [
+            "I'll set T1 back to Working",
+            "I\u{2019}m applying the widening",
+            "I will reopen the task",
+        ] {
+            assert!(option_refusal(bad).is_some(), "{bad}");
+        }
+        for ok in [
+            "widen the scope to crates/a.rs",
+            "keep the scope",
+            "I'll carry on without it",
+            "Reopen T1",
+        ] {
+            assert!(option_refusal(ok).is_none(), "{ok}");
+        }
+    }
 
     fn queue() -> (tempfile::TempDir, AskQueue) {
         let dir = tempfile::tempdir().expect("temp dir");

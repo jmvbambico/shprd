@@ -876,6 +876,35 @@ pub enum AskCommand {
     /// no hook of its own (pi, opencode) is left untouched, and the board falls
     /// back to reading its screen.
     Install(AskInstallArgs),
+    /// List the run's asks, one line each: task, id, state, kind, first line.
+    ///
+    /// Open asks by default; `--all` adds answered and expired ones. `--json`
+    /// prints the full asks, so nobody parses the event log.
+    List(AskListArgs),
+    /// Print one ask's full question and options (`--json` for the whole ask).
+    Show(AskShowArgs),
+}
+
+/// Arguments for `ask list`.
+#[derive(Debug, Args)]
+pub struct AskListArgs {
+    /// Also list answered and expired asks.
+    #[arg(long)]
+    pub all: bool,
+    /// Only this task's asks.
+    #[arg(long, value_name = "TASK")]
+    pub task: Option<String>,
+}
+
+/// Arguments for `ask show`.
+#[derive(Debug, Args)]
+pub struct AskShowArgs {
+    /// The ask's id.
+    #[arg(value_name = "ID")]
+    pub id: String,
+    /// The task, when the same id exists on more than one.
+    #[arg(long, value_name = "TASK")]
+    pub task: Option<String>,
 }
 
 /// Arguments for `ask raise`.

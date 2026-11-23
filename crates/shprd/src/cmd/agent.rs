@@ -543,11 +543,27 @@ fn report(ctx: &Ctx, args: &ReportArgs) -> Result<(), CliError> {
             // A refused hand-in records nothing, so the board would read
             // `Working` for ever with the worker idle. A card says why instead.
             raise_refused_hand_in(ctx, args, &refused);
+            // The refusal names the event it was judged against and when, so a
+            // worker can tell a stale refusal from a new one (a later
+            // `scope_widened` means: run the report again).
+            let seq = ctx.state().map(|state| state.last_seq).unwrap_or_default();
+            let now = shprd_core::log::Clock::now_ms(&shprd_core::log::SystemClock);
+            eprintln!("{}", refusal_note(seq, now));
             return Err(CliError::Refused(refused));
         }
         Err(other) => return Err(other),
     };
     emit(ctx, &event)
+}
+
+/// The line printed with a refusal: the event seq and time it was judged at.
+fn refusal_note(seq: u64, now_ms: u64) -> String {
+    let secs = now_ms / 1000;
+    let (h, m, sec) = (secs / 3600 % 24, secs / 60 % 60, secs % 60);
+    format!(
+        "[refused at event seq {seq}, {h:02}:{m:02}:{sec:02} UTC: a scope_widened event with a \
+         higher seq means this refusal is stale, so run the report again]"
+    )
 }
 
 /// Puts a card in front of the person for a hand-in the engine refused.
@@ -877,7 +893,16 @@ fn override_rule(ctx: &Ctx, args: &OverrideArgs) -> Result<(), CliError> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    use super::{NoteSend, deliver_notes_with, parse_check};
+    use super::{NoteSend, deliver_notes_with, parse_check, refusal_note};
+
+    #[test]
+    fn a_refusal_carries_its_seq_and_time() {
+        let text = refusal_note(99, 3_723_000);
+        assert!(
+            text.contains("seq 99") && text.contains("01:02:03 UTC"),
+            "{text}"
+        );
+    }
 
     #[test]
     fn a_failed_send_stays_pending_then_delivers_once() {
