@@ -610,6 +610,17 @@ pub enum EventKind {
         /// The action taken if nobody answers.
         default_action: String,
     },
+    /// A person dismissed a card: the escalation recorded at `seq` is no longer
+    /// in front of them.
+    ///
+    /// Only a human writes it, and only for the sequence number of an
+    /// `Escalated` event the run holds. The card reads as history from then on;
+    /// a log written before this event existed folds unchanged.
+    NeedDismissed {
+        /// Sequence number of the `Escalated` event whose card is dismissed
+        /// (not called `seq`: the event's own `seq` shares its object).
+        need: u64,
+    },
     /// A human overrode a rule.
     Override {
         /// The task, or run-wide rule when empty.
@@ -1037,6 +1048,7 @@ mod tests {
                 body: "two gates disagree".to_string(),
                 default_action: "stop the run".to_string(),
             },
+            EventKind::NeedDismissed { need: 7 },
             EventKind::Override {
                 task: "M1.1".to_string(),
                 rule: "no_main_push".to_string(),
@@ -1128,7 +1140,7 @@ mod tests {
     #[test]
     fn every_kind_round_trips() {
         let kinds = every_kind();
-        assert_eq!(kinds.len(), 28, "one case per EventKind variant");
+        assert_eq!(kinds.len(), 29, "one case per EventKind variant");
 
         for (index, kind) in kinds.into_iter().enumerate() {
             let event = Event {

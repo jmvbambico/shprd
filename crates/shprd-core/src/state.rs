@@ -26,6 +26,8 @@ pub struct RunState {
     pub agents: BTreeMap<AgentId, AgentInfo>,
     /// Escalations raised during the run, in order.
     pub escalations: Vec<Escalation>,
+    /// Sequence numbers of escalations a person dismissed.
+    pub dismissed_needs: std::collections::BTreeSet<u64>,
     /// Asks raised during the run, keyed by task and ask id.
     ///
     /// The queue's files hold the same asks; the fold is what the board and
@@ -977,6 +979,9 @@ impl RunState {
                     seq: event.seq,
                     by_agent: matches!(event.actor, Actor::Agent { .. }),
                 });
+            }
+            EventKind::NeedDismissed { need } => {
+                self.dismissed_needs.insert(*need);
             }
             EventKind::Override { task, rule, reason } => {
                 // An override with an empty task is run-wide: it belongs to the

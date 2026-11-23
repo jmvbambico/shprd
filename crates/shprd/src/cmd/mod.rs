@@ -246,6 +246,7 @@ pub fn kind_name(kind: &EventKind) -> &'static str {
         EventKind::Available { .. } => "available",
         EventKind::HandedOff { .. } => "handed_off",
         EventKind::Escalated { .. } => "escalated",
+        EventKind::NeedDismissed { .. } => "need_dismissed",
         EventKind::Override { .. } => "override",
         EventKind::Resource { .. } => "resource",
         EventKind::FullGate { .. } => "full_gate",

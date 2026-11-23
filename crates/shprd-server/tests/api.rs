@@ -556,6 +556,60 @@ async fn a_progress_line_is_capped_and_reaches_the_snapshot_and_the_poll() {
 }
 
 #[tokio::test]
+async fn dismissing_a_card_removes_it_and_an_unknown_one_is_refused() {
+    let fixture = Fixture::new();
+    fixture.add_task("T1").await;
+    {
+        let path = fixture.repo.path().join(".shprd").join("events.jsonl");
+        let mut log = EventLog::open(&path).expect("the log opens");
+        log.append(
+            Actor::Engine,
+            EventKind::Escalated {
+                task: Some("T1".to_string()),
+                body: "which branch?".to_string(),
+                default_action: "use main".to_string(),
+            },
+            &SystemClock,
+        )
+        .expect("the card is raised");
+    }
+    let needs = |reply: &Reply| reply.json()["needs"].as_array().expect("needs").clone();
+    let state = fixture
+        .send(Call::get("/api/state").with_token(&fixture.token))
+        .await;
+    let seq = needs(&state)[0]["seq"].as_u64().expect("a seq");
+
+    let unknown = fixture
+        .send(
+            Call::post("/api/action", json!({"kind": "need.dismiss", "seq": 9999}))
+                .with_token(&fixture.token)
+                .with_write_header(),
+        )
+        .await;
+    assert_ne!(unknown.status, StatusCode::OK);
+    assert!(
+        unknown.json()["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("no card number 9999")),
+        "{:?}",
+        unknown.json()
+    );
+
+    let done = fixture
+        .send(
+            Call::post("/api/action", json!({"kind": "need.dismiss", "seq": seq}))
+                .with_token(&fixture.token)
+                .with_write_header(),
+        )
+        .await;
+    assert_eq!(done.status, StatusCode::OK, "{:?}", done.body);
+    let after = fixture
+        .send(Call::get("/api/state").with_token(&fixture.token))
+        .await;
+    assert!(needs(&after).is_empty(), "the card is gone");
+}
+
+#[tokio::test]
 async fn a_status_line_with_no_msg_or_a_bad_percentage_is_refused() {
     let fixture = Fixture::new();
     fixture.add_task("T1").await;

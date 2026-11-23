@@ -447,6 +447,18 @@ pub enum RuleError {
         /// Who tried.
         actor: Actor,
     },
+    /// A dismissal came from something that is not a person.
+    #[error("{actor:?} cannot dismiss a card: only a person can")]
+    DismissNotHuman {
+        /// Who tried.
+        actor: Actor,
+    },
+    /// A dismissal named a card the run does not hold.
+    #[error("there is no card number {seq} to dismiss")]
+    UnknownNeed {
+        /// The sequence number named.
+        seq: u64,
+    },
     /// A review verdict was recorded by something that is not the engine.
     ///
     /// Only the engine decides a review, from the reviewer's packet. An
@@ -861,6 +873,18 @@ fn check_with(
             Some(task) => task_in(state, task).map(|_| ()),
             None => Ok(()),
         },
+        EventKind::NeedDismissed { need } => {
+            if !matches!(actor, Actor::Human) {
+                return Err(RuleError::DismissNotHuman {
+                    actor: actor.clone(),
+                });
+            }
+            if state.escalations.iter().any(|e| e.seq == *need) {
+                Ok(())
+            } else {
+                Err(RuleError::UnknownNeed { seq: *need })
+            }
+        }
         EventKind::Override { task, rule, reason } => {
             check_override(state, actor, task, rule, reason, provenance)
         }
@@ -3472,6 +3496,45 @@ mod tests {
         ]);
         let flags: Vec<bool> = state.escalations.iter().map(|e| e.by_agent).collect();
         assert_eq!(flags, vec![true, false]);
+    }
+
+    #[test]
+    fn only_a_person_dismisses_a_card_that_exists() {
+        let base = vec![
+            started(1),
+            added(2, "a", &["src/a"], &[]),
+            ev(
+                3,
+                EventKind::Escalated {
+                    task: Some("a".to_string()),
+                    body: "which branch?".to_string(),
+                    default_action: "use main".to_string(),
+                },
+            ),
+        ];
+        let dismiss = |seq: u64, actor: Actor| {
+            let mut log = base.clone();
+            log.push(Event {
+                seq: 4,
+                at_ms: 4000,
+                actor,
+                kind: EventKind::NeedDismissed { need: seq },
+            });
+            log
+        };
+        let state = folded(&dismiss(3, Actor::Human));
+        assert!(state.dismissed_needs.contains(&3));
+        let agent = Actor::Agent {
+            id: "claude".to_string(),
+        };
+        assert!(matches!(
+            refused_append(&dismiss(3, agent)),
+            RuleError::DismissNotHuman { .. }
+        ));
+        assert!(matches!(
+            refused_append(&dismiss(99, Actor::Human)),
+            RuleError::UnknownNeed { seq: 99 }
+        ));
     }
 
     #[test]
