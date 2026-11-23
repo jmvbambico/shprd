@@ -35,7 +35,7 @@ use shprd_core::event::{Actor, EventKind};
 use shprd_core::log::{Clock, SystemClock};
 use shprd_core::rules::RuleError;
 
-use crate::cli::{AskHookArgs, AskInstallArgs, AskKindArg, AskRaiseArgs};
+use crate::cli::{AskHookArgs, AskInstallArgs, AskKindArg, AskListArgs, AskRaiseArgs, AskShowArgs};
 use crate::ctx::{CliError, Ctx, resolve_checkout, resolve_root};
 
 /// The environment variable a worker's launch sets with its task id.
@@ -281,6 +281,11 @@ pub fn raise(args: &AskRaiseArgs, ctx: &Ctx) -> Result<(), CliError> {
     }
     let kind = ask_kind(args.kind);
     let options = raise_options(kind, &args.options);
+    for option in &options {
+        if let Some(why) = shprd_core::ask::option_refusal(option) {
+            return Err(CliError::other(anyhow!(why)));
+        }
+    }
     let made = Words {
         kind,
         question: (kind == AskKind::Question).then(|| text.clone()),
@@ -318,6 +323,117 @@ pub fn raise(args: &AskRaiseArgs, ctx: &Ctx) -> Result<(), CliError> {
         println!("{}", answer.text);
     }
     Ok(())
+}
+
+/// Runs `ask list`: the asks in the run's queue, one line each (or JSON).
+///
+/// Open asks by default; `--all` adds answered and expired ones. The full
+/// question and options are in `ask show`, so nobody parses the event log.
+pub fn list(args: &AskListArgs, ctx: &Ctx) -> Result<(), CliError> {
+    let queue = AskQueue::for_repo(&ctx.root);
+    let now = SystemClock.now_ms();
+    let mut asks = queue
+        .all()
+        .map_err(|err| CliError::other(anyhow!(err).context("reading the ask queue")))?;
+    asks.retain(|ask| args.all || ask.is_open_at(now));
+    if let Some(task) = &args.task {
+        asks.retain(|ask| &ask.task == task);
+    }
+    if ctx.json {
+        let text = serde_json::to_string_pretty(&asks)
+            .map_err(|err| CliError::other(anyhow!(err).context("serializing the asks")))?;
+        println!("{text}");
+    } else if asks.is_empty() {
+        println!("no asks");
+    } else {
+        for ask in &asks {
+            println!("{}", list_line(ask, now));
+        }
+    }
+    Ok(())
+}
+
+/// Runs `ask show`: one ask's full text and options.
+pub fn show(args: &AskShowArgs, ctx: &Ctx) -> Result<(), CliError> {
+    let queue = AskQueue::for_repo(&ctx.root);
+    let found = find_ask(&queue, &args.id, args.task.as_deref())?;
+    if ctx.json {
+        let text = serde_json::to_string_pretty(&found)
+            .map_err(|err| CliError::other(anyhow!(err).context("serializing the ask")))?;
+        println!("{text}");
+    } else {
+        println!("{}", show_text(&found, SystemClock.now_ms()));
+    }
+    Ok(())
+}
+
+/// The one ask with this id, in `task` when named; an id in two tasks must be
+/// told apart with `--task`.
+fn find_ask(queue: &AskQueue, id: &str, task: Option<&str>) -> Result<Ask, CliError> {
+    let mut hits: Vec<Ask> = queue
+        .all()
+        .map_err(|err| CliError::other(anyhow!(err).context("reading the ask queue")))?
+        .into_iter()
+        .filter(|ask| ask.id == id && task.is_none_or(|task| ask.task == task))
+        .collect();
+    match hits.len() {
+        0 => Err(CliError::other(anyhow!(
+            "no ask {id:?}{}: `shprd ask list --all` shows every ask",
+            task.map(|task| format!(" on task {task:?}"))
+                .unwrap_or_default()
+        ))),
+        1 => Ok(hits.remove(0)),
+        _ => Err(CliError::other(anyhow!(
+            "ask {id:?} exists on {} tasks: name one with `--task`",
+            hits.len()
+        ))),
+    }
+}
+
+/// Where an ask stands at `now_ms`.
+fn state_word(ask: &Ask, now_ms: u64) -> &'static str {
+    if ask.answer.is_some() {
+        "answered"
+    } else if ask.is_open_at(now_ms) {
+        "open"
+    } else {
+        "expired"
+    }
+}
+
+/// One line of `ask list`.
+fn list_line(ask: &Ask, now_ms: u64) -> String {
+    let first = ask.text.lines().next().unwrap_or_default();
+    format!(
+        "{}\t{}\t{}\t{}\t{}",
+        ask.task,
+        ask.id,
+        state_word(ask, now_ms),
+        ask.kind.word(),
+        first
+    )
+}
+
+/// The full text of `ask show`: question, options and answer.
+fn show_text(ask: &Ask, now_ms: u64) -> String {
+    let mut out = format!(
+        "ask {} on {} ({}, {})\n\n{}\n",
+        ask.id,
+        ask.task,
+        ask.kind.word(),
+        state_word(ask, now_ms),
+        ask.text
+    );
+    if !ask.options.is_empty() {
+        out.push_str("\noptions:\n");
+        for (n, option) in ask.options.iter().enumerate() {
+            out.push_str(&format!("  {}. {option}\n", n + 1));
+        }
+    }
+    if let Some(answer) = &ask.answer {
+        out.push_str(&format!("\nanswer: {}\n", answer.text));
+    }
+    out.trim_end().to_string()
 }
 
 /// The task a worker's verbs read from the environment, when one is set.
@@ -560,8 +676,36 @@ mod tests {
 
     use serde_json::json;
 
-    use super::{Payload, decision, is_denial, raise_options, strip_recommended, words};
-    use shprd_core::ask::AskKind;
+    use super::{
+        Payload, decision, find_ask, is_denial, list_line, raise_options, show_text,
+        strip_recommended, words,
+    };
+    use shprd_core::ask::{Ask, AskKind, AskQueue};
+
+    #[test]
+    fn list_and_show_print_the_full_question_and_options() {
+        let dir = tempfile::tempdir().unwrap();
+        let queue = AskQueue::for_repo(dir.path());
+        let ask = Ask::new(
+            "a-1",
+            "T1",
+            AskKind::Question,
+            "Widen the scope?\nit blocks me",
+            5,
+        )
+        .with_options(vec!["widen".to_string(), "keep".to_string()]);
+        queue.raise(&ask).unwrap();
+        let found = find_ask(&queue, "a-1", None).unwrap();
+        let text = show_text(&found, 10);
+        assert!(text.contains("it blocks me"), "{text}");
+        assert!(
+            text.contains("1. widen") && text.contains("2. keep"),
+            "{text}"
+        );
+        assert!(list_line(&found, 10).contains("T1\ta-1\topen"));
+        assert!(find_ask(&queue, "nope", None).is_err());
+        assert!(find_ask(&queue, "a-1", Some("T2")).is_err());
+    }
 
     #[test]
     fn a_permission_payload_names_what_the_agent_runs() {
