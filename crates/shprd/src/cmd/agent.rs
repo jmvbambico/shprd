@@ -548,6 +548,7 @@ fn report(ctx: &Ctx, args: &ReportArgs) -> Result<(), CliError> {
         .iter()
         .map(|spec| parse_check(spec))
         .collect::<Result<Vec<CheckReport>, CliError>>()?;
+    let checks = excuse_pre_existing(&shprd_core::baseline::Baselines::load(&ctx.root), checks);
     let proofs = proof_paths(ctx, args)?;
     let kind = EventKind::Reported {
         task: args.task.clone(),
@@ -578,6 +579,32 @@ fn report(ctx: &Ctx, args: &ReportArgs) -> Result<(), CliError> {
         Err(other) => return Err(other),
     };
     emit(ctx, &event)
+}
+
+/// Marks a failing check that failed no worse on the base as pre-existing.
+///
+/// Only a regression should refuse a hand-in, so such a check is recorded as
+/// passing, with its output tail starting `pre-existing on base …` (and the
+/// base's commit and error count), which the card and the PR body show. A check
+/// with no baseline, or worse than it, is left as it ran.
+fn excuse_pre_existing(
+    baselines: &shprd_core::baseline::Baselines,
+    checks: Vec<CheckReport>,
+) -> Vec<CheckReport> {
+    use shprd_core::baseline::{Verdict, judge, labelled_tail};
+    checks
+        .into_iter()
+        .map(|mut check| {
+            if check.exit_code != Some(0)
+                && judge(baselines, &check.command, &check.output_tail) == Verdict::PreExisting
+                && let Some(base) = baselines.find(&check.command)
+            {
+                check.output_tail = output_tail(&labelled_tail(base, &check.output_tail));
+                check.exit_code = Some(0);
+            }
+            check
+        })
+        .collect()
 }
 
 /// The line printed with a refusal: the event seq and time it was judged at.
@@ -1014,6 +1041,37 @@ mod tests {
         }
         assert_eq!(told, ["T1"]);
         assert!(notes.pending().is_empty());
+    }
+
+    #[test]
+    fn only_a_regression_refuses_a_failing_gate() {
+        use super::{CheckReport, excuse_pre_existing};
+        use shprd_core::baseline::{BaselineEntry, Baselines, Fingerprint};
+        let base = Baselines {
+            entries: vec![BaselineEntry {
+                command: "npm run lint".into(),
+                passed: false,
+                exit_code: Some(1),
+                fingerprint: Fingerprint {
+                    errors: Some(62),
+                    files: vec![],
+                },
+                base_sha: "abcdef123456".into(),
+            }],
+        };
+        let failing = |tail: &str| CheckReport {
+            gate: "lint".into(),
+            command: "npm run lint".into(),
+            exit_code: Some(1),
+            output_tail: tail.into(),
+        };
+        let same = excuse_pre_existing(&base, vec![failing("62 errors")]);
+        assert_eq!(same[0].exit_code, Some(0));
+        assert!(same[0].output_tail.starts_with("pre-existing on base"));
+        let worse = excuse_pre_existing(&base, vec![failing("70 errors")]);
+        assert_eq!(worse[0].exit_code, Some(1));
+        let none = excuse_pre_existing(&Baselines::default(), vec![failing("62 errors")]);
+        assert_eq!(none[0].exit_code, Some(1));
     }
 
     #[test]

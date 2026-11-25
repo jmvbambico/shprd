@@ -42,6 +42,7 @@ pub fn start(ctx: &Ctx, args: &RunStartArgs) -> Result<(), CliError> {
     ctx.check(&kind)?;
     let made = ensure_branch(&ctx.root, &args.base, &args.integration)?;
     let event = ctx.commit(kind)?;
+    record_baselines(&ctx.root, &args.base);
     if made {
         ctx.commit(EventKind::Resource {
             action: ResourceAction::Created,
@@ -51,6 +52,36 @@ pub fn start(ctx: &Ctx, args: &RunStartArgs) -> Result<(), CliError> {
         })?;
     }
     emit(ctx, &event)
+}
+
+/// Runs each worker gate on the base and stores how it fared, so a hand-in is
+/// judged against it and only a regression refuses.
+///
+/// Best effort: a repository with no configured worker gates, no git checkout
+/// or no readable config has no baseline, and then no gate failure is excused.
+/// `sync` calls this again to refresh it.
+pub fn record_baselines(root: &Path, base: &str) {
+    let repo = root.join(".shprd").join("config.toml");
+    let Ok(config) = shprd_core::config::load(None, Some(&repo)) else {
+        return;
+    };
+    let commands = config.gates.worker;
+    if commands.is_empty() {
+        return;
+    }
+    let sha = Git::new(root).rev_parse(base).unwrap_or_default();
+    let ran = shprd_git::gate::run_baseline(
+        root,
+        &commands,
+        &sha,
+        std::time::Duration::from_secs(600),
+        &[],
+    );
+    let mut stored = shprd_core::baseline::Baselines::default();
+    for entry in ran {
+        stored.upsert(entry);
+    }
+    let _ = stored.save(root);
 }
 
 /// Makes sure `branch` exists, cutting it from `base` when it does not.
