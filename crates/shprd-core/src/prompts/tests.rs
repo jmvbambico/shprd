@@ -857,3 +857,22 @@ fn the_backup_m11_long_digest_is_the_listed_one() {
             && !backup.text.contains("say where it is in your summary")
     );
 }
+
+/// A choice the worker disclosed is a decision to confirm, not a finding, and
+/// the retired wording upgrades.
+#[test]
+fn the_reviewer_keeps_disclosed_decisions_apart_from_findings() {
+    let shipped = shipped_prompt("reviewer").expect("shipped");
+    assert_eq!(
+        digest(REVIEWER_M11_CONDENSED.as_bytes()),
+        REVIEWER_M11_CONDENSED_DIGEST
+    );
+    assert!(shipped.old.contains(&REVIEWER_M11_CONDENSED_DIGEST));
+    let body = strip_leading_comment(shipped.text);
+    assert!(body.contains("not a defect by itself"), "{body}");
+    assert!(body.contains("`decisions`"), "{body}");
+    let temp = dir();
+    std::fs::write(path_of(temp.path(), "reviewer"), REVIEWER_M11_CONDENSED).expect("old");
+    let installed = ensure(temp.path(), "reviewer").expect("the upgrade runs");
+    assert_eq!(installed.change, Change::Upgraded, "{installed:?}");
+}

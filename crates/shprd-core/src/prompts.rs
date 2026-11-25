@@ -304,8 +304,19 @@ const REVIEWER_M11_LONG: &str =
 const REVIEWER_M11_LONG_DIGEST: &str =
     "c187a5267112fc4148487499f64ef7ac444e10bce3a0a2a901bd38daf2ef0488";
 
+/// The reviewer wording before disclosed worker decisions were kept apart from
+/// the findings: a choice the worker named in its summary was filed as a defect.
+#[cfg(test)]
+const REVIEWER_M11_CONDENSED: &str =
+    include_str!("../../../data/templates/history/reviewer-m11-condensed.md");
+
+/// The SHA-256 of [`REVIEWER_M11_CONDENSED`].
+const REVIEWER_M11_CONDENSED_DIGEST: &str =
+    "859869ecc557b7a1570bb847b00609aa546b44171a1c88e0a45e04ac91febd7f";
+
 /// The reviewer's retired defaults.
 const REVIEWER_OLD: &[&str] = &[
+    REVIEWER_M11_CONDENSED_DIGEST,
     REVIEWER_M9_ASKS_DIGEST,
     REVIEWER_PRE_IDENTITY_DIGEST,
     REVIEWER_M11_LONG_DIGEST,

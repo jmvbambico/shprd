@@ -490,6 +490,73 @@ pub struct FindingDto {
     pub detail: String,
 }
 
+/// What the person may say about one finding or decision of a review.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export_to = "RemarkAnswerDto.ts")]
+pub enum RemarkAnswerDto {
+    /// Seen, and it is what the person wants.
+    AcceptedAsIs,
+    /// The agent should change it.
+    FixIt,
+    /// Not for this task: a new task takes it.
+    FollowUp,
+}
+
+impl From<shprd_core::review::RemarkAnswer> for RemarkAnswerDto {
+    fn from(answer: shprd_core::review::RemarkAnswer) -> Self {
+        use shprd_core::review::RemarkAnswer as A;
+        match answer {
+            A::AcceptedAsIs => Self::AcceptedAsIs,
+            A::FixIt => Self::FixIt,
+            A::FollowUp => Self::FollowUp,
+        }
+    }
+}
+
+impl From<RemarkAnswerDto> for shprd_core::review::RemarkAnswer {
+    fn from(answer: RemarkAnswerDto) -> Self {
+        match answer {
+            RemarkAnswerDto::AcceptedAsIs => Self::AcceptedAsIs,
+            RemarkAnswerDto::FixIt => Self::FixIt,
+            RemarkAnswerDto::FollowUp => Self::FollowUp,
+        }
+    }
+}
+
+/// A choice the worker disclosed, listed for the person to confirm on the
+/// "ready to land" card, apart from the review's findings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "DecisionDto.ts")]
+pub struct DecisionDto {
+    /// Its place in the review, counted from 1; what an answer names.
+    pub index: u32,
+    /// What the worker chose.
+    pub title: String,
+    /// Why it matters.
+    pub detail: String,
+    /// The person's answer, once there is one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub answer: Option<RemarkAnswerDto>,
+}
+
+/// Answer one finding or decision of a task's review.
+///
+/// The service records it as an event; the first answer to a remark stands.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "AnswerRemarkRequest.ts")]
+pub struct AnswerRemarkRequest {
+    /// The attempt whose review it is.
+    pub attempt: u32,
+    /// `finding` or `decision`.
+    pub of: String,
+    /// Which one, counted from 1.
+    pub index: u32,
+    /// What the person says about it.
+    pub answer: RemarkAnswerDto,
+}
+
 /// A review handed to a reviewer for an attempt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export_to = "ReviewDto.ts")]
