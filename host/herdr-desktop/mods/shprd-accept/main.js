@@ -41,6 +41,7 @@ import {
   proofs,
   commitRows,
   canReview,
+  dropReason,
   findings,
   VIEW,
   mustLeavePr,
@@ -53,7 +54,7 @@ import {
   whereNow,
   words,
 } from "./lib/accept.js";
-import { openAccept, segmented, statusGlyph } from "./lib/panel.js";
+import { button as panelButton, openAccept, segmented, statusGlyph } from "./lib/panel.js";
 import { taskLook } from "./lib/spaces.js";
 import { H, RADIUS, TEXT, ref, tone } from "./lib/tokens.js";
 import { followChanges } from "./lib/watch.js";
@@ -107,7 +108,10 @@ export default class Accept extends View {
     this.details = false;
     // A row's Drop opens the card on its Drop step, with the reason box ready.
     this.dropping = Boolean(props()?.drop);
-    this.reason = this.dropping ? InputState.new({ placeholder: WORDS.reasonPlaceholder }) : null;
+    // Where the Drop step was entered: "row" (the dialog opened on it) or "footer".
+    this.dropFrom = this.dropping ? "row" : null;
+    this.reason = null;
+    if (this.dropping) this.openDrop(this.dropFrom);
     this.busy = null;
     this.error = null;
     this.refresh();
@@ -312,6 +316,42 @@ export default class Accept extends View {
   review(task) {
     startReview(task, this.client?.folder ?? null);
     openAccept({ task: task.id, title: task.title, snapshot: task });
+  }
+
+  /**
+   * Opens the Drop step with the reason box focused. Entered from the footer, Back
+   * returns to the footer and keeps what was typed; opened on the step, it closes.
+   */
+  openDrop(from) {
+    this.dropping = true;
+    this.dropFrom = from;
+    this.error = null;
+    if (!this.reason) {
+      this.reason = InputState.new({ placeholder: WORDS.reasonPlaceholder });
+      // Enter in the field arrives as the input's `submit`.
+      this.reason.on("submit", () => this.dropNow());
+    }
+    this.reason.focus();
+    this.cx?.timer?.after?.(50, () => this.reason?.focus());
+    this.cx?.notify?.();
+  }
+
+  /** Back from the Drop step, or closes the dialog where it was opened on the step. Never drops. */
+  dropBack() {
+    if (this.busy === "task.drop") return;
+    if (this.dropFrom === "footer") {
+      this.dropping = false;
+      this.error = null;
+      this.cx?.notify?.();
+    } else {
+      this.close();
+    }
+  }
+
+  /** Drops the task: a blank reason sends the default, a typed one is sent trimmed. */
+  dropNow() {
+    if (!this.dropping) return;
+    this.verb("task.drop", { reason: dropReason(this.reason?.value()) });
   }
 
   /** Closes the dialog: × , Cancel, Esc and a finished verb all end here. */
@@ -611,9 +651,15 @@ export default class Accept extends View {
       .id("accept-card")
       .track_focus(this.handle)
       .on_key_down((event, cx) => {
+        if (this.dropping && event?.key === "enter" && (event.modifiers?.platform || event.modifiers?.control)) {
+          cx.stop_propagation();
+          this.dropNow();
+          return;
+        }
         if (event?.key !== "escape") return;
         cx.stop_propagation();
-        this.close();
+        if (this.dropping) this.dropBack();
+        else this.close();
       })
       .size_full()
       .min_h(0)
@@ -878,14 +924,11 @@ export default class Accept extends View {
             .child(this.button(t, "cancel", WORDS.close, false, () => this.close())),
         );
     }
+    if (this.dropping && wired.drop) return this.dropStep(t, colors, task);
     const buttons = [this.button(t, "cancel", WORDS.cancel, false, () => this.close())];
     if (wired.drop) {
       buttons.push(
-        this.button(t, "drop", WORDS.drop, false, () => {
-          this.dropping = !this.dropping;
-          if (this.dropping) this.reason = InputState.new({ placeholder: WORDS.reasonPlaceholder });
-          this.cx.notify();
-        }),
+        this.button(t, "drop", WORDS.dropOpen, false, () => this.openDrop("footer")),
       );
     }
     if (wired.sendBack) {
@@ -905,36 +948,6 @@ export default class Accept extends View {
     return v_flex()
       .flex_none()
       .gap(10)
-      .when(this.dropping, (el) =>
-        el.child(
-          h_flex()
-            .gap(8)
-            .items_center()
-            .child(
-              Input.new(this.reason)
-                .h(28)
-                .flex_1()
-                .px(8)
-                .rounded(RADIUS.control)
-                .border_1()
-                .border_color(t.input)
-                .bg(t.background)
-                .text_size(TEXT.label)
-                .text_color(t.foreground),
-            )
-            .child(
-              this.button(t, "dropnow", this.busy === "task.drop" ? WORDS.dropping : WORDS.drop, false, () => {
-                const reason = String(this.reason?.value() ?? "").trim();
-                if (reason === "") {
-                  this.error = "A drop needs a reason: it is what the run's pull request lists.";
-                  this.cx.notify();
-                  return;
-                }
-                this.verb("task.drop", { reason });
-              }),
-            ),
-        ),
-      )
       .child(
         h_flex()
           .h(H.lg)
@@ -950,6 +963,58 @@ export default class Accept extends View {
               .child(this.error ?? wired.note ?? ""),
           )
           .children(buttons),
+      );
+  }
+
+  /**
+   * The Drop step, drawn in place of the footer: the question, what dropping does,
+   * the optional reason, and Back (or Cancel) with the one red Drop task.
+   */
+  dropStep(t, colors, task) {
+    const busy = this.busy === "task.drop";
+    return v_flex()
+      .flex_none()
+      .gap(8)
+      .pt(14)
+      .border_t(1)
+      .border_color(t.border)
+      .child(div().text_size(TEXT.body).font_medium().text_color(t.foreground).child(WORDS.dropQuestion(task.id)))
+      .child(div().text_size(TEXT.label).text_color(t.muted).child(WORDS.dropNote))
+      .child(
+        Input.new(this.reason)
+          .h(28)
+          .w_full()
+          .px(8)
+          .rounded(RADIUS.control)
+          .border_1()
+          .border_color(t.input)
+          .bg(t.background)
+          .text_size(TEXT.label)
+          .text_color(t.foreground),
+      )
+      .child(
+        h_flex()
+          .h(H.lg)
+          .gap(8)
+          .items_center()
+          .child(
+            div()
+              .flex_1()
+              .min_w(0)
+              .truncate()
+              .text_size(TEXT.label)
+              .text_color(colors.red)
+              .child(this.error ?? ""),
+          )
+          .child(this.button(t, "dropback", this.dropFrom === "footer" ? WORDS.back : WORDS.cancel, false, () => this.dropBack()))
+          .child(
+            panelButton(t, "accept-dropnow", busy ? WORDS.dropping : WORDS.drop, {
+              kind: "danger",
+              size: "lg",
+              disabled: this.busy !== null,
+              onClick: () => this.dropNow(),
+            }),
+          ),
       );
   }
 
@@ -975,7 +1040,7 @@ export default class Accept extends View {
       )
       // A verb is waiting on the service: its buttons are dimmed (and a second press
       // is ignored in `verb`), the one pressed says what it is doing.
-      .when(this.busy !== null && id !== "cancel", (el) => el.opacity(0.6))
+      .when(this.busy !== null && id !== "cancel" && id !== "dropback", (el) => el.opacity(0.6))
       .on_click(onClick)
       .child(label);
   }

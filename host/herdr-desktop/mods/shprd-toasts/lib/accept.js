@@ -51,14 +51,25 @@ export const WORDS = {
   accepting: "Accepting…",
   sendBack: "Send back",
   sendingBack: "Sending back…",
+  dropOpen: "Drop task…",
   drop: "Drop task",
+  dropQuestion: (ref) => `Drop ${ref}?`,
+  dropNote: "shprd stops working on it. Its branch and commits are kept.",
+  reasonDefault: "No reason given",
+  back: "Back",
   dropping: "Dropping…",
   cancel: "Cancel",
   close: "Close",
   moreLine: (n) => `And ${n} more`,
   reasonLabel: "Why drop it",
-  reasonPlaceholder: "One line, kept on the pull request",
+  reasonPlaceholder: "Why (optional). Shown on the pull request.",
 };
+
+/** The reason a drop is sent with: what was typed, trimmed, or the default when blank. */
+export function dropReason(text) {
+  const reason = String(text ?? "").trim();
+  return reason === "" ? WORDS.reasonDefault : reason;
+}
 
 /** The severity words, keyed by the API's `severity`, each with the tone it is drawn in. */
 export const SEVERITY = {

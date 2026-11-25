@@ -1515,3 +1515,73 @@ test("the person's bubble hugs its text, up to the same maximum width", () => {
   assert.ok(bubbleSpan(short, 1060, true) < bubbleWidth(1060));
   assert.equal(bubbleSpan("x".repeat(500), 900, true), bubbleWidth(900));
 });
+
+// UXC-5: the Drop dialog has one Drop task button, in one place at a time.
+test("the Drop dialog never draws two Drop task controls, and Enter, Esc and a blank reason behave", async () => {
+  const { record, walk, keydown } = await import("gpui-kit");
+  const { default: Accept } = await import("../mods/shprd-accept/main.js");
+  const labelled = (root, label) => walk(root).filter((n) => n.kids.includes(label));
+  const open = (drop) => {
+    const view = new Accept();
+    view.cx = { notify() {}, timer: { after() {} } };
+    view.taskId = "T1";
+    view.state = { tasks: [{ id: "T1", title: "One", status: "reported", derived: { status: "needs_you" }, attempts: [] }] };
+    view.handle = { focus() {} };
+    if (drop) {
+      view.openDrop("row");
+      // Re-open with a spy: the field has focus at once, and again after layout settles.
+      let focused = 0;
+      const later = [];
+      view.reason.focus = () => {
+        focused += 1;
+      };
+      view.cx.timer.after = (_ms, fn) => later.push(fn);
+      view.openDrop("row");
+      assert.equal(focused, 1);
+      later.forEach((fn) => fn());
+      assert.equal(focused, 2);
+    }
+    const sent = [];
+    view.verb = (action, extra) => sent.push([action, extra]);
+    return { view, sent, draw: () => view.render({}) };
+  };
+  record(true);
+  try {
+    // Opened on the step (a row's Drop): one "Drop task", no "Drop task…".
+    const row = open(true);
+    assert.equal(row.view.dropFrom, "row");
+    assert.equal(labelled(row.draw(), "Drop task").length, 1);
+    assert.equal(labelled(row.draw(), "Drop task…").length, 0);
+    // Esc closes (never drops) where the dialog opened on the step.
+    let closed = 0;
+    row.view.close = () => {
+      closed += 1;
+    };
+    keydown(row.draw(), "accept-card", { key: "escape" });
+    assert.equal(closed, 1);
+    assert.deepEqual(row.sent, []);
+    // Enter in the field is the input's submit; a blank reason sends the default.
+    row.view.reason.submit();
+    assert.deepEqual(row.sent, [["task.drop", { reason: "No reason given" }]]);
+    row.view.reason.set_value("  too slow  ");
+    row.view.reason.submit();
+    assert.deepEqual(row.sent[1], ["task.drop", { reason: "too slow" }]);
+
+    // Opened from the footer: "Drop task…" is the only label until the step opens.
+    const foot = open(false);
+    assert.equal(labelled(foot.draw(), "Drop task…").length, 1);
+    assert.equal(labelled(foot.draw(), "Drop task").length, 0);
+    walk(foot.draw()).find((n) => n.idv === "accept-drop").click({}, { notify() {}, stop_propagation() {} });
+    assert.equal(foot.view.dropping, true);
+    assert.equal(labelled(foot.draw(), "Drop task").length, 1);
+    assert.equal(labelled(foot.draw(), "Drop task…").length, 0);
+    // Esc is Back here: the footer returns, the typed text stays, nothing is dropped.
+    foot.view.reason.set_value("keep me");
+    keydown(foot.draw(), "accept-card", { key: "escape" });
+    assert.equal(foot.view.dropping, false);
+    assert.equal(foot.view.reason.value(), "keep me");
+    assert.deepEqual(foot.sent, []);
+  } finally {
+    record(false);
+  }
+});

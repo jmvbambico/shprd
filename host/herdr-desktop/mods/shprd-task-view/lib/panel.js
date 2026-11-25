@@ -19,7 +19,7 @@ import { div, svg } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
 import { openOverlay, run, setShared, shared } from "herdr";
 
-import { H, RADIUS, SPACE, TEXT, red } from "./tokens.js";
+import { H, RADIUS, SPACE, TEXT, onStatus, red } from "./tokens.js";
 
 /**
  * A card: the panel's rounded, bordered background. Every panel in the layout is
@@ -709,7 +709,7 @@ export function menuRow(
 
 /**
  * A button, sized to its words and never cut: `kind` is `primary` (solid, one per
- * surface), `secondary` (bordered) or `plain` (words only), and `size` is 20
+ * surface), `danger` (solid red, the one confirm of a destructive step), `secondary` (bordered) or `plain` (words only), and `size` is 20
  * inside a row's second line, 24 in a panel, 32 in a dialog.
  *
  * Shepherdr's `button` (`lib/ui.js:45-62`). An icon's side is padded like its
@@ -743,6 +743,12 @@ export function button(
       el
         .bg(t.solid)
         .text_color(t.solid_foreground)
+        .when(live, (style) => style.hover((s) => s.opacity(0.88))),
+    )
+    .when(kind === "danger", (el) =>
+      el
+        .bg(red(t))
+        .text_color(onStatus(t))
         .when(live, (style) => style.hover((s) => s.opacity(0.88))),
     )
     .when(kind === "secondary", (el) =>
