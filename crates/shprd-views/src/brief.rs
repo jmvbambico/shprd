@@ -11,11 +11,13 @@
 //! event log, and never longer than [`BRIEF_MAX_LINES`] lines, so it fits in a
 //! prompt next to the task it describes. No model writes any of it.
 
-use shprd_core::event::{Event, Finding, Severity};
+use shprd_core::event::{Event, EventKind, Finding, Severity};
 use shprd_core::settings::{Key, Resolved, ResolvedRole, Source, Sourced, TaskKey, Value};
-use shprd_core::state::{AskRecord, GateResult, OverrideRecord, RunState, Task, TaskStatus};
+use shprd_core::state::{
+    AskRecord, Escalation, GateResult, OverrideRecord, RunState, Task, TaskStatus,
+};
 
-use crate::clock;
+use crate::{cards, clock};
 
 /// Hard cap on the number of lines a brief may occupy.
 pub const BRIEF_MAX_LINES: usize = 40;
@@ -53,17 +55,16 @@ impl AskRoute {
 
 /// The rehydration block for `state`.
 ///
-/// The event log is accepted for symmetry with the other projectors, but every
-/// fact in a brief now lives in the folded state, including run-wide overrides,
-/// so the log is not consulted. Pass the log anyway: callers have it, and the
-/// argument keeps the projector signatures interchangeable.
+/// Every fact in a brief lives in the folded state, including run-wide overrides.
+/// The event log is read for one thing: which event closed an escalation, so the
+/// brief can say what resolved it.
 ///
 /// It carries a header line with the run and its branches, then the sections
 /// that have content: the task table, the tasks waiting at a gate, the failed
 /// gates, the dry agents, the most recent escalations and every override. Over
 /// [`BRIEF_MAX_LINES`] lines, lists are cut and marked `… and N more`, so the
 /// same state always renders the same brief and it always fits.
-pub fn brief(state: &RunState, _events: &[Event]) -> String {
+pub fn brief(state: &RunState, events: &[Event]) -> String {
     let Some(run) = &state.run else {
         return "no run".to_string();
     };
@@ -77,7 +78,7 @@ pub fn brief(state: &RunState, _events: &[Event]) -> String {
         Section::new("failed gates:", failed_lines(state)),
         Section::new("dry agents:", dry_lines(state)),
         Section::new("asks:", ask_lines(state)),
-        Section::new("escalations:", escalation_lines(state)),
+        Section::new("escalations:", escalation_lines(state, events)),
         Section::new("overrides:", override_lines(state)),
     ];
     sections.retain(|section| !section.lines.is_empty());
@@ -207,16 +208,84 @@ fn dry_lines(state: &RunState) -> Vec<String> {
         .collect()
 }
 
-/// The escalation count, then the bodies of the last few.
-fn escalation_lines(state: &RunState) -> Vec<String> {
-    let escalations = &state.escalations;
-    if escalations.is_empty() {
+/// The seq of the event that resolved `escalation`, when the log holds one.
+///
+/// A land failure or a "ready to land" notice is resolved by the task's landing
+/// (or its being integrated or dropped); a review kickoff that was not delivered
+/// by the review's gate result, or by the review being requested again; a
+/// dismissed card by its dismissal.
+fn resolved_by(escalation: &Escalation, events: &[Event]) -> Option<u64> {
+    let after = escalation.seq;
+    let task = escalation.task.as_deref();
+    let kickoff = cards_not_delivered(&escalation.body);
+    events
+        .iter()
+        .filter(|event| event.seq > after)
+        .find(|event| match &event.kind {
+            EventKind::NeedDismissed { need } => *need == after,
+            EventKind::TaskLanded {
+                task: t, outcome, ..
+            } => outcome.is_landed() && Some(t.as_str()) == task,
+            EventKind::Integrated { task: t, .. } | EventKind::TaskDropped { task: t, .. } => {
+                Some(t.as_str()) == task
+            }
+            EventKind::GatePassed { task: t, gate, .. } => {
+                kickoff && gate == "review" && Some(t.as_str()) == task
+            }
+            EventKind::GateFailed { task: t, gate, .. } => {
+                kickoff && gate == "review" && Some(t.as_str()) == task
+            }
+            EventKind::ReviewRequested { task: t, .. } => kickoff && Some(t.as_str()) == task,
+            _ => false,
+        })
+        .map(|event| event.seq)
+}
+
+/// Whether `body` says a review's first turn never arrived.
+fn cards_not_delivered(body: &str) -> bool {
+    body.starts_with("review kickoff not delivered")
+        || body.starts_with("review brief not delivered")
+}
+
+/// The open-escalation count, the bodies of the last few open ones, and the
+/// newest resolved ones with the seq that resolved each.
+///
+/// An escalation is open only while a card for it would still be drawn and the
+/// log holds nothing that settled it, so a task that landed no longer lists its
+/// old land failures and "ready to land" notices as open.
+fn escalation_lines(state: &RunState, events: &[Event]) -> Vec<String> {
+    let mut open: Vec<&Escalation> = Vec::new();
+    let mut resolved: Vec<(u64, Option<u64>)> = Vec::new();
+    for escalation in &state.escalations {
+        let by = resolved_by(escalation, events);
+        if by.is_none() && cards::card(state, escalation).is_some() {
+            open.push(escalation);
+        } else {
+            resolved.push((escalation.seq, by));
+        }
+    }
+    if open.is_empty() && resolved.is_empty() {
         return Vec::new();
     }
-    let mut lines = vec![format!("  {} open", escalations.len())];
-    let first = escalations.len().saturating_sub(ESCALATIONS_SHOWN);
-    for escalation in &escalations[first..] {
+    let mut lines = vec![format!("  {} open", open.len())];
+    let first = open.len().saturating_sub(ESCALATIONS_SHOWN);
+    for escalation in &open[first..] {
         lines.push(format!("  - {}", clock::clip(&escalation.body, TEXT_CHARS)));
+    }
+    if !resolved.is_empty() {
+        let first = resolved.len().saturating_sub(ESCALATIONS_SHOWN);
+        let shown: Vec<String> = resolved[first..]
+            .iter()
+            .map(|(seq, by)| match by {
+                Some(by) => format!("#{seq} by #{by}"),
+                None => format!("#{seq}"),
+            })
+            .collect();
+        lines.push(format!(
+            "  {} resolved: {}",
+            resolved.len(),
+            shown.join(", ")
+        ));
     }
     lines
 }
@@ -1444,5 +1513,76 @@ Each line ends with the layer that set it: `this task`, `this repo`, `you`, `the
         );
         let (plain, plain_role) = settings_fixture();
         assert!(!settings_block(&plain, Some(&plain_role), None).contains("You are the"));
+    }
+
+    /// The fixture log with `extra` events (seq from 17) appended.
+    fn with_extra(extra: Vec<EventKind>) -> (RunState, Vec<Event>) {
+        let mut events = fixture::events();
+        for (i, kind) in extra.into_iter().enumerate() {
+            events.push(Event {
+                seq: 17 + i as u64,
+                at_ms: 1_000_000 + i as u64,
+                actor: shprd_core::event::Actor::Engine,
+                kind,
+            });
+        }
+        let state = RunState::fold(&events).unwrap_or_else(|err| panic!("{err}"));
+        (state, events)
+    }
+
+    fn escalated(task: &str, body: &str) -> EventKind {
+        EventKind::Escalated {
+            task: Some(task.to_string()),
+            body: body.to_string(),
+            default_action: "hold".to_string(),
+        }
+    }
+
+    #[test]
+    fn a_landed_tasks_old_escalations_are_resolved_with_the_landing_seq() {
+        // The sweatbrain shape (seq 27, 34, 36): ready-to-land and land-failure cards, then the landing.
+        let (state, events) = with_extra(vec![
+            escalated(
+                "M1.1",
+                "M1.1 is ready to land: Review and Accept it in the Tasks pane",
+            ),
+            escalated(
+                "M1.1",
+                "landing M1.1 failed: 'prototype' is already checked out",
+            ),
+            EventKind::TaskLanded {
+                task: "M1.1".to_string(),
+                base: "main".to_string(),
+                head: "abc".to_string(),
+                number: Some(1),
+                outcome: shprd_core::event::LandOutcome::Merged,
+            },
+        ]);
+        let text = brief(&state, &events);
+        assert!(text.contains("\n  2 open"), "{text}");
+        assert!(!text.contains("ready to land"), "{text}");
+        assert!(!text.contains("landing M1.1 failed"), "{text}");
+        assert!(
+            text.contains("2 resolved: #17 by #19, #18 by #19"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_kickoff_card_is_resolved_by_the_review_gate_that_followed() {
+        // sweatbrain seq 206-211: the review passed after the kickoff card was raised.
+        let (state, events) = with_extra(vec![
+            escalated("M1.2", "review kickoff not delivered"),
+            EventKind::GatePassed {
+                task: "M1.2".to_string(),
+                attempt: 1,
+                gate: "review".to_string(),
+                findings: vec![],
+                source: None,
+            },
+        ]);
+        let text = brief(&state, &events);
+        assert!(!text.contains("kickoff"), "{text}");
+        assert!(text.contains("1 resolved: #17 by #18"), "{text}");
     }
 }
