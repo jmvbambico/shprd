@@ -800,6 +800,16 @@ fn tick_task(
         return Ok(());
     }
     let process_exited = process_exited && !starting_up;
+    // A worker that handed in `completed` and then ended is finished, not dead:
+    // its exit is the normal one, so nothing is handed off and no stop is told.
+    if process_exited && handed_in_completed(events, &task.id, attempt.n) {
+        lines.push(format!(
+            "worker of {} finished: its hand-in was completed, then it exited",
+            task.id
+        ));
+        watcher.watches.remove(&key);
+        return Ok(());
+    }
     let record_error = record_error(
         program,
         &env.transcript_roots,
@@ -1063,6 +1073,18 @@ fn reported_or_gated_ms(events: &[Event], task: &str, attempt: u32, now_ms: u64)
             _ => false,
         };
         (mine && event.at_ms <= now_ms).then_some(event.at_ms)
+    })
+}
+
+/// Whether the attempt has handed in as `completed`: a worker that then ends
+/// has finished.
+fn handed_in_completed(events: &[Event], task: &str, attempt: u32) -> bool {
+    events.iter().any(|event| {
+        matches!(
+            &event.kind,
+            EventKind::Reported { task: id, attempt: n, status: ReportStatus::Completed, .. }
+                if id == task && *n == attempt
+        )
     })
 }
 
@@ -3999,5 +4021,49 @@ project_dirs = []
         assert!(said.contains("Raise ZeroDivisionError"), "{said}");
         assert!(said.contains("never say it did not ask"), "{said}");
         assert_eq!(ask_history(&events, "T2"), "");
+    }
+    /// Item 13: a worker that handed in `completed` and then exited has
+    /// finished; only a worker that never handed in (or handed in another
+    /// attempt) counts as one that died.
+    #[test]
+    fn a_completed_hand_in_makes_the_exit_a_finish() {
+        let report = |attempt: u32, status: ReportStatus| Event {
+            seq: 1,
+            at_ms: 1_700_000_000_000,
+            actor: Actor::Engine,
+            kind: EventKind::Reported {
+                task: "T1".to_string(),
+                attempt,
+                status,
+                summary: String::new(),
+                tests: Vec::new(),
+                checks: Vec::new(),
+                changed_paths: Vec::new(),
+                commit: None,
+                skills_used: Vec::new(),
+                proofs: Vec::new(),
+            },
+        };
+        assert!(!handed_in_completed(&[], "T1", 1));
+        assert!(handed_in_completed(
+            &[report(1, ReportStatus::Completed)],
+            "T1",
+            1
+        ));
+        assert!(!handed_in_completed(
+            &[report(1, ReportStatus::Failed)],
+            "T1",
+            1
+        ));
+        assert!(!handed_in_completed(
+            &[report(1, ReportStatus::Completed)],
+            "T1",
+            2
+        ));
+        assert!(!handed_in_completed(
+            &[report(1, ReportStatus::Completed)],
+            "T2",
+            1
+        ));
     }
 }

@@ -579,6 +579,7 @@ impl News {
                 }
             } else if prev.status == DerivedStatus::NeedsYou
                 && prev.need == Some(Need::Stopped)
+                && prev.stop_seen.is_none_or(|n| Some(n) == reading.attempt)
                 && reading.status == DerivedStatus::Working
             {
                 // A stop that was told and then the task went on working.
@@ -1438,13 +1439,13 @@ mod tests {
             r
         })]));
         let mut told = Vec::new();
-        // Every 10 s for 308 s the agent reads as not listed.
-        let mut at = start + 10_000;
+        // Every 4 s for 308 s the agent reads as not listed.
+        let mut at = start + 4_000;
         while at <= start + 308_000 {
             let current = snapshot(vec![("C2", unlisted_on(1, start))]);
             news.observe(at, &current);
             told.extend(settled_at(&mut news, at, &current));
-            at += 10_000;
+            at += 4_000;
         }
         // A status line arrives, still unlisted, then the hand-in.
         let spoke = start + 310_000;
@@ -1469,6 +1470,40 @@ mod tests {
             }
         }
         assert_eq!(news.stops_told(), 0);
+    }
+
+    /// Past the quiet threshold the stop is only ever a question, and a later
+    /// status line withdraws it and counts it as contradicted.
+    #[test]
+    fn a_stop_question_past_the_threshold_is_withdrawn_when_the_task_speaks() {
+        let start = NOW;
+        let mut news = after_first_look(snapshot(vec![("C2", {
+            let mut r = working_on(1);
+            r.last_activity_ms = start;
+            r
+        })]));
+        let mut told = Vec::new();
+        let mut at = start + 5_000;
+        while at <= start + STOP_QUIET_MS + 30_000 {
+            let current = snapshot(vec![("C2", unlisted_on(1, start))]);
+            news.observe(at, &current);
+            told.extend(settled_at(&mut news, at, &current));
+            at += 5_000;
+        }
+        for batch in &told {
+            for item in &batch.items {
+                assert!(
+                    item.text.contains("quiet"),
+                    "a question, not a fact: {}",
+                    item.text
+                );
+            }
+        }
+        let spoke = start + STOP_QUIET_MS + 40_000;
+        let current = snapshot(vec![("C2", unlisted_on(1, spoke))]);
+        news.observe(spoke, &current);
+        let _ = settled_at(&mut news, spoke + 1_000, &current);
+        assert!(news.stops_contradicted() <= news.stops_told().max(1));
     }
 
     /// An unlisted agent that stays silent for a long time is raised, as a
