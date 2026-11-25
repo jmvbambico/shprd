@@ -668,10 +668,14 @@ impl News {
             holds && now_ms.saturating_sub(item.at_ms) < KEEP_MS
         });
         for task in contradicted {
-            self.stops_contradicted = self.stops_contradicted.saturating_add(1);
             // The stop line is gone, so the task must be looked at afresh: a
             // later real stop is news again.
             if let Some(seen) = self.seen.get_mut(&task) {
+                // `observe` counts a recovery it saw itself; only a stop still
+                // standing here is counted now, so one recovery counts once.
+                if seen.need == Some(Need::Stopped) {
+                    self.stops_contradicted = self.stops_contradicted.saturating_add(1);
+                }
                 seen.status = DerivedStatus::Working;
                 seen.need = None;
                 seen.stop_seen = None;
@@ -1503,7 +1507,7 @@ mod tests {
         let current = snapshot(vec![("C2", unlisted_on(1, spoke))]);
         news.observe(spoke, &current);
         let _ = settled_at(&mut news, spoke + 1_000, &current);
-        assert!(news.stops_contradicted() <= news.stops_told().max(1));
+        assert_eq!(news.stops_contradicted(), 1);
     }
 
     /// An unlisted agent that stays silent for a long time is raised, as a
