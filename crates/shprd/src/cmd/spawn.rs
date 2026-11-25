@@ -29,12 +29,12 @@ use shprd_core::config::Skills;
 use shprd_core::event::{Actor, EventKind, ResourceAction, ResourceKind};
 use shprd_core::prompts::{self, PromptRef};
 use shprd_core::settings::{
-    Key, Layer, Loaded, Resolved, ResolvedRole, RoleField, Source, Sourced, Value,
+    Key, Layer, Loaded, Resolved, ResolvedRole, RoleField, Source, Sourced, TaskKey, Value,
 };
 use shprd_core::state::{ResourceStatus, RunState, Task, TaskStatus};
 use shprd_git::archive;
 use shprd_git::git::Git;
-use shprd_git::worktree::{self, Layout, Worktree};
+use shprd_git::worktree::{self, Layout, SeedEntry, Worktree, parse_seed_entries};
 use shprd_mux::{AgentState, Host, PaneId};
 
 use crate::cmd::folder_trust;
@@ -291,7 +291,7 @@ pub fn spawn(
     // was asked for and why it does nothing.
     let (launch_effort, effort_warning) =
         effective_effort(env, &pick.agent, pick.model.as_deref(), effort.clone());
-    let warnings: Vec<String> = effort_warning.into_iter().collect();
+    let mut warnings: Vec<String> = effort_warning.into_iter().collect();
     let attempt = task.attempts.len() as u32 + 1;
     // Without worktrees every attempt would edit and commit in the one checkout,
     // so a second task starting while another is in flight would mix their work.
@@ -327,6 +327,10 @@ pub fn spawn(
     // The role's words and the Settings block are read before anything is
     // touched: an agent whose prompt cannot be read must cost nothing.
     let context = brief_context(env, BRIEF_ROLE, &pick, effort.as_deref(), &chosen)?;
+    let seeds = parse_seed_entries(&context.settings.tasks().worktree_files);
+    if uses_worktrees(env) {
+        warnings.extend(unseen_warning(env, task, &seeds));
+    }
     let brief_path = brief_path(&env.briefs_dir, &env.run, &task.id, attempt);
     // A retry replaces what the failed attempt left behind, so the fresh
     // worktree below can take the same path and branch name. A task still in
@@ -385,6 +389,9 @@ pub fn spawn(
         .as_ref()
         .and_then(|earlier| earlier.carried.as_deref());
     let created = create_worktree(env, &task.id, carried)?;
+    if uses_worktrees(env) {
+        warnings.extend(seed_worktree(env, &created.path, &seeds));
+    }
     // The ask hook goes in before the program starts, because a program reads
     // its hooks once at launch. A worktree that cannot take it is a spawn that
     // would promise cards it can never raise, so it fails and undoes itself.
@@ -1302,6 +1309,41 @@ fn create_worktree(
     .map_err(|err| plain_failure(task, "its new workspace could not be created", &err))
 }
 
+/// The warning for untracked or git-ignored files of the main checkout that the
+/// task's scope or words name and `tasks.worktree_files` does not provide: a
+/// worktree is cut from a branch, so its worker will not see them.
+fn unseen_warning(env: &SpawnEnv<'_>, task: &Task, seeds: &[SeedEntry]) -> Option<String> {
+    let texts: Vec<&str> = std::iter::once(task.title.as_str())
+        .chain(task.scope.iter().map(String::as_str))
+        .chain(task.acceptance.iter().map(String::as_str))
+        .collect();
+    let found = worktree::unseen_mentions(&env.ctx.root, &texts, seeds);
+    if found.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "the task names untracked or git-ignored files the worker will not see in its worktree: \
+         {}; commit them, or list them in `tasks.worktree_files` (they are in the main checkout, {})",
+        found.join(", "),
+        env.ctx.root.display()
+    ))
+}
+
+/// Copies or links `tasks.worktree_files` into the new worktree; one warning
+/// for each entry that could not be placed.
+fn seed_worktree(env: &SpawnEnv<'_>, worktree: &Path, seeds: &[SeedEntry]) -> Vec<String> {
+    worktree::seed_files(&env.ctx.root, worktree, seeds)
+        .into_iter()
+        .filter_map(|outcome| match outcome {
+            worktree::SeedOutcome::Placed(_) => None,
+            worktree::SeedOutcome::Skipped(entry, why) => Some(format!(
+                "tasks.worktree_files: {:?} was not placed in the worktree: {why}",
+                entry.path
+            )),
+        })
+        .collect()
+}
+
 /// Puts `program`'s ask hook into the worktree it is about to work in.
 ///
 /// It is what `shprd ask install` does, run at spawn so a worker's
@@ -2069,6 +2111,21 @@ pub(crate) fn brief_context(
         {
             task.set(key(RoleField::Effort), Value::Text(effort.to_owned()));
         }
+    }
+    if uses_worktrees(env) {
+        // The main checkout is a named, read-only place: what the repository
+        // holds that a worktree does not (untracked or ignored files).
+        let tasks = base.tasks();
+        let mut notes = tasks.start_notes.trim().to_owned();
+        if !notes.is_empty() {
+            notes.push_str("\n\n");
+        }
+        notes.push_str(&format!(
+            "The main checkout is at {} (read-only: read from it, never write to it); files \
+             that are untracked or git-ignored there are not in your worktree.",
+            env.ctx.root.display()
+        ));
+        task.set(Key::Task(TaskKey::StartNotes), Value::Text(notes));
     }
     let settings = env.settings.resolve(Some(&task));
     let mut role = settings.role(role_id);
@@ -7104,8 +7161,75 @@ project_dirs = []
 
         let scratch = Scratch::new();
         let (_, brief) = spawned_with("version = 1\n", &scratch);
-        assert!(!brief.contains("Before you start"), "{brief}");
+        assert!(!brief.contains("READ-THE-DESIGN-FIRST"), "{brief}");
         assert!(!brief.contains("Before you report"), "{brief}");
+    }
+
+    #[test]
+    fn worktree_files_are_copied_and_linked_into_the_worktree() {
+        let scratch = Scratch::new();
+        std::fs::write(scratch.root().join(".env"), "KEY=1\n")
+            .unwrap_or_else(|err| panic!("{err}"));
+        std::fs::write(scratch.root().join("local.json"), "{}")
+            .unwrap_or_else(|err| panic!("{err}"));
+        let (report, _) = spawned_with(
+            "version = 1\n[tasks]\nworktree_files = \".env\\nlink:local.json, absent.txt\"\n",
+            &scratch,
+        );
+        let copied = report.worktree.join(".env");
+        assert!(!copied.is_symlink());
+        assert_eq!(
+            std::fs::read_to_string(copied).unwrap_or_else(|err| panic!("{err}")),
+            "KEY=1\n"
+        );
+        assert!(report.worktree.join("local.json").is_symlink());
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.contains("absent.txt") && w.contains("main checkout")),
+            "{:?}",
+            report.warnings
+        );
+    }
+
+    #[test]
+    fn untracked_files_the_scope_names_are_warned_about_and_the_checkout_is_named() {
+        let scratch = Scratch::new();
+        std::fs::create_dir_all(scratch.root().join("crates/shprd"))
+            .unwrap_or_else(|err| panic!("{err}"));
+        std::fs::write(scratch.root().join("crates/shprd/new.txt"), "x")
+            .unwrap_or_else(|err| panic!("{err}"));
+        let (report, brief) = spawned_with("version = 1\n", &scratch);
+        let warning = report
+            .warnings
+            .iter()
+            .find(|w| w.contains("will not see"))
+            .unwrap_or_else(|| panic!("no warning: {:?}", report.warnings));
+        assert!(warning.contains("crates/"), "{warning}");
+        assert!(brief.contains("will not see"), "{brief}");
+        let root = scratch.root().display().to_string();
+        assert!(
+            brief.contains(&format!("The main checkout is at {root} (read-only")),
+            "{brief}"
+        );
+
+        // Listing the file in worktree_files provides it, so no warning.
+        let scratch = Scratch::new();
+        std::fs::create_dir_all(scratch.root().join("crates/shprd"))
+            .unwrap_or_else(|err| panic!("{err}"));
+        std::fs::write(scratch.root().join("crates/shprd/new.txt"), "x")
+            .unwrap_or_else(|err| panic!("{err}"));
+        let (report, _) = spawned_with(
+            "version = 1\n[tasks]\nworktree_files = \"crates\"\n",
+            &scratch,
+        );
+        assert!(
+            !report.warnings.iter().any(|w| w.contains("will not see")),
+            "{:?}",
+            report.warnings
+        );
+        assert!(report.worktree.join("crates/shprd/new.txt").exists());
     }
 }
 
