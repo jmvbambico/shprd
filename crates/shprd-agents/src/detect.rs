@@ -390,6 +390,11 @@ pub const PREFLIGHT_TIMEOUT: Duration = VERSION_TIMEOUT;
 /// short: an unlisted model is unknown, never guessed.
 pub fn model_reads_images(model: &str) -> Option<bool> {
     let name = model.to_ascii_lowercase();
+    // A vision variant of a text family (`kimi-k2-vl`) breaks the family's
+    // rule: say nothing rather than guess.
+    if ["-vl", "vision", "omni"].iter().any(|w| name.contains(w)) {
+        return None;
+    }
     const SEES: [&str; 5] = ["claude", "gpt-5", "gpt-4o", "gemini", "codex"];
     const BLIND: [&str; 5] = ["deepseek", "glm", "minimax", "qwen3-coder", "kimi-k2"];
     if SEES.iter().any(|word| name.contains(word)) {
@@ -676,6 +681,7 @@ mod tests {
         assert_eq!(model_reads_images("claude-opus"), Some(true));
         assert_eq!(model_reads_images("DeepSeek-V4"), Some(false));
         assert_eq!(model_reads_images("mystery-1"), None);
+        assert_eq!(model_reads_images("kimi-k2-vl"), None);
     }
 
     /// A script interactive shell can run, standing in for a real agent CLI.
