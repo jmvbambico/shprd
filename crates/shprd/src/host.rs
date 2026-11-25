@@ -332,6 +332,9 @@ pub fn resolve() -> Resolution {
 pub fn select() -> (Resolution, Box<dyn Host>) {
     let kept = sticky().clone();
     let mut resolution = kept.clone().unwrap_or_else(resolve);
+    if kept.is_none() && !resolution.running {
+        eprintln!("warning: {}", resolution.why);
+    }
     let host = open(&mut resolution);
     let mut slot = sticky();
     if resolution.running && !resolution.fell_back {
@@ -416,7 +419,7 @@ fn probe(setting: HostChoice) -> Probe {
         core_problem: None,
         herdr: on_path("herdr"),
         tuios: on_path("tuios"),
-        herdr_running: herdr_socket().is_some_and(|socket| socket.exists()),
+        herdr_running: herdr_socket().is_some_and(|socket| socket_answers(&socket)),
     };
     let ask_core = attached || setting == HostChoice::HerdrDesktop;
     if ask_core {
@@ -425,7 +428,7 @@ fn probe(setting: HostChoice) -> Probe {
         // wait, but only when a window is attached (or the desktop was named):
         // there is then a desktop to be found, and a busy machine is the likely
         // reason it was late.
-        match ask_core_with_retry(|timeout| {
+        match ask_core_with_retry(attached, |timeout| {
             HcHost::core_version(&endpoint, timeout).map_err(|error| error.to_string())
         }) {
             Ok(version) => probe.core = Some(version),
@@ -439,12 +442,26 @@ fn probe(setting: HostChoice) -> Probe {
 }
 
 /// Ask for the core's version, and once more with a longer wait when the first
-/// try fails. `ask` takes the timeout it may use; the retry is the whole reason
-/// this is a function: a probe that fails under load must not decide the host.
+/// try fails and `retry` is set. `ask` takes the timeout it may use; the retry
+/// is the whole reason this is a function: a probe that fails under load must
+/// not decide the host. `retry` is false when no window is attached: there is
+/// then no desktop to wait for, and a long wait would only slow every resolve.
 fn ask_core_with_retry(
+    retry: bool,
     mut ask: impl FnMut(Duration) -> Result<String, String>,
 ) -> Result<String, String> {
-    ask(PROBE_TIMEOUT).or_else(|_| ask(PROBE_RETRY_TIMEOUT))
+    let first = ask(PROBE_TIMEOUT);
+    if retry {
+        first.or_else(|_| ask(PROBE_RETRY_TIMEOUT))
+    } else {
+        first
+    }
+}
+
+/// Whether something listens on the socket: a leftover socket file from a herdr
+/// that exited is not a running server.
+fn socket_answers(socket: &Path) -> bool {
+    std::os::unix::net::UnixStream::connect(socket).is_ok()
 }
 
 /// Where the herdr TUI's server socket is: `$HERDR_SOCKET_PATH`, else
@@ -596,7 +613,7 @@ mod tests {
     #[test]
     fn a_desktop_probe_that_times_out_once_still_uses_the_desktop() {
         let mut asked = Vec::new();
-        let answer = super::ask_core_with_retry(|timeout| {
+        let answer = super::ask_core_with_retry(true, |timeout| {
             asked.push(timeout);
             if asked.len() == 1 {
                 Err("timed out".to_string())
@@ -612,12 +629,32 @@ mod tests {
         assert_eq!(choose(HostChoice::Auto, probe).kind, HostKind::HerdrDesktop);
         // A core that never answers is asked twice, then reported.
         let mut calls = 0;
-        let failed = super::ask_core_with_retry(|_| {
+        let failed = super::ask_core_with_retry(true, |_| {
             calls += 1;
             Err("no".to_string())
         });
         assert!(failed.is_err());
         assert_eq!(calls, 2);
+        // With no window attached there is nothing to wait for: one try.
+        let mut calls = 0;
+        let _ = super::ask_core_with_retry(false, |_| {
+            calls += 1;
+            Err("no".to_string())
+        });
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn a_stale_socket_file_is_not_a_running_herdr() {
+        let dir = std::env::temp_dir().join(format!("shprd-sock-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("herdr.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        assert!(super::socket_answers(&path), "a listener answers");
+        drop(listener); // the file stays, nobody listens
+        assert!(path.exists());
+        assert!(!super::socket_answers(&path), "a stale file does not");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
