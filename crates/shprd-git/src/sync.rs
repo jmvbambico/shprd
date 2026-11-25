@@ -271,7 +271,7 @@ fn fetch_base(git: &Git, base: &str) -> Result<String, GitError> {
 }
 
 /// The remote-tracking ref of `base`.
-fn remote_ref(base: &str) -> String {
+pub(crate) fn remote_ref(base: &str) -> String {
     format!("{REMOTE}/{base}")
 }
 

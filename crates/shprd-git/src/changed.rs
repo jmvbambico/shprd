@@ -35,6 +35,49 @@ pub fn changed_paths(repo: &Path, base: &str, head: &str) -> Result<Vec<String>,
     Ok(split_nul(&raw))
 }
 
+/// What `branch` changed on its own, measured against the current `base`.
+///
+/// The one baseline for the hand-in check, the real-diff check before review
+/// and the landing check. The range starts at the merge base of `base` and
+/// `branch` ([`crate::sync::attempt_base`]), not at the commit the task was cut
+/// from, so a task that merged the latest base is not blamed for what the base
+/// gained. A path whose content at `branch` is the same as at `base` (or at
+/// `origin/<base>`) came from the base and is dropped too: that covers a merge
+/// base that lags behind, such as a squash-merged sibling.
+///
+/// # Errors
+///
+/// Fails when git cannot find a merge base or list the diff.
+pub fn task_changes(repo: &Path, base: &str, branch: &str) -> Result<Vec<String>, GitError> {
+    let git = Git::new(repo);
+    let merge_base = crate::sync::attempt_base(&git, base, branch, false)?;
+    let paths = changed_paths(repo, &merge_base, branch)?;
+    let tracking = format!("refs/remotes/{}", crate::sync::remote_ref(base));
+    let has_tracking = git
+        .run(&[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{tracking}^{{commit}}"),
+        ])
+        .is_ok();
+    Ok(paths
+        .into_iter()
+        .filter(|path| {
+            let mine = blob(&git, branch, path);
+            let same = |rev: &str| blob(&git, rev, path) == mine;
+            !(same(base) || (has_tracking && same(&tracking)))
+        })
+        .collect())
+}
+
+/// The blob id of `path` at `rev`, [`None`] when it is not there.
+fn blob(git: &Git, rev: &str, path: &str) -> Option<String> {
+    git.run(&["rev-parse", "--verify", "--quiet", &format!("{rev}:{path}")])
+        .ok()
+        .map(|out| out.trim().to_string())
+}
+
 /// The files that differ between `base` and `head`, with their line counts.
 ///
 /// It is what the accept card's Changes section reads: the same range

@@ -670,8 +670,7 @@ pub fn land_local(
 ///
 /// [`LandError::OutOfScope`] naming the offending paths, or a git failure.
 pub fn check_scope(git: &Git, base: &str, branch: &str, scope: &[String]) -> Result<(), LandError> {
-    let merge_base = crate::sync::attempt_base(git, base, branch, false)?;
-    let changed = crate::changed::changed_paths(git.dir(), &merge_base, branch)?;
+    let changed = crate::changed::task_changes(git.dir(), base, branch)?;
     let outside = crate::changed::outside_scope(&changed, scope);
     if outside.is_empty() {
         Ok(())

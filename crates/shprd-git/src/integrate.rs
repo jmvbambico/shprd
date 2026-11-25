@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
-use crate::changed::{changed_paths, outside_scope};
+use crate::changed::{outside_scope, task_changes};
 use crate::git::{Git, GitError};
 use crate::worktree::{Layout, WorktreeError};
 
@@ -340,7 +340,10 @@ pub fn integrate(
             branch: task.branch.clone(),
         });
     }
-    let changed = changed_paths(&int.path, &task.base_sha, &tip)?;
+    // Judged against the integration branch as it stands now, not the commit the
+    // task was cut from: what the base gained during the run is not the task's.
+    let int_head = git.head_sha()?;
+    let changed = task_changes(&int.path, &int_head, &tip)?;
     let outside = outside_scope(&changed, &task.scope);
     if !outside.is_empty() {
         return Err(IntegrateError::OutsideScope { outside });
