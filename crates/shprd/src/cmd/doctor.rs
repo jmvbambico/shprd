@@ -11,7 +11,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::anyhow;
 use shprd_agents::data::{DataDir, Kind};
-use shprd_agents::detect::{Detection, SignIn, detect_all, find_binary, vendor_name};
+use shprd_agents::detect::{
+    Detection, PREFLIGHT_TIMEOUT, SignIn, detect_all, find_binary, model_reads_images,
+    preflight_probe, vendor_name,
+};
 use shprd_agents::env::{self, EnvContext, LaunchEnv, Role};
 use shprd_agents::families::{Families, agent_vendor};
 use shprd_agents::models::AgentRef;
@@ -142,6 +145,7 @@ fn build(home_flag: Option<&Path>, no_quota: bool) -> Report {
     let clean = worker_env(&facts);
     let detections = detect_every(&facts, &specs, &roles);
     agents(&mut report, &detections);
+    preflight_section(&mut report, &facts, &specs, &detections, &clean);
     review(&mut report, &facts, &specs, &roles);
     if !no_quota {
         quota_section(&mut report, &facts, &specs, &roles);
@@ -1043,6 +1047,75 @@ fn review(report: &mut Report, facts: &Facts, specs: &[HarnessSpec], roles: &Rol
         ),
         _ => {}
     }
+    image_line(section, &specs_model(specs, reviewer));
+}
+
+/// Section 4b: does every program a run starts actually start?
+///
+/// `node --version` and each installed agent CLI's version command are run, so a
+/// CLI that is on `PATH` but dies at launch (a missing dynamic library, say)
+/// shows its first error line here, instead of as a silent "version unknown"
+/// and a reviewer that never writes findings.
+fn preflight_section(
+    report: &mut Report,
+    facts: &Facts,
+    specs: &[HarnessSpec],
+    detections: &[Detection],
+    clean: &LaunchEnv,
+) {
+    let pairs = clean.as_pairs();
+    let mut probes: Vec<(String, Option<Result<(), String>>)> = Vec::new();
+    let node = find_binary("node", &facts.path_env)
+        .map(|path| preflight_probe(&path, &["--version".to_owned()], &pairs, PREFLIGHT_TIMEOUT));
+    probes.push(("node".to_owned(), node));
+    for detection in detections {
+        let Some(binary) = &detection.binary else {
+            continue;
+        };
+        let Some(spec) = specs.iter().find(|spec| spec.id == detection.id) else {
+            continue;
+        };
+        let result = preflight_probe(binary, &spec.detect.version_args, &pairs, PREFLIGHT_TIMEOUT);
+        probes.push((detection.id.clone(), Some(result)));
+    }
+    preflight_lines(report.section("Preflight"), &probes);
+}
+
+/// One line per probed program: started cleanly, not installed, or why not.
+fn preflight_lines(section: &mut Section, probes: &[(String, Option<Result<(), String>>)]) {
+    for (name, result) in probes {
+        match result {
+            Some(Ok(())) => section.add(Level::Ok, format!("{name} starts")),
+            Some(Err(why)) => section.add(Level::Warn, format!("{name} fails to start: {why}")),
+            None => section.add(Level::Warn, format!("{name} not on PATH")),
+        }
+    }
+}
+
+/// The model an agent string names, or the string itself when it names none.
+fn specs_model(specs: &[HarnessSpec], agent: &str) -> String {
+    match AgentRef::parse(agent, specs) {
+        Ok(named) => named.model.unwrap_or_else(|| named.program.clone()),
+        Err(_) => agent.to_owned(),
+    }
+}
+
+/// Whether the reviewer's model can read images, which decides whether image
+/// proof can be judged by it.
+fn image_line(section: &mut Section, model: &str) {
+    match model_reads_images(model) {
+        Some(true) => section.add(Level::Ok, format!("reviewer model {model} can read images")),
+        Some(false) => section.add(
+            Level::Warn,
+            format!(
+                "reviewer model {model} cannot read images: a review with image proof is degraded and its acceptance lines stay yours to check"
+            ),
+        ),
+        None => section.add(
+            Level::Warn,
+            format!("cannot tell whether reviewer model {model} reads images"),
+        ),
+    }
 }
 
 /// Section 6: what quota each agent reports, never naming a credential.
@@ -1311,6 +1384,40 @@ mod tests {
         config.roster.orchestrator = orchestrator.map(str::to_owned);
         config.roster.workers = workers.iter().map(|agent| (*agent).to_owned()).collect();
         config
+    }
+
+    #[test]
+    fn a_program_that_fails_to_start_is_named_with_its_error() {
+        let mut page = Report::default();
+        preflight_lines(
+            page.section("Preflight"),
+            &[
+                ("node".to_owned(), Some(Ok(()))),
+                (
+                    "claude".to_owned(),
+                    Some(Err("exited 134: dyld: Library not loaded".to_owned())),
+                ),
+            ],
+        );
+        let text = render(&page);
+        assert!(text.contains("✓ node starts"), "{text}");
+        assert!(
+            text.contains("! claude fails to start: exited 134: dyld"),
+            "{text}"
+        );
+        assert!(!page.has_fail());
+    }
+
+    #[test]
+    fn a_blind_reviewer_model_is_said_to_degrade_image_review() {
+        let mut page = Report::default();
+        image_line(page.section("Review"), "deepseek-v4");
+        let text = render(&page);
+        assert!(text.contains("cannot read images"), "{text}");
+        assert!(text.contains("degraded"), "{text}");
+        let mut page = Report::default();
+        image_line(page.section("Review"), "claude-opus");
+        assert!(render(&page).contains("can read images"));
     }
 
     #[test]
