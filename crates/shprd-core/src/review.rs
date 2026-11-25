@@ -326,9 +326,9 @@ impl RemarkAnswer {
 #[serde(tag = "of", content = "index", rename_all = "snake_case")]
 pub enum RemarkRef {
     /// The `n`th finding, counted from 1.
-    Finding(usize),
+    Finding(u32),
     /// The `n`th decision to confirm, counted from 1.
-    Decision(usize),
+    Decision(u32),
 }
 
 /// What every ask id of an answerable remark begins with.
@@ -352,7 +352,7 @@ pub fn parse_remark_ask(ask: &str) -> Option<(u32, RemarkRef)> {
     let (attempt, remark) = rest.split_once('-')?;
     let attempt = attempt.parse().ok()?;
     let (kind, n) = remark.split_at_checked(1)?;
-    let n: usize = n.parse().ok().filter(|n| *n >= 1)?;
+    let n: u32 = n.parse().ok().filter(|n| *n >= 1)?;
     match kind {
         "f" => Some((attempt, RemarkRef::Finding(n))),
         "d" => Some((attempt, RemarkRef::Decision(n))),
@@ -370,6 +370,103 @@ pub fn remark_text(task: &str, remark: RemarkRef, title: &str) -> String {
     }
 }
 
+/// Why an answer to a remark was refused before anything was recorded.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum RemarkError {
+    /// The review has no such finding or decision.
+    #[error("the review of attempt {attempt} has no {what} number {index}")]
+    Unknown {
+        /// The attempt whose review was read.
+        attempt: u32,
+        /// `finding` or `decision`.
+        what: &'static str,
+        /// The number asked about.
+        index: u32,
+    },
+}
+
+/// The title of the remark an answer names, or why there is none.
+///
+/// Pure: the service reads the attempt's report, asks this before it raises
+/// and answers the remark's ask ([`remark_ask`]), so an answer to a finding
+/// the review never made is refused and not recorded.
+pub fn remark_title(
+    report: &ReviewReport,
+    attempt: u32,
+    remark: RemarkRef,
+) -> Result<String, RemarkError> {
+    let (what, index, title) = match remark {
+        RemarkRef::Finding(n) => (
+            "finding",
+            n,
+            usize::try_from(n)
+                .ok()
+                .and_then(|n| n.checked_sub(1))
+                .and_then(|at| report.findings.get(at))
+                .map(|f| f.title.clone()),
+        ),
+        RemarkRef::Decision(n) => (
+            "decision",
+            n,
+            usize::try_from(n)
+                .ok()
+                .and_then(|n| n.checked_sub(1))
+                .and_then(|at| report.decisions.get(at))
+                .map(|d| d.title.clone()),
+        ),
+    };
+    title.ok_or(RemarkError::Unknown {
+        attempt,
+        what,
+        index,
+    })
+}
+
+/// The JSON Schema a reviewer's `findings.json` must match: the array of
+/// findings, or the object `{findings, decisions}` ([`parse_report`]).
+pub fn report_schema() -> serde_json::Value {
+    let finding = serde_json::json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["severity", "title", "detail"],
+        "properties": {
+            "severity": {
+                "type": "string",
+                "enum": ["critical", "major", "minor", "trivial"]
+            },
+            "title": { "type": "string", "minLength": 1 },
+            "location": { "type": "string" },
+            "detail": { "type": "string", "minLength": 1 }
+        }
+    });
+    serde_json::json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "shprd review findings",
+        "oneOf": [
+            { "type": "array", "items": finding },
+            {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "findings": { "type": "array", "items": finding },
+                    "decisions": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": ["title"],
+                            "properties": {
+                                "title": { "type": "string", "minLength": 1 },
+                                "detail": { "type": "string" }
+                            }
+                        }
+                    }
+                }
+            }
+        ]
+    })
+}
+
 /// The choices an answerable remark's card offers.
 pub fn remark_options() -> Vec<String> {
     RemarkAnswer::ALL
@@ -383,7 +480,7 @@ pub fn remark_options() -> Vec<String> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecisionToConfirm {
     /// The decision's place in the review, from 1.
-    pub index: usize,
+    pub index: u32,
     /// What the worker chose.
     pub title: String,
     /// Why it matters.
@@ -406,7 +503,7 @@ pub fn decisions_to_confirm(
         .iter()
         .enumerate()
         .map(|(at, decision)| {
-            let index = at + 1;
+            let index = u32::try_from(at + 1).unwrap_or(u32::MAX);
             let id = remark_ask(attempt, RemarkRef::Decision(index));
             let answer = state
                 .asks
@@ -450,11 +547,12 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use std::io::Write;
+    use std::path::Path;
     use std::time::Duration;
 
     use super::{
         FINDINGS_SETTLE, RemarkAnswer, RemarkRef, findings_path, packet_dir, parse_remark_ask,
-        parse_report, read_findings, remark_ask, settled_mtime,
+        parse_report, read_findings, remark_ask, remark_title, report_schema, settled_mtime,
     };
 
     #[test]
@@ -479,6 +577,29 @@ mod tests {
             "a decision never reaches the verdict"
         );
         assert!(parse_report(br#"{"findings":[],"other":1}"#, path).is_err());
+    }
+
+    #[test]
+    fn an_answer_names_a_real_remark_and_the_schema_allows_decisions() {
+        let report = parse_report(
+            br#"{"findings":[{"severity":"minor","title":"f1","detail":"d"}],"decisions":[{"title":"d1"}]}"#,
+            Path::new("findings.json"),
+        )
+        .unwrap();
+        assert_eq!(
+            remark_title(&report, 1, RemarkRef::Finding(1)).unwrap(),
+            "f1"
+        );
+        assert_eq!(
+            remark_title(&report, 1, RemarkRef::Decision(1)).unwrap(),
+            "d1"
+        );
+        assert!(remark_title(&report, 1, RemarkRef::Decision(2)).is_err());
+        assert!(remark_title(&report, 1, RemarkRef::Finding(0)).is_err());
+        let schema = report_schema();
+        let object = &schema["oneOf"][1]["properties"];
+        assert_eq!(object["decisions"]["items"]["required"][0], "title");
+        assert!(object["findings"]["items"]["properties"]["severity"].is_object());
     }
 
     #[test]

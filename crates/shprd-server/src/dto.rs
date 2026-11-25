@@ -549,12 +549,33 @@ pub struct DecisionDto {
 pub struct AnswerRemarkRequest {
     /// The attempt whose review it is.
     pub attempt: u32,
-    /// `finding` or `decision`.
-    pub of: String,
+    /// Whether it is a finding or a decision.
+    pub of: RemarkOfDto,
     /// Which one, counted from 1.
     pub index: u32,
     /// What the person says about it.
     pub answer: RemarkAnswerDto,
+}
+
+/// What kind of remark an answer is about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export_to = "RemarkOfDto.ts")]
+pub enum RemarkOfDto {
+    /// A defect the reviewer found.
+    Finding,
+    /// A choice the worker disclosed.
+    Decision,
+}
+
+impl AnswerRemarkRequest {
+    /// The remark this request names.
+    pub fn remark(&self) -> shprd_core::review::RemarkRef {
+        match self.of {
+            RemarkOfDto::Finding => shprd_core::review::RemarkRef::Finding(self.index),
+            RemarkOfDto::Decision => shprd_core::review::RemarkRef::Decision(self.index),
+        }
+    }
 }
 
 /// A review handed to a reviewer for an attempt.
@@ -2199,6 +2220,20 @@ mod tests {
             }
             other => panic!("expected a task.add, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn an_answer_request_names_a_known_remark_kind_only() {
+        let ok: AnswerRemarkRequest =
+            serde_json::from_str(r#"{"attempt":1,"of":"decision","index":2,"answer":"fix_it"}"#)
+                .unwrap();
+        assert_eq!(ok.remark(), shprd_core::review::RemarkRef::Decision(2));
+        assert!(
+            serde_json::from_str::<AnswerRemarkRequest>(
+                r#"{"attempt":1,"of":"banana","index":2,"answer":"fix_it"}"#
+            )
+            .is_err()
+        );
     }
 }
 
