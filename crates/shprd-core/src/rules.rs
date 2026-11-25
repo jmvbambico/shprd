@@ -14,7 +14,7 @@ use crate::event::{
 };
 use crate::gate::REVIEW_GATE;
 use crate::scope::{self, ScopeError};
-use crate::state::{AgentInfo, ResourceStatus, ReviewRequest, RunState, Task, TaskStatus};
+use crate::state::{AgentInfo, Attempt, ResourceStatus, ReviewRequest, RunState, Task, TaskStatus};
 
 /// Why an event was refused.
 #[derive(Debug, Error)]
@@ -615,7 +615,53 @@ pub const INTEGRATE_AFTER_FAILED_GATE: &str = "integrate_after_failed_gate";
 /// record a decision that never takes effect. `shprd override` and the rule
 /// below both read this list: adding a rule that honours an override means
 /// adding its name here.
-pub const OVERRIDE_RULES: &[&str] = &[INTEGRATE_AFTER_FAILED_GATE];
+pub const OVERRIDE_RULES: &[&str] = &[INTEGRATE_AFTER_FAILED_GATE, ACCEPT_OUTSIDE_SCOPE];
+
+/// Rule name a human overrides to let one attempt's hand-in through a scope
+/// refusal.
+///
+/// The override is per task and covers only the attempt running when it was
+/// recorded, and only the paths its reason lists (see [`scope_override_reason`]).
+pub const ACCEPT_OUTSIDE_SCOPE: &str = "accept_outside_scope";
+
+/// Prefix the paths carry in an [`ACCEPT_OUTSIDE_SCOPE`] override's reason.
+const SCOPE_OVERRIDE_PATHS: &str = "paths=";
+
+/// The reason an [`ACCEPT_OUTSIDE_SCOPE`] override records: the paths it lets
+/// through, then why.
+pub fn scope_override_reason(paths: &[String], why: &str) -> String {
+    format!("{SCOPE_OVERRIDE_PATHS}{}; {}", paths.join(","), why.trim())
+}
+
+/// The paths an [`ACCEPT_OUTSIDE_SCOPE`] override's `reason` lets through.
+///
+/// A reason that does not start with the paths list names none, so a malformed
+/// override covers nothing.
+pub fn scope_override_paths(reason: &str) -> Vec<String> {
+    let Some(rest) = reason.trim().strip_prefix(SCOPE_OVERRIDE_PATHS) else {
+        return Vec::new();
+    };
+    let list = rest.split_once(';').map_or(rest, |(list, _)| list);
+    list.split(',')
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Whether a person let `path` through the scope for `attempt` of `task`.
+///
+/// Only an override recorded after the attempt started counts, so an earlier
+/// attempt's override never covers a later one.
+fn scope_accepted(task: &Task, attempt: &Attempt, path: &str) -> bool {
+    let Some(spawn) = attempt.spawn_seq else {
+        return false;
+    };
+    task.overrides
+        .iter()
+        .filter(|record| record.rule == ACCEPT_OUTSIDE_SCOPE && record.seq > spawn)
+        .any(|record| scope::within(path, &scope_override_paths(&record.reason)))
+}
 
 /// Whether `rule` names an override the rules honour.
 pub fn is_override_rule(rule: &str) -> bool {
@@ -704,6 +750,17 @@ fn check_override(
             rule: rule.to_string(),
             expected: OVERRIDE_RULES,
         });
+    }
+    if rule == ACCEPT_OUTSIDE_SCOPE {
+        let paths = scope_override_paths(reason);
+        let usable = !task.is_empty()
+            && !paths.is_empty()
+            && paths.iter().all(|path| scope::normalize(path).is_ok());
+        if !usable {
+            return Err(RuleError::EmptyOverride {
+                task: task.to_string(),
+            });
+        }
     }
     Ok(())
 }
@@ -1531,7 +1588,8 @@ fn check_reported(
                 });
             }
         };
-        if !scope::within(&normalized, &found.scope) {
+        if !scope::within(&normalized, &found.scope) && !scope_accepted(found, current, &normalized)
+        {
             return Err(RuleError::PathOutOfScope {
                 task: task.to_string(),
                 path: path.clone(),
@@ -3420,6 +3478,102 @@ mod tests {
         assert!(matches!(
             check_as(&state, &Actor::Human, &empty, 6_000),
             Err(RuleError::EmptyScopeWidening { .. })
+        ));
+    }
+
+    /// A scope override for `task` listing `paths`, recorded by a human.
+    fn scope_overrode(seq: u64, task: &str, paths: &[&str]) -> Event {
+        let paths: Vec<String> = paths.iter().map(|p| p.to_string()).collect();
+        let mut event = ev(
+            seq,
+            EventKind::Override {
+                task: task.to_string(),
+                rule: ACCEPT_OUTSIDE_SCOPE.to_string(),
+                reason: scope_override_reason(&paths, "needed for the fix"),
+            },
+        );
+        event.actor = Actor::Human;
+        event
+    }
+
+    #[test]
+    fn a_scope_override_lets_the_listed_path_through() {
+        let mut log = vec![
+            started(1),
+            added(2, "a", &["src/a"], &[]),
+            spawned(3, "a", 1, "agent-1"),
+        ];
+        let out = reported(5, "a", 1, &["src/a/x.rs", "src/b/y.rs"]);
+        let mut refused_log = log.clone();
+        refused_log.push(out.clone());
+        assert!(matches!(
+            refused_append(&refused_log),
+            RuleError::PathOutOfScope { .. }
+        ));
+        log.push(scope_overrode(4, "a", &["src/b/y.rs"]));
+        log.push(out);
+        assert_eq!(status(&folded(&log), "a"), TaskStatus::Reported);
+    }
+
+    #[test]
+    fn a_scope_override_covers_only_the_paths_it_lists() {
+        let log = vec![
+            started(1),
+            added(2, "a", &["src/a"], &[]),
+            spawned(3, "a", 1, "agent-1"),
+            scope_overrode(4, "a", &["src/b/y.rs"]),
+            reported(5, "a", 1, &["src/c/z.rs"]),
+        ];
+        assert!(matches!(refused(&log), RuleError::PathOutOfScope { .. }));
+    }
+
+    #[test]
+    fn a_scope_override_covers_only_its_own_attempt() {
+        let log = vec![
+            started(1),
+            added(2, "a", &["src/a"], &[]),
+            spawned(3, "a", 1, "agent-1"),
+            scope_overrode(4, "a", &["src/b/y.rs"]),
+            reported_with(5, "a", 1, ReportStatus::Failed),
+            spawned(8, "a", 2, "agent-1"),
+            reported(9, "a", 2, &["src/b/y.rs"]),
+        ];
+        assert!(matches!(refused(&log), RuleError::PathOutOfScope { .. }));
+    }
+
+    #[test]
+    fn only_a_human_records_a_scope_override() {
+        let state = passed_task();
+        let paths = vec!["src/b/y.rs".to_string()];
+        let kind = EventKind::Override {
+            task: "a".to_string(),
+            rule: ACCEPT_OUTSIDE_SCOPE.to_string(),
+            reason: scope_override_reason(&paths, "why"),
+        };
+        for actor in [
+            Actor::Engine,
+            Actor::Orchestrator,
+            Actor::Agent {
+                id: "w1".to_string(),
+            },
+        ] {
+            assert!(
+                matches!(
+                    check_as(&state, &actor, &kind, 6_000),
+                    Err(RuleError::OverrideNotHuman { .. })
+                ),
+                "{actor:?}"
+            );
+        }
+        assert!(check_as(&state, &Actor::Human, &kind, 6_000).is_ok());
+        let no_paths = EventKind::Override {
+            task: "a".to_string(),
+            rule: ACCEPT_OUTSIDE_SCOPE.to_string(),
+            reason: "just because".to_string(),
+        };
+        assert!(matches!(
+            check_as(&state, &Actor::Human, &no_paths, 6_000),
+            Err(RuleError::EmptyOverride { .. })
         ));
     }
 
