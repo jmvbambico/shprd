@@ -36,7 +36,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use shprd_core::config::{Config, MergePolicy};
 use shprd_core::event::{
-    Actor, EventKind, FallbackAction, LandOutcome, ProviderClass, ResourceKind,
+    Actor, EventKind, FallbackAction, LandOutcome, ProviderClass, ResourceAction, ResourceKind,
 };
 use shprd_core::gate;
 use shprd_core::log::{Clock, SystemClock};
@@ -748,7 +748,12 @@ impl Worker {
         let seq = self.commit(EventKind::Escalated {
             task: Some(run.task.clone()),
             body: format!("{marker}{error}"),
-            default_action: if run.step == "land" {
+            default_action: if run.step == "land" && error.contains(OPEN_FAIL) {
+                format!(
+                    "this will not clear by itself: free the branch (switch the checkout that holds it to another branch) or start the run on another integration branch; the pass after that lands it. Git's own words are above; the full error is in the log of `shprd serve` and the pass record under {}",
+                    self.state_dir.display()
+                )
+            } else if run.step == "land" {
                 String::from("the merge is tried again on the next pass")
             } else {
                 format!(
@@ -2040,20 +2045,27 @@ impl Worker {
             &run.integration_branch,
             &run.base_branch,
         )
-        .map_err(|err| LandFail::at(&task.id, "opening the integration worktree", err))?;
+        .map_err(|err| open_fail(&task.id, &run.integration_branch, &err))?;
+        self.record_integration_worktree(&worktree);
         let landing = LocalLanding {
             task: &task.id,
             branch,
             base: &run.integration_branch,
             has_work,
         };
-        let landed = match land::land_local(
+        let result = land::land_local(
             &worktree,
             &landing,
             policy,
             approved,
             local_checks_passed(task),
-        ) {
+        );
+        // Whatever the landing did, the worktree lets go of the branch so the
+        // person can `git switch` to it in their own checkout between lands.
+        if let Err(err) = integrate::release_integration(&worktree) {
+            tracing::warn!(%err, path = %worktree.path.display(), "could not detach the integration worktree");
+        }
+        let landed = match result {
             Ok(landed) => landed,
             Err(err @ LandError::Conflict { .. }) => {
                 let seq = self.record_conflict(task, &run.integration_branch, &err)?;
@@ -2090,6 +2102,30 @@ impl Worker {
         };
         self.record_landed(task, base, landed.head(), None, outcome)
             .map(Some)
+    }
+
+    /// Records the run's integration worktree in the resource ledger, once, so
+    /// the janitor can list it and take it away.
+    fn record_integration_worktree(&self, worktree: &integrate::IntegrationWorktree) {
+        let name = worktree.path.display().to_string();
+        let held = ledger::load(&self.repo).is_ok_and(|(state, _)| {
+            state
+                .resources
+                .get(&(ResourceKind::Worktree, name.clone()))
+                .is_some_and(|record| record.status == ResourceStatus::Live)
+        });
+        if held {
+            return;
+        }
+        let recorded = self.commit(EventKind::Resource {
+            action: ResourceAction::Created,
+            kind: ResourceKind::Worktree,
+            name,
+            task: None,
+        });
+        if let Err(err) = recorded {
+            tracing::warn!(%err, "the integration worktree could not be recorded");
+        }
     }
 
     /// Records a landing that clashed with the integration branch as a failed
@@ -2482,6 +2518,29 @@ fn land_fail(err: LandError, task: &str) -> LandFail {
     LandFail {
         line: Some(err.plain(task)),
         cause: err.cause(),
+    }
+}
+
+/// The words a landing that could not open the integration worktree starts its
+/// failure with. A retry of that step cannot succeed until a person acts, and
+/// [`escalate_repeated_failure`](Service::escalate_repeated_failure) reads this
+/// to say so.
+const OPEN_FAIL: &str = "git would not open shprd's integration worktree";
+
+/// The failure of opening the integration worktree: git's own reason in the
+/// line a person reads, and the full error for the log.
+fn open_fail(task: &str, branch: &str, err: &integrate::IntegrateError) -> LandFail {
+    let text = err.to_string();
+    let reason = text
+        .lines()
+        .map(str::trim)
+        .rfind(|line| !line.is_empty())
+        .unwrap_or("no reason given");
+    LandFail {
+        line: Some(format!(
+            "Couldn't merge {task}: {OPEN_FAIL} for {branch:?}: {reason}"
+        )),
+        cause: land::tail_lines(&format!("opening the integration worktree: {text}")),
     }
 }
 

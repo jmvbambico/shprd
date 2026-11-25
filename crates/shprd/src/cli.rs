@@ -719,6 +719,11 @@ pub enum RunCommand {
     Start(RunStartArgs),
     /// Finish the run; nothing may follow.
     Finish(EndRunArgs),
+    /// Close the run once its work is done: every task landed or dropped, and
+    /// nothing left to merge (a run whose base and integration branch are one
+    /// branch has no pull request). It throws nothing away; `run finish
+    /// --abandon` is the verb for that.
+    Close,
 }
 
 /// Arguments for `run start`.

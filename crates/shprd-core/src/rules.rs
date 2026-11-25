@@ -2124,7 +2124,17 @@ pub fn unfinished_tasks(state: &RunState) -> Vec<TaskId> {
 /// A run with nothing integrated has nothing for a pull request to carry: every
 /// task was dropped or none was planned, and refusing that run would ask for a
 /// merge that `land` refuses to open.
+///
+/// A run whose base and integration branch are one branch has no pull request
+/// to merge, now or later: landing wrote the work straight onto it.
 pub fn unlanded(state: &RunState) -> bool {
+    if state
+        .run
+        .as_ref()
+        .is_some_and(|run| run.base_branch == run.integration_branch)
+    {
+        return false;
+    }
     let integrated = state
         .tasks
         .values()

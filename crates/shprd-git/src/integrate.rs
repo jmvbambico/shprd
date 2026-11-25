@@ -231,13 +231,22 @@ pub fn open_integration_branch(
     let path_exists = path.exists();
     match (branch_exists, path_exists) {
         (true, true) => {
-            let checked_out = Git::new(&path).current_branch()?;
-            if checked_out.as_deref() != Some(branch) {
-                return Err(IntegrateError::BadState {
-                    path,
-                    branch: branch.to_string(),
-                    detail: format!("it is on {checked_out:?}"),
-                });
+            let at = Git::new(&path);
+            match at.current_branch()? {
+                Some(on) if on == branch => {}
+                // Between lands the worktree is detached so the person's own
+                // checkout may hold the branch; a landing takes it back, and git
+                // refuses (with its own reason) when the person holds it now.
+                None => {
+                    at.run(&["switch", branch])?;
+                }
+                Some(on) => {
+                    return Err(IntegrateError::BadState {
+                        path,
+                        branch: branch.to_string(),
+                        detail: format!("it is on {:?}", Some(on)),
+                    });
+                }
             }
             repair_state_excluded(&path)?;
             Ok(IntegrationWorktree {
@@ -275,6 +284,22 @@ pub fn open_integration_branch(
             detail: "the path exists but its branch does not".to_string(),
         }),
     }
+}
+
+/// Lets go of the integration branch: detaches the worktree's `HEAD` at the
+/// branch's tip.
+///
+/// Git lets one worktree hold a branch, so a worktree left on the integration
+/// branch keeps the person from `git switch`ing to it in their own checkout. A
+/// landing calls this when it is done, and [`open_integration_branch`] takes the
+/// branch back for the next one.
+///
+/// # Errors
+///
+/// Fails when git cannot detach the worktree.
+pub fn release_integration(int: &IntegrationWorktree) -> Result<(), IntegrateError> {
+    Git::new(&int.path).run(&["switch", "--detach"])?;
+    Ok(())
 }
 
 /// Creates the directory a worktree will sit in.

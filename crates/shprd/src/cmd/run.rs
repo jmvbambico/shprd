@@ -30,6 +30,7 @@ use crate::ctx::{CliError, Ctx};
 /// A directory that is not a git repository is left alone: a run there is a
 /// log-only run, which is what the record-only paths and the tests use.
 pub fn start(ctx: &Ctx, args: &RunStartArgs) -> Result<(), CliError> {
+    refuse_a_run_in_flight(ctx)?;
     let repo = ctx.root.to_string_lossy().to_string();
     let kind = EventKind::RunStarted {
         run_id: args.run_id.clone(),
@@ -40,6 +41,7 @@ pub fn start(ctx: &Ctx, args: &RunStartArgs) -> Result<(), CliError> {
     // A refused start must leave nothing behind, so the run's own rule is asked
     // before the branch is made.
     ctx.check(&kind)?;
+    refuse_a_held_branch(&ctx.root, &args.run_id, &args.integration)?;
     let made = ensure_branch(&ctx.root, &args.base, &args.integration)?;
     let event = ctx.commit(kind)?;
     if made {
@@ -50,7 +52,76 @@ pub fn start(ctx: &Ctx, args: &RunStartArgs) -> Result<(), CliError> {
             task: None,
         })?;
     }
-    emit(ctx, &event)
+    emit(ctx, &event)?;
+    if !ctx.json {
+        if let Some(line) = int_worktree_line(ctx, &args.run_id, &args.integration) {
+            println!("{line}");
+        }
+    }
+    Ok(())
+}
+
+/// Where shprd lands this run's work, said once at the start: its own worktree,
+/// which holds the integration branch only while a landing is in progress.
+fn int_worktree_line(ctx: &Ctx, run: &str, integration: &str) -> Option<String> {
+    let home = ctx.home.as_deref()?;
+    let layout = shprd_git::worktree::Layout::from_settings(home, &ctx.root);
+    let repo_name = ctx.root.file_name()?.to_string_lossy().into_owned();
+    let path = layout.path(&repo_name, run, "_int");
+    Some(format!(
+        "work lands in its own worktree at {}; it holds {integration:?} only while a task is \
+         landing, so you can `git switch {integration}` in your checkout between lands",
+        path.display()
+    ))
+}
+
+/// Refuses to start while this log's run has not ended, naming it and the verbs
+/// that end it.
+///
+/// The rule that backs this ([`shprd_core::rules::RuleError::RunAlreadyStarted`])
+/// only says "the run has already started": the person needs to know which run
+/// and how to close it.
+fn refuse_a_run_in_flight(ctx: &Ctx) -> Result<(), CliError> {
+    let state = ctx.state()?;
+    let Some(run) = &state.run else {
+        return Ok(());
+    };
+    let advice = if state.finished {
+        format!(
+            "run {} has already finished in this repository's log, which holds one run",
+            run.run_id
+        )
+    } else {
+        format!(
+            "run {} is still running (base {:?}, integration {:?}); end it with `shprd run \
+             close` once its tasks have landed or been dropped, or `shprd run finish \
+             --abandon` to throw its work away",
+            run.run_id, run.base_branch, run.integration_branch
+        )
+    };
+    Err(CliError::Invalid(anyhow!(
+        "refusing to start run: the run has already started: {advice}"
+    )))
+}
+
+/// Refuses an integration branch that another worktree has checked out.
+///
+/// Git allows one checkout per branch, and shprd lands in a worktree of its
+/// own, so a branch the person's checkout holds makes every landing fail. The
+/// refusal says where it is held and offers a branch of the run's own.
+fn refuse_a_held_branch(repo: &Path, run: &str, branch: &str) -> Result<(), CliError> {
+    let git = Git::new(repo);
+    let Some(held) = shprd_git::worktree::checked_out_at(&git, branch) else {
+        return Ok(());
+    };
+    Err(CliError::Invalid(anyhow!(
+        "refusing to start run: branch {branch:?} is checked out at {}, and git allows a branch \
+         in one worktree at a time, so shprd could not land work on it\nswitch that checkout to \
+         another branch (`git -C {} switch -`), or start the run with `--integration \
+         shprd/{run}/int`, a branch shprd makes for this run",
+        held.display(),
+        held.display()
+    )))
 }
 
 /// Makes sure `branch` exists, cutting it from `base` when it does not.
@@ -111,6 +182,21 @@ pub fn finish_verb(ctx: &Ctx, args: &EndRunArgs, home: Option<&Path>) -> Result<
         ctx,
         home,
         EndRun::finish(args.abandon, args.yes).acting_as(confirm::named_actor()),
+    )
+}
+
+/// `shprd run close`: ends a run whose work is done, and abandons nothing.
+///
+/// Every task has to be landed or dropped, and the work has to have somewhere to
+/// be: a run whose base and integration branch are one branch has no pull
+/// request to wait for. Anything else is refused with the tasks named, and the
+/// refusal points at `run finish --abandon` for throwing work away.
+pub fn close_verb(ctx: &Ctx, home: Option<&Path>) -> Result<(), CliError> {
+    finish(
+        &spawn::real_mux(),
+        ctx,
+        home,
+        EndRun::finish(false, false).acting_as(confirm::named_actor()),
     )
 }
 
