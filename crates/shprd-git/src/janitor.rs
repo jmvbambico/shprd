@@ -352,6 +352,19 @@ pub fn plan(
             });
         }
     }
+    // A run that ended with no merged pull request (its base and integration
+    // branch are one, or it was closed) still holds its integration worktree.
+    // Nothing lands there again, so the janitor lists it and takes it away; the
+    // branch is the person's and stays.
+    if state.finished
+        && !state.pr.as_ref().is_some_and(|pr| pr.merged)
+        && let Some(path) = integration_worktree(state, layout, &run.run_id)
+    {
+        actions.push(Action::RemoveWorktree {
+            task: INTEGRATION_TASK.to_string(),
+            path,
+        });
+    }
     // A merged pull request releases what it pushed. The ledger must hold the
     // remote branch `Live` and the merge must name that exact branch as its
     // head: a stale or foreign name is never deleted from `origin`.

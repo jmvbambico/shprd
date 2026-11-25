@@ -2748,7 +2748,7 @@ fn waiting_message(reason: &str) -> String {
 
 #[cfg(test)]
 mod waiting_tests {
-    use super::waiting_message;
+    use super::{OPEN_FAIL, open_fail, waiting_message};
 
     #[test]
     fn an_overlap_reads_as_a_path_in_use() {
@@ -2763,5 +2763,23 @@ mod waiting_tests {
     fn another_refusal_carries_its_reason_capped() {
         assert_eq!(waiting_message("no host"), "Waiting: no host");
         assert!(waiting_message(&"x".repeat(500)).chars().count() <= 120);
+    }
+
+    #[test]
+    fn a_failed_open_of_the_integration_worktree_says_gits_reason_and_that_a_retry_cannot_fix_it() {
+        let err = shprd_git::integrate::IntegrateError::Git(shprd_git::git::GitError::Failed {
+            args: vec![String::from("worktree"), String::from("add")],
+            code: Some(128),
+            stderr: String::from(
+                "Preparing worktree (checking out 'prototype')\nfatal: 'prototype' is already checked out at '/repo'",
+            ),
+        });
+        let fail = open_fail("T1", "prototype", &err);
+        let line = fail.line.expect("a plain line");
+        assert!(line.starts_with("Couldn't merge T1: "), "{line}");
+        assert!(line.contains(OPEN_FAIL), "{line}");
+        assert!(line.contains("already checked out at '/repo'"), "{line}");
+        assert!(!line.contains("in the shprd log"), "{line}");
+        assert!(fail.cause.contains("opening the integration worktree"));
     }
 }

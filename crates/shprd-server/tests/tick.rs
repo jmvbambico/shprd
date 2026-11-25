@@ -1223,6 +1223,32 @@ fn a_failed_review_is_sent_back_and_the_second_round_lands() {
         "one\ntwo",
         "the task's work is on the integration branch"
     );
+    // The worktree let go of the branch once the land was done, so the person's
+    // checkout can `git switch` to it; and it is in the resource ledger, so the
+    // janitor can list and remove it.
+    let head_ref = std::process::Command::new("git")
+        .args(["symbolic-ref", "-q", "HEAD"])
+        .current_dir(&integration)
+        .output()
+        .expect("git runs");
+    assert!(
+        !head_ref.status.success(),
+        "the integration worktree is detached between lands"
+    );
+    git_in(&fixture.repo, &["switch", "integration/m8"]);
+    git_in(&fixture.repo, &["switch", "-"]);
+    assert!(
+        fixture
+            .state()
+            .resources
+            .iter()
+            .any(|((kind, name), record)| {
+                *kind == shprd_core::event::ResourceKind::Worktree
+                    && name == &integration.display().to_string()
+                    && record.task.is_none()
+            }),
+        "the integration worktree is a recorded resource"
+    );
 
     // Nothing is left to do, and the run is quiet as it should be.
     let sixth = worker.tick().expect("the sixth pass ran");
