@@ -72,6 +72,12 @@ pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>, named: bool) -> Res
     // half-happen on one multiplexer and half on another (M10.9).
     let (resolution, host) = crate::host::select();
     let host: Arc<dyn Host> = Arc::from(host);
+    // `select` keeps this resolution for the process, so a review or a spawn the
+    // service starts later reuses it instead of probing under load. When no host
+    // is running, say so now rather than at the first task that needs one.
+    if !resolution.running {
+        eprintln!("warning: {}", resolution.why);
+    }
     // Everything the service reads from the machine is resolved here, once: the
     // discovery files' state directory, the person's home, their prompts and the
     // harness table. The service itself reads no environment variable.

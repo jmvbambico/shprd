@@ -38,6 +38,7 @@
 
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use shprd_core::settings::{HostChoice, Loaded};
@@ -55,6 +56,13 @@ pub const HERDR_APP_ENV: &str = "SHPRD_HERDR_APP";
 /// A core answers `hello` in 15–25 ms once it is up (M7ef §2.3); the margin is
 /// for the first call of a session, which starts one.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long the one retry of a core probe may take.
+///
+/// A probe that fails while several builds are running is retried once with a
+/// longer wait before the machine is declared to have no desktop: a busy core
+/// answers late, and "late" must not read as "not there".
+const PROBE_RETRY_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// The hosts shprd has an adapter for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,6 +118,9 @@ pub struct Probe {
     pub herdr: bool,
     /// Whether the `tuios` binary is on `PATH`.
     pub tuios: bool,
+    /// Whether a herdr server is running: its socket is there. `auto` falls
+    /// back to the herdr TUI only when this is true.
+    pub herdr_running: bool,
 }
 
 impl Probe {
@@ -132,6 +143,10 @@ pub struct Resolution {
     /// True when the setting named a host the machine could not give, and the
     /// run fell back to another.
     pub fell_back: bool,
+    /// False when `auto` found no host that is running — no desktop and no herdr
+    /// server. The run is then not on a host at all: `kind` is the adapter whose
+    /// calls will report the error, and `why` says plainly that nothing runs.
+    pub running: bool,
     /// The facts the choice was made from.
     pub probe: Probe,
 }
@@ -156,6 +171,7 @@ pub fn choose(setting: HostChoice, probe: Probe) -> Resolution {
                     kind: HostKind::HerdrDesktop,
                     why: desktop_why(&probe),
                     fell_back: false,
+                    running: true,
                     probe,
                 }
             } else {
@@ -173,6 +189,7 @@ pub fn choose(setting: HostChoice, probe: Probe) -> Resolution {
                     kind,
                     why,
                     fell_back: true,
+                    running: true,
                     probe,
                 }
             }
@@ -188,6 +205,7 @@ pub fn choose(setting: HostChoice, probe: Probe) -> Resolution {
                 kind: HostKind::Herdr,
                 why,
                 fell_back: false,
+                running: true,
                 probe,
             }
         }
@@ -203,6 +221,7 @@ pub fn choose(setting: HostChoice, probe: Probe) -> Resolution {
                 kind: HostKind::Tuios,
                 why,
                 fell_back: false,
+                running: true,
                 probe,
             }
         }
@@ -213,9 +232,10 @@ pub fn choose(setting: HostChoice, probe: Probe) -> Resolution {
                     kind: HostKind::HerdrDesktop,
                     why: format!("auto picked Herdr desktop: {}", desktop_why(&probe)),
                     fell_back: false,
+                    running: true,
                     probe,
                 }
-            } else {
+            } else if probe.herdr_running {
                 // `auto` never falls back: it asked the machine and was told.
                 // Only a named host the machine could not give is a fallback a
                 // person should hear about.
@@ -225,6 +245,23 @@ pub fn choose(setting: HostChoice, probe: Probe) -> Resolution {
                     kind,
                     why: format!("auto picked {kind}: {}", desktop_problem(&probe)),
                     fell_back: false,
+                    running: true,
+                    probe,
+                }
+            } else {
+                // Neither host is running. Picking the herdr TUI would only
+                // postpone the failure to the first call that needs it (and
+                // look like a choice), so say it plainly instead.
+                let kind = HostKind::Herdr;
+                Resolution {
+                    setting,
+                    kind,
+                    why: format!(
+                        "auto found no running host: {}, and no herdr server is running",
+                        desktop_problem(&probe)
+                    ),
+                    fell_back: false,
+                    running: false,
                     probe,
                 }
             }
@@ -283,10 +320,36 @@ pub fn resolve() -> Resolution {
 ///
 /// It answers the [`Resolution`] beside the host, so the service's banner and
 /// `shprd doctor` can say which host a run is on without probing a second time.
+///
+/// # The choice is sticky
+///
+/// The first healthy resolution of this process is kept, and every later call
+/// reuses it without probing: a probe that fails while the machine is busy must
+/// not turn a service that found the desktop into one that drives a herdr that
+/// is not running. It is dropped when the host it names stops opening, so the
+/// next call resolves afresh — that is the "connection lost, and comes back"
+/// case. A resolution that found no running host is never kept.
 pub fn select() -> (Resolution, Box<dyn Host>) {
-    let mut resolution = resolve();
+    let kept = sticky().clone();
+    let mut resolution = kept.clone().unwrap_or_else(resolve);
     let host = open(&mut resolution);
+    let mut slot = sticky();
+    if resolution.running && !resolution.fell_back {
+        *slot = Some(resolution.clone());
+    } else if kept.is_some() {
+        *slot = None;
+    }
     (resolution, host)
+}
+
+/// The resolution this process keeps; see [`select`].
+static STICKY: Mutex<Option<Resolution>> = Mutex::new(None);
+
+/// The kept resolution's slot, usable even if a holder panicked.
+fn sticky() -> std::sync::MutexGuard<'static, Option<Resolution>> {
+    STICKY
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// Open the host `resolution` names.
@@ -353,18 +416,45 @@ fn probe(setting: HostChoice) -> Probe {
         core_problem: None,
         herdr: on_path("herdr"),
         tuios: on_path("tuios"),
+        herdr_running: herdr_socket().is_some_and(|socket| socket.exists()),
     };
     let ask_core = attached || setting == HostChoice::HerdrDesktop;
     if ask_core {
-        match HcHost::core_version(&endpoint(), PROBE_TIMEOUT) {
+        let endpoint = endpoint();
+        // A core that does not answer in time is asked once more with a longer
+        // wait, but only when a window is attached (or the desktop was named):
+        // there is then a desktop to be found, and a busy machine is the likely
+        // reason it was late.
+        match ask_core_with_retry(|timeout| {
+            HcHost::core_version(&endpoint, timeout).map_err(|error| error.to_string())
+        }) {
             Ok(version) => probe.core = Some(version),
-            Err(error) => probe.core_problem = Some(error.to_string()),
+            Err(error) => probe.core_problem = Some(error),
         }
     } else {
         probe.core_problem =
             Some("no Herdr window is attached, so herdr-core was not asked".to_string());
     }
     probe
+}
+
+/// Ask for the core's version, and once more with a longer wait when the first
+/// try fails. `ask` takes the timeout it may use; the retry is the whole reason
+/// this is a function: a probe that fails under load must not decide the host.
+fn ask_core_with_retry(
+    mut ask: impl FnMut(Duration) -> Result<String, String>,
+) -> Result<String, String> {
+    ask(PROBE_TIMEOUT).or_else(|_| ask(PROBE_RETRY_TIMEOUT))
+}
+
+/// Where the herdr TUI's server socket is: `$HERDR_SOCKET_PATH`, else
+/// `~/.config/herdr/herdr.sock`. `None` when neither can be named.
+fn herdr_socket() -> Option<PathBuf> {
+    if let Some(path) = env_value("HERDR_SOCKET_PATH") {
+        return Some(PathBuf::from(path));
+    }
+    let home = env_value("HOME")?;
+    Some(PathBuf::from(home).join(".config/herdr/herdr.sock"))
 }
 
 /// Whether a program is on `PATH`.
@@ -436,6 +526,7 @@ mod tests {
             window_problem: Some("no Herdr window at /tmp/none: No such file or directory".into()),
             herdr: true,
             tuios: false,
+            herdr_running: true,
         }
     }
 
@@ -448,6 +539,7 @@ mod tests {
             window_problem: None,
             herdr: true,
             tuios: true,
+            herdr_running: true,
         }
     }
 
@@ -483,6 +575,49 @@ mod tests {
             chosen.why
         );
         assert!(chosen.why.contains("/tmp/none"), "{}", chosen.why);
+    }
+
+    #[test]
+    fn auto_never_picks_a_herdr_that_is_not_running() {
+        let mut probe = nothing();
+        probe.herdr_running = false;
+        let chosen = choose(HostChoice::Auto, probe);
+        assert!(!chosen.running, "nothing runs, and it says so");
+        assert!(
+            chosen.why.contains("no running host") && chosen.why.contains("no herdr server"),
+            "{}",
+            chosen.why
+        );
+        assert!(!chosen.why.starts_with("auto picked"), "{}", chosen.why);
+        let chosen = choose(HostChoice::Auto, nothing());
+        assert!(chosen.running, "a running herdr is still the answer");
+    }
+
+    #[test]
+    fn a_desktop_probe_that_times_out_once_still_uses_the_desktop() {
+        let mut asked = Vec::new();
+        let answer = super::ask_core_with_retry(|timeout| {
+            asked.push(timeout);
+            if asked.len() == 1 {
+                Err("timed out".to_string())
+            } else {
+                Ok("0.1.22".to_string())
+            }
+        });
+        assert_eq!(answer.as_deref(), Ok("0.1.22"));
+        assert_eq!(asked.len(), 2);
+        assert!(asked[1] > asked[0], "the retry waits longer: {asked:?}");
+        let mut probe = desktop();
+        probe.core = answer.ok();
+        assert_eq!(choose(HostChoice::Auto, probe).kind, HostKind::HerdrDesktop);
+        // A core that never answers is asked twice, then reported.
+        let mut calls = 0;
+        let failed = super::ask_core_with_retry(|_| {
+            calls += 1;
+            Err("no".to_string())
+        });
+        assert!(failed.is_err());
+        assert_eq!(calls, 2);
     }
 
     #[test]
