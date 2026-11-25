@@ -42,7 +42,9 @@ pub fn start(ctx: &Ctx, args: &RunStartArgs) -> Result<(), CliError> {
     ctx.check(&kind)?;
     let made = ensure_branch(&ctx.root, &args.base, &args.integration)?;
     let event = ctx.commit(kind)?;
-    record_baselines(&ctx.root, &args.base);
+    if let Err(err) = record_baselines(&ctx.root, &args.base) {
+        eprintln!("warning: no gate baseline recorded: {err:#}");
+    }
     if made {
         ctx.commit(EventKind::Resource {
             action: ResourceAction::Created,
@@ -54,34 +56,76 @@ pub fn start(ctx: &Ctx, args: &RunStartArgs) -> Result<(), CliError> {
     emit(ctx, &event)
 }
 
-/// Runs each worker gate on the base and stores how it fared, so a hand-in is
-/// judged against it and only a regression refuses.
+/// Seconds a baseline step may take: the same bound `shprd gate` gives a step.
+const BASELINE_STEP_SECS: u64 = 1800;
+
+/// Runs each worker gate on a clean checkout of the base and stores how it
+/// fared, so a hand-in is judged against it and only a regression refuses.
 ///
-/// Best effort: a repository with no configured worker gates, no git checkout
+/// The gates run in a detached temporary worktree at the base's commit, never
+/// in the live checkout, so the fingerprint is the base's. Best effort for
+/// absent inputs: a repository with no configured worker gates, no git checkout
 /// or no readable config has no baseline, and then no gate failure is excused.
-/// `sync` calls this again to refresh it.
-pub fn record_baselines(root: &Path, base: &str) {
+/// A baseline that was run but could not be stored is an error.
+///
+/// Callers: `run start`. Refreshing on `sync` needs a call from `sync.rs`
+/// (outside this task's scope); until then a sync leaves the start baseline.
+pub fn record_baselines(root: &Path, base: &str) -> Result<usize, anyhow::Error> {
     let repo = root.join(".shprd").join("config.toml");
     let Ok(config) = shprd_core::config::load(None, Some(&repo)) else {
-        return;
+        return Ok(0);
     };
     let commands = config.gates.worker;
     if commands.is_empty() {
-        return;
+        return Ok(0);
     }
-    let sha = Git::new(root).rev_parse(base).unwrap_or_default();
+    let git = Git::new(root);
+    let Ok(sha) = git.rev_parse(base) else {
+        return Ok(0);
+    };
+    let checkout = root.join(".shprd").join("baseline-checkout");
+    if checkout.exists() {
+        let _ = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["worktree", "remove", "--force"])
+            .arg(&checkout)
+            .output();
+        let _ = std::fs::remove_dir_all(&checkout);
+    }
+    let added = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["worktree", "add", "--detach"])
+        .arg(&checkout)
+        .arg(&sha)
+        .output()?;
+    if !added.status.success() {
+        return Err(anyhow!(
+            "checking out the base {sha} for its gate baseline: {}",
+            String::from_utf8_lossy(&added.stderr).trim()
+        ));
+    }
     let ran = shprd_git::gate::run_baseline(
-        root,
+        &checkout,
         &commands,
         &sha,
-        std::time::Duration::from_secs(600),
+        std::time::Duration::from_secs(BASELINE_STEP_SECS),
         &[],
     );
+    let _ = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["worktree", "remove", "--force"])
+        .arg(&checkout)
+        .output();
+    let count = ran.len();
     let mut stored = shprd_core::baseline::Baselines::default();
     for entry in ran {
         stored.upsert(entry);
     }
-    let _ = stored.save(root);
+    stored.save(root)?;
+    Ok(count)
 }
 
 /// Makes sure `branch` exists, cutting it from `base` when it does not.
@@ -412,6 +456,38 @@ mod tests {
 
     use super::*;
     use crate::cmd::spawn::fault::{Fault, FlakyMux};
+
+    #[test]
+    fn run_start_records_the_gates_as_they_fail_on_the_base() -> Result<()> {
+        let repo = TempDir::new()?;
+        let git = |args: &[&str]| -> Result<()> {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(repo.path())
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(args)
+                .output()?;
+            anyhow::ensure!(out.status.success(), "git {args:?}: {out:?}");
+            Ok(())
+        };
+        git(&["init", "-q", "-b", "main"])?;
+        std::fs::create_dir_all(repo.path().join(".shprd"))?;
+        std::fs::write(
+            repo.path().join(".shprd/config.toml"),
+            "[gates]\nworker = [\"echo '62 errors'; exit 1\"]\n",
+        )?;
+        std::fs::write(repo.path().join("a.txt"), "a")?;
+        git(&["add", "a.txt"])?;
+        git(&["commit", "-q", "-m", "base"])?;
+        let n = record_baselines(repo.path(), "main")?;
+        assert_eq!(n, 1);
+        let stored = shprd_core::baseline::Baselines::load(repo.path());
+        let entry = stored.entries.first().context("one baseline")?;
+        assert!(!entry.passed);
+        assert_eq!(entry.fingerprint.errors, Some(62));
+        assert_eq!(entry.base_sha.len(), 40);
+        Ok(())
+    }
 
     /// The run id every fixture starts, so a tab record finds its run folder.
     const RUN: &str = "rrun1";

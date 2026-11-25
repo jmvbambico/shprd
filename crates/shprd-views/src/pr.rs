@@ -323,7 +323,7 @@ fn gate_lines(task: &Task) -> Vec<String> {
                 if check.output_tail.starts_with(PRE_EXISTING_LABEL) {
                     let first = check.output_tail.lines().next().unwrap_or_default();
                     lines.push(format!(
-                        "- {} a{} `{}`: fails, {}",
+                        "- {} a{} `{}`: fails no worse than the base, {}",
                         task.id,
                         attempt.n,
                         check.gate,

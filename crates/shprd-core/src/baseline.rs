@@ -168,6 +168,11 @@ pub fn no_worse(base: &Fingerprint, now: &Fingerprint) -> bool {
         }
         comparable = true;
     }
+    // Files the base never named cannot excuse files now: a new failing file
+    // is a regression even when the error count alone would pass.
+    if base.files.is_empty() && !now.files.is_empty() {
+        return false;
+    }
     if !base.files.is_empty() && !now.files.is_empty() {
         if !now.files.iter().all(|file| base.files.contains(file)) {
             return false;
@@ -268,6 +273,15 @@ mod tests {
         base.entries[0].passed = true;
         assert_eq!(
             judge(&base, "npm run lint", "1 errors"),
+            Verdict::Regression
+        );
+    }
+
+    #[test]
+    fn a_new_failing_file_is_a_regression_when_the_base_named_none() {
+        let base = entry(62, &[]);
+        assert_eq!(
+            judge(&base, "npm run lint", "src/new.ts\n10 errors"),
             Verdict::Regression
         );
     }
