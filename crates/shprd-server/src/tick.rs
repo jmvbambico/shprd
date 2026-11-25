@@ -2775,7 +2775,7 @@ mod waiting_tests {
             ),
         });
         let fail = open_fail("T1", "prototype", &err);
-        let line = fail.line.expect("a plain line");
+        let line = fail.line.unwrap_or_default();
         assert!(line.starts_with("Couldn't merge T1: "), "{line}");
         assert!(line.contains(OPEN_FAIL), "{line}");
         assert!(line.contains("already checked out at '/repo'"), "{line}");

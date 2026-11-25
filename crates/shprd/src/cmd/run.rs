@@ -53,10 +53,10 @@ pub fn start(ctx: &Ctx, args: &RunStartArgs) -> Result<(), CliError> {
         })?;
     }
     emit(ctx, &event)?;
-    if !ctx.json {
-        if let Some(line) = int_worktree_line(ctx, &args.run_id, &args.integration) {
-            println!("{line}");
-        }
+    if !ctx.json
+        && let Some(line) = int_worktree_line(ctx, &args.run_id, &args.integration)
+    {
+        println!("{line}");
     }
     Ok(())
 }
