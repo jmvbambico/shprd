@@ -548,6 +548,7 @@ impl Worker {
         // says it on the debug channel instead. The step still runs and its
         // failure is still recorded: what goes quiet is the terminal.
         let quiet = self.quiet_failures(&state);
+        let landing = steps.iter().any(|step| matches!(step, Step::Land { .. }));
         for step in steps {
             // A wait is the task's status line and nothing more: it is reported
             // only on the pass that wrote it, so an idle queue stays quiet.
@@ -559,6 +560,11 @@ impl Worker {
             }
             let result = self.run_step(&config, &state, &step, &quiet);
             report.steps.push(result);
+        }
+        // With no land pending, the `_int` worktree must not hold the integration
+        // branch: a base sync takes it back and nothing else lets it go.
+        if !landing {
+            self.release_idle_integration(&state);
         }
         // The ladder runs after the advance steps so a task this pass just
         // started is looked at on the next one, with its record already open.
@@ -579,6 +585,34 @@ impl Worker {
             SystemClock.now_ms(),
         ));
         Ok(report)
+    }
+
+    /// Detaches the run's `_int` worktree when a command left it on the
+    /// integration branch and no landing is pending, so the person can `git
+    /// switch` to that branch in their own checkout.
+    ///
+    /// A run whose integration branch is shprd's own `<namespace><run>/int` is
+    /// left alone: no person's checkout wants that branch, and the commands
+    /// that open it expect it attached.
+    fn release_idle_integration(&self, state: &RunState) {
+        let Some(run) = state.run.as_ref() else {
+            return;
+        };
+        let Some(repo_name) = self
+            .repo
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+        else {
+            return;
+        };
+        let layout = Layout::from_settings(&self.home, &self.repo);
+        if run.integration_branch == layout.branch_name(&run.run_id, "int") {
+            return;
+        }
+        let path = layout.path(&repo_name, &run.run_id, "_int");
+        if integrate::release_if_held(&path) {
+            tracing::debug!(path = %path.display(), "released the integration worktree");
+        }
     }
 
     /// Puts a card in front of a person for every review that has been out for
@@ -748,19 +782,7 @@ impl Worker {
         let seq = self.commit(EventKind::Escalated {
             task: Some(run.task.clone()),
             body: format!("{marker}{error}"),
-            default_action: if run.step == "land" && error.contains(OPEN_FAIL) {
-                format!(
-                    "this will not clear by itself: free the branch (switch the checkout that holds it to another branch) or start the run on another integration branch; the pass after that lands it. Git's own words are above; the full error is in the log of `shprd serve` and the pass record under {}",
-                    self.state_dir.display()
-                )
-            } else if run.step == "land" {
-                String::from("the merge is tried again on the next pass")
-            } else {
-                format!(
-                    "fix what the card names, then the engine retries `{}` on its next pass",
-                    run.step
-                )
-            },
+            default_action: repeated_failure_action(&run.step, error, &self.state_dir),
         })?;
         self.notify(Some(seq));
         Ok(())
@@ -2527,6 +2549,22 @@ fn land_fail(err: LandError, task: &str) -> LandFail {
 /// to say so.
 const OPEN_FAIL: &str = "git would not open shprd's integration worktree";
 
+/// What a person can do about a step that keeps failing: a land that could not
+/// open the integration worktree will not clear by itself, so it never says the
+/// next pass retries it.
+fn repeated_failure_action(step: &str, error: &str, state_dir: &Path) -> String {
+    if step == "land" && error.contains(OPEN_FAIL) {
+        format!(
+            "this will not clear by itself: free the branch (switch the checkout that holds it to another branch) or start the run on another integration branch; the pass after that lands it. Git's own words are above; the full error is in the log of `shprd serve` and the pass record under {}",
+            state_dir.display()
+        )
+    } else if step == "land" {
+        String::from("the merge is tried again on the next pass")
+    } else {
+        format!("fix what the card names, then the engine retries `{step}` on its next pass")
+    }
+}
+
 /// The failure of opening the integration worktree: git's own reason in the
 /// line a person reads, and the full error for the log.
 fn open_fail(task: &str, branch: &str, err: &integrate::IntegrateError) -> LandFail {
@@ -2748,7 +2786,7 @@ fn waiting_message(reason: &str) -> String {
 
 #[cfg(test)]
 mod waiting_tests {
-    use super::{OPEN_FAIL, open_fail, waiting_message};
+    use super::{OPEN_FAIL, open_fail, repeated_failure_action, waiting_message};
 
     #[test]
     fn an_overlap_reads_as_a_path_in_use() {
@@ -2763,6 +2801,23 @@ mod waiting_tests {
     fn another_refusal_carries_its_reason_capped() {
         assert_eq!(waiting_message("no host"), "Waiting: no host");
         assert!(waiting_message(&"x".repeat(500)).chars().count() <= 120);
+    }
+
+    #[test]
+    fn an_unfixable_open_failure_never_says_it_is_tried_again() {
+        let err = shprd_git::integrate::IntegrateError::Git(shprd_git::git::GitError::Failed {
+            args: vec![String::from("worktree"), String::from("add")],
+            code: Some(128),
+            stderr: String::from("fatal: 'prototype' is already checked out at '/repo'"),
+        });
+        let line = open_fail("T1", "prototype", &err).line.unwrap_or_default();
+        let dir = std::path::Path::new("/state");
+        let action = repeated_failure_action("land", &line, dir);
+        assert!(!action.contains("tried again"), "{action}");
+        assert!(action.contains("will not clear by itself"), "{action}");
+        assert!(action.contains("/state"), "{action}");
+        let other = repeated_failure_action("land", "Couldn't merge T1: boom", dir);
+        assert!(other.contains("tried again on the next pass"), "{other}");
     }
 
     #[test]

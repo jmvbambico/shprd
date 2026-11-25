@@ -440,6 +440,30 @@ fn a_released_integration_worktree_leaves_the_branch_free_and_a_reopen_takes_it_
     );
 }
 
+/// A command that took the branch back (a base sync) is undone by the idle
+/// sweep, which leaves a detached or missing worktree alone.
+#[test]
+fn the_idle_sweep_releases_a_held_integration_worktree_and_only_that() {
+    let repo = Repo::new();
+    let layout = repo.layout();
+    repo.git(&["branch", "integration/m9", "main"]);
+    let int = match integrate::open_integration_branch(
+        &repo.path,
+        &layout,
+        "repo",
+        "r1",
+        "integration/m9",
+        "main",
+    ) {
+        Ok(int) => int,
+        Err(err) => panic!("open: {err}"),
+    };
+    assert!(integrate::release_if_held(&int.path), "held, so released");
+    assert!(!integrate::release_if_held(&int.path), "already detached");
+    assert!(!integrate::release_if_held(&repo.path.join("nope")));
+    repo.git(&["switch", "integration/m9"]);
+}
+
 /// A branch the person's checkout holds cannot be opened, and the error carries
 /// git's own words so the escalation can say where it is held.
 #[test]

@@ -302,6 +302,23 @@ pub fn release_integration(int: &IntegrationWorktree) -> Result<(), IntegrateErr
     Ok(())
 }
 
+/// Detaches the integration worktree at `path` when it still sits on a branch.
+///
+/// For the tick's idle sweep: a base sync (or any other command) re-takes the
+/// branch, and nothing else lets it go until the next landing. Does nothing
+/// when the path is not a worktree, is already detached, or has uncommitted
+/// work (a command may be mid-merge there). Returns true when it detached.
+pub fn release_if_held(path: &Path) -> bool {
+    if !path.join(".git").exists() {
+        return false;
+    }
+    let git = Git::new(path);
+    match (git.current_branch(), git.is_clean()) {
+        (Ok(Some(_)), Ok(true)) => git.run(&["switch", "--detach"]).is_ok(),
+        _ => false,
+    }
+}
+
 /// Creates the directory a worktree will sit in.
 fn create_parent(path: &Path) -> Result<(), IntegrateError> {
     let Some(parent) = path.parent() else {
