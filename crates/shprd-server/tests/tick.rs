@@ -3055,6 +3055,12 @@ fn a_hand_in_that_clashes_goes_back_before_its_review_and_spends_no_round() {
         task.attempts[0].reviews.is_empty(),
         "no review round was requested"
     );
+    let finding = &task.attempts[0].gates.last().expect("the gate").findings[0];
+    assert!(
+        finding.detail.contains("latest integration/m8"),
+        "the redo is told which tip to bring its work onto: {}",
+        finding.detail
+    );
 }
 
 /// A forge that holds one open pull request per task, each at its branch tip.

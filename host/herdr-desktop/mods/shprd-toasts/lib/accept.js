@@ -310,7 +310,7 @@ export function reviewLine(task) {
  * A task that already landed, or was dropped, offers nothing: the card then says
  * where the task is instead ([`whereNow`]).
  */
-export function verbs(task, policy) {
+export function verbs(task, policy, changes = null) {
   const status = task?.status;
   const live = status !== "integrated" && status !== "dropped";
   if (!live) return { accept: false, sendBack: false, drop: false, note: null };
@@ -322,8 +322,11 @@ export function verbs(task, policy) {
   // decision waiting for the person either (the row's Review follows the same word).
   const word = task?.derived?.status;
   const reviewed = word === "ready" || (status === "passed" && (word == null || word === "needs_you"));
-  const accept = reviewed && asksFirst(policy);
-  const note = reviewed && !asksFirst(policy)
+  // A task that touched a protected path it did not declare waits for the
+  // person's Accept whatever the merge policy (`protected` in its changes).
+  const waits = asksFirst(policy) || protectedLine(changes) !== null;
+  const accept = reviewed && waits;
+  const note = reviewed && !waits
     ? `tasks.merge is ${policy}: ${task?.id ?? "it"} lands without an approval`
     : null;
   // A send-back is a spawn, and the rules refuse one while the task is not

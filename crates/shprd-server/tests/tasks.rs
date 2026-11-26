@@ -241,6 +241,12 @@ fn git(dir: &Path, args: &[&str]) {
 /// while its card waits, so a diff against the wrong base is visible as files
 /// that are not T1's.
 fn with_a_task_branch() -> Fixture {
+    with_a_task_branch_also_changing(&[])
+}
+
+/// [`with_a_task_branch`] whose task also commits `extra`, which its declared
+/// paths do not name.
+fn with_a_task_branch_also_changing(extra: &[&str]) -> Fixture {
     let repo = TempDir::new().expect("repo dir");
     let root = repo.path().to_path_buf();
     git(&root, &["init", "-q", "-b", "main"]);
@@ -254,6 +260,9 @@ fn with_a_task_branch() -> Fixture {
     git(&root, &["checkout", "-q", "-b", "shprd/r1/T1"]);
     fs::write(root.join("kept.txt"), "one\nTWO\nthree\nfour\n").expect("the change");
     fs::write(root.join("new.txt"), "hello\n").expect("a new file");
+    for path in extra {
+        fs::write(root.join(path), "changed by the task\n").expect("an extra file");
+    }
     git(&root, &["add", "."]);
     git(&root, &["commit", "-q", "-m", "the task's work"]);
     git(&root, &["checkout", "-q", "integration/m10"]);
@@ -1271,6 +1280,28 @@ async fn accepting_is_refused_where_nothing_waits_for_an_acceptance() {
             .iter()
             .any(|event| matches!(&event.kind, EventKind::TaskApproved { .. })),
         "nothing was written"
+    );
+}
+
+#[tokio::test]
+async fn a_task_flagged_for_a_protected_path_is_accepted_under_auto_and_its_card_says_why() {
+    let fixture =
+        with_a_task_branch_also_changing(&["AGENTS.md"]).settings("[tasks]\nmerge = \"auto\"\n");
+    let changes = fixture
+        .send(Method::GET, "/api/tasks/T1/changes", None)
+        .await;
+    assert_eq!(changes.status, StatusCode::OK, "{:?}", changes.body);
+    assert_eq!(changes.json()["protected"], json!(["AGENTS.md"]));
+    let reply = fixture
+        .act(json!({"kind": "task.accept", "task": "T1"}))
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+    assert!(
+        fixture
+            .events()
+            .iter()
+            .any(|event| matches!(&event.kind, EventKind::TaskApproved { .. })),
+        "the person's Accept is recorded"
     );
 }
 

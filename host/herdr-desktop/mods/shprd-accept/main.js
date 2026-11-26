@@ -604,7 +604,7 @@ export default class Accept extends View {
   dialog(t) {
     const colors = tone(t);
     const task = this.selected();
-    const wired = verbs(task, this.policy);
+    const wired = verbs(task, this.policy, this.changes);
     const said = words(task);
     const settled = Boolean(task) && (task.status === "integrated" || task.status === "dropped");
     // The question is only a question where there is something to accept: a task

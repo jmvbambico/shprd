@@ -393,23 +393,26 @@ fn reopen(ctx: &Context<'_>, task: &str) -> Result<ActionReply, ApiReject> {
 ///
 /// The approval is pinned to a commit: what the person read is what they agreed
 /// to, so a branch that moved after it has to be accepted again. Where
-/// `tasks.merge` is not `ask`, nothing waits for an approval at all — the task
-/// lands on its own — and recording one would be a decision with no effect, so
-/// the action is refused instead.
+/// `tasks.merge` is not `ask`, nothing waits for an approval — the task lands
+/// on its own — and recording one would be a decision with no effect, so the
+/// action is refused instead. The exception is a task that touched a protected
+/// path it did not declare: it waits for the person's Accept whatever the
+/// policy ([`shprd_core::tick::Facts::protected`]), so its Accept is taken.
 fn accept(ctx: &Context<'_>, task: &str) -> Result<ActionReply, ApiReject> {
+    let (folded, _) = ledger::load(ctx.repo).map_err(read_error)?;
+    let found = folded
+        .tasks
+        .get(task)
+        .ok_or_else(|| ApiReject::unknown_task(task))?;
     if let Some(policy) = ctx.merge
         && policy != MergePolicy::Ask
+        && shprd_git::changed::protected_for_task(ctx.repo, &folded, found).is_empty()
     {
         let word = shprd_core::settings::merge_name(policy);
         return Err(ApiReject::refused(format!(
             "nothing waits for an acceptance: tasks.merge is {word:?}, so {task} lands on its own"
         )));
     }
-    let (folded, _) = ledger::load(ctx.repo).map_err(read_error)?;
-    let found = folded
-        .tasks
-        .get(task)
-        .ok_or_else(|| ApiReject::unknown_task(task))?;
     let number = found.pr.as_ref().map(|pr| pr.number).unwrap_or(0);
     let head = head_of(ctx.repo, found)?;
     let kind = EventKind::TaskApproved {

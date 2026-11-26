@@ -1062,6 +1062,12 @@ test("the card offers Accept only where a merge policy asks", () => {
   }
   // A service that could not say leaves the decision to the engine.
   assert.equal(verbs(ready, null).accept, true);
+  // A task flagged for a protected path waits for the person under any policy.
+  for (const policy of ["checks", "auto"]) {
+    const flagged = verbs(ready, policy, { protected: ["AGENTS.md"] });
+    assert.equal(flagged.accept, true, policy);
+    assert.equal(flagged.note, null, policy);
+  }
   // A hand-in nobody reviewed yet is not a decision for the person: the card
   // offers no Accept until a review has passed it.
   const reported = { id: "T9", status: "reported", derived: { status: "working" }, attempts: [] };

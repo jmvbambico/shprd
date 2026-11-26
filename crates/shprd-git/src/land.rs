@@ -560,19 +560,20 @@ fn clash(forge: &dyn Forge, git: &Git, base: &str, number: u64, head: &str) -> O
         .or_else(|| (forge.mergeable(number).ok().flatten() == Some(false)).then(Vec::new))
 }
 
-/// The files `branch` would conflict in if it landed on `base` now, or `None`
-/// when it merges cleanly or git cannot tell.
+/// The ref `branch` would clash with if it landed on `base` now, and the files
+/// it would conflict in, or `None` when it merges cleanly or git cannot tell.
 ///
 /// It is asked before a review is requested, so a task that clashes with work
 /// that landed after it was cut goes back at once, before any review round or
 /// Accept is spent on it. The base is the freshest one known: the local ref and
 /// `origin/<base>` (fetched first, best effort) are both tried, so a landing
-/// merged on the forge is not missed.
+/// merged on the forge is not missed. The ref is the one the worker has to
+/// bring its work onto: `origin/<base>` when only the forge holds the landing.
 pub fn clash_before_review(
     repo: &std::path::Path,
     base: &str,
     branch: &str,
-) -> Option<Vec<String>> {
+) -> Option<(String, Vec<String>)> {
     let git = Git::new(repo);
     crate::sync::refresh_base(&git, base);
     let tracking = format!("refs/remotes/{}", crate::sync::remote_ref(base));
@@ -588,9 +589,13 @@ pub fn clash_before_review(
     {
         bases.push(tracking);
     }
-    bases
-        .iter()
-        .find_map(|candidate| trial_conflicts(&git, candidate, branch))
+    bases.into_iter().find_map(|candidate| {
+        let files = trial_conflicts(&git, &candidate, branch)?;
+        let named = candidate
+            .strip_prefix("refs/remotes/")
+            .map_or_else(|| candidate.clone(), str::to_string);
+        Some((named, files))
+    })
 }
 
 /// The files a merge of `head` into `base` would leave unmerged, found with

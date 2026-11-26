@@ -1650,7 +1650,7 @@ impl Worker {
         let Some(attempt) = found.latest_attempt() else {
             return Ok(None);
         };
-        let Some(files) =
+        let Some((clashing, files)) =
             land::clash_before_review(&self.repo, &run.integration_branch, &attempt.branch)
         else {
             return Ok(None);
@@ -1664,7 +1664,9 @@ impl Worker {
             files,
             pr: None,
         };
-        let seq = self.record_conflict(found, &run.integration_branch, &err)?;
+        // The finding names the ref the work clashed with, so the redo merges
+        // the very tip it has to land on, not a stale local ref.
+        let seq = self.record_conflict(found, &clashing, &err)?;
         after_write(&self.after_write, &self.repo);
         let step = Step::Review {
             task: task.to_string(),
