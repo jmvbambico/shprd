@@ -519,6 +519,8 @@ pub enum TaskKey {
     StartNotes,
     /// Words put into a task's brief before it reports.
     FinishNotes,
+    /// Files copied or linked from the main checkout into every worktree.
+    WorktreeFiles,
     /// Seconds between two passes of the service's tick.
     TickSecs,
     /// Seconds a change must hold before the coordinator is told about it.
@@ -530,7 +532,7 @@ pub enum TaskKey {
 }
 
 /// Every `tasks.*` key, in the order a settings UI lists them.
-pub const TASK_KEYS: [TaskKey; 16] = [
+pub const TASK_KEYS: [TaskKey; 17] = [
     TaskKey::Merge,
     TaskKey::ReviewRounds,
     TaskKey::MustFix,
@@ -543,6 +545,7 @@ pub const TASK_KEYS: [TaskKey; 16] = [
     TaskKey::Branch,
     TaskKey::StartNotes,
     TaskKey::FinishNotes,
+    TaskKey::WorktreeFiles,
     TaskKey::TickSecs,
     TaskKey::NewsSettleSecs,
     TaskKey::SelfUpdate,
@@ -565,6 +568,7 @@ impl TaskKey {
             Self::Branch => "branch",
             Self::StartNotes => "start_notes",
             Self::FinishNotes => "finish_notes",
+            Self::WorktreeFiles => "worktree_files",
             Self::TickSecs => "tick_secs",
             Self::NewsSettleSecs => "news_settle_secs",
             Self::SelfUpdate => "self_update",
@@ -1544,6 +1548,10 @@ pub fn builtin() -> Layer {
     layer.set(Key::Task(TaskKey::StartNotes), Value::Text(String::new()));
     layer.set(Key::Task(TaskKey::FinishNotes), Value::Text(String::new()));
     layer.set(
+        Key::Task(TaskKey::WorktreeFiles),
+        Value::Text(String::new()),
+    );
+    layer.set(
         Key::Task(TaskKey::TickSecs),
         Value::Number(i64::try_from(config.tick.interval_secs).unwrap_or(15)),
     );
@@ -2086,6 +2094,9 @@ pub struct Tasks {
     pub start_notes: String,
     /// Words put into a task's brief before it reports.
     pub finish_notes: String,
+    /// The files to copy or link from the main checkout into every worktree:
+    /// one per line or comma-separated, `link:` before a path links it.
+    pub worktree_files: String,
     /// Seconds between two passes of the service's tick.
     pub tick_secs: u64,
     /// Seconds a change must hold before a space's coordinator is told about
@@ -2258,6 +2269,10 @@ impl Resolved {
                 .to_owned(),
             finish_notes: self
                 .text(TaskKey::FinishNotes)
+                .unwrap_or_default()
+                .to_owned(),
+            worktree_files: self
+                .text(TaskKey::WorktreeFiles)
                 .unwrap_or_default()
                 .to_owned(),
             tick_secs: u64::from(self.count(

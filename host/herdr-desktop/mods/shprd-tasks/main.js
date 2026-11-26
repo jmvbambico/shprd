@@ -582,7 +582,7 @@ export default class Tasks extends View {
     this.addError = null;
     this.sending = false;
     this.titleField = InputState.new({ placeholder: "What needs doing" });
-    this.scopeField = InputState.new({ placeholder: "src/parser, docs/usage.md" });
+    this.scopeField = InputState.new({ placeholder: "Where to start (optional): src/parser, docs/usage.md" });
     this.acceptanceField = InputState.new({ placeholder: "The board adds a task; a test says so" });
     this.depsField = InputState.new({ placeholder: "After (optional): task ids it waits for, e.g. T1, T2" });
     for (const field of [this.titleField, this.scopeField, this.acceptanceField, this.depsField]) {

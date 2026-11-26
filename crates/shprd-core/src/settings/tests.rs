@@ -478,6 +478,10 @@ fn a_repo_committed_file_may_not_widen_a_guard() {
         ("[tasks]\nmerge = \"auto\"\n", "tasks.merge"),
         ("[tasks]\nmax_running = 10\n", "tasks.max_running"),
         ("[tasks]\ngh_user = \"someone\"\n", "tasks.gh_user"),
+        (
+            "[tasks]\nworktree_files = \".env\"\n",
+            "tasks.worktree_files",
+        ),
         ("[review]\ncross_vendor = false\n", "review"),
     ] {
         std::fs::write(&path, document).expect("the file is written");
@@ -1272,5 +1276,27 @@ fn the_gh_account_is_pinned_per_repo_and_empty_by_default() {
     assert_eq!(ask("mine"), "alice");
     assert_eq!(ask("another"), "");
     let key = Key::parse("land.gh_user").expect("the alias parses");
+    assert_eq!(key.kind(), Kind::Text);
+}
+
+#[test]
+fn worktree_files_are_per_repo_text_and_empty_by_default() {
+    let file = File::parse("[repos.mine.tasks]\nworktree_files = \".env\\nlink:data\"\n")
+        .expect("the file parses");
+    let ask = |repo: &str| {
+        resolve(
+            &file,
+            &Request {
+                repo: Some(repo),
+                repo_file: None,
+                task: None,
+            },
+        )
+        .tasks()
+        .worktree_files
+    };
+    assert_eq!(ask("mine"), ".env\nlink:data");
+    assert_eq!(ask("another"), "");
+    let key = Key::parse("tasks.worktree_files").expect("the key parses");
     assert_eq!(key.kind(), Kind::Text);
 }

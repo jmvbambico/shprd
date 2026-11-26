@@ -283,41 +283,20 @@ test("a notice is a Notice with Dismiss and no decision, and a decision with no 
   assert.equal(old.notice, false);
 });
 
-test("a refused hand-in and the coordinator's widen for one task are one card with the union of their buttons", () => {
+test("asks the service gives one key are one card, and a choice reads as written", () => {
   const asks = {
     asks: [
-      {
-        id: "hand-in-refused-1-1",
-        task: "T1",
-        kind: "question",
-        text: "T1: the engine refused attempt 1's hand-in",
-        options: ["widen the scope to a/b.rs", "send it back to a new attempt"],
-        created_at_ms: 1,
-      },
-      {
-        id: "scope-widen-1",
-        task: "T1",
-        kind: "question",
-        text: "T1: widen its scope to a/b.rs?",
-        options: ["widen the scope to a/b.rs", "keep the scope"],
-        created_at_ms: 2,
-      },
+      { id: "q-1", task: "T1", kind: "question", text: "which format?", options: ["json", "toml"], created_at_ms: 1, key: "k:1" },
+      { id: "q-2", task: "T1", kind: "question", text: "which format, again?", options: ["yaml"], created_at_ms: 2, key: "k:1" },
     ],
   };
   const list = cards({ needs: [] }, asks);
   assert.equal(list.length, 1);
-  assert.equal(list[0].key, "scope:T1");
-  assert.deepEqual(list[0].buttons.map((button) => button.label), ["Allow these files", "Send back", "Keep the scope"]);
-  // Each button answers the ask that offers its choice.
-  assert.deepEqual(list[0].buttons.map((button) => button.ask), ["hand-in-refused-1-1", "hand-in-refused-1-1", "scope-widen-1"]);
-  assert.equal(choiceLabel("widen the scope to x, y"), "Allow these files");
-  // A key the service sends is believed over the one read from the id.
-  assert.equal(cards({ needs: [] }, { asks: [{ ...asks.asks[0], key: "k:1" }] })[0].key, "k:1");
-  // An ask and an escalation sharing a key are one card too.
-  const both = cards(
-    { needs: [{ seq: 9, task: "T1", body: "T1 needs its scope looked at", default_action: "wait", kind: "decision", actions: ["retry", "drop"], key: "scope:T1" }] },
-    asks,
-  );
-  assert.equal(both.length, 1);
-  assert.deepEqual(both[0].buttons.map((button) => button.label), ["Allow these files", "Send back", "Keep the scope", "Drop task\u2026"]);
+  assert.equal(list[0].key, "k:1");
+  assert.deepEqual(list[0].buttons.map((button) => button.label), ["json", "toml", "yaml"]);
+  assert.deepEqual(list[0].buttons.map((button) => button.ask), ["q-1", "q-1", "q-2"]);
+  assert.equal(choiceLabel(" widen the scope to x "), "widen the scope to x");
+  // Without a key, every ask is its own card.
+  const apart = cards({ needs: [] }, { asks: asks.asks.map(({ key, ...rest }) => rest) });
+  assert.equal(apart.length, 2);
 });

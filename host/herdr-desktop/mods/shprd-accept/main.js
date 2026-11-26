@@ -40,6 +40,7 @@ import {
   checks,
   proofs,
   commitRows,
+  protectedLine,
   canReview,
   dropReason,
   findings,
@@ -603,7 +604,7 @@ export default class Accept extends View {
   dialog(t) {
     const colors = tone(t);
     const task = this.selected();
-    const wired = verbs(task, this.policy);
+    const wired = verbs(task, this.policy, this.changes);
     const said = words(task);
     const settled = Boolean(task) && (task.status === "integrated" || task.status === "dropped");
     // The question is only a question where there is something to accept: a task
@@ -698,10 +699,12 @@ export default class Accept extends View {
     if (counts === null) return div().text_color(t.muted).child(WORDS.noChanges);
     const commits = commitRows(this.changes);
     const listed = changeRows(this.changes);
+    const flagged = protectedLine(this.changes);
     const mono = (el) => el.font_family("JetBrains Mono");
     return v_flex()
       .gap(8)
       .min_w(0)
+      .when(flagged !== null, (el) => el.child(div().text_color(colors.amber).child(flagged)))
       .child(
         h_flex()
           .gap(8)

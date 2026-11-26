@@ -1,9 +1,6 @@
-//! Which paths a branch changed, how much, and whether they stayed inside a
-//! scope.
+//! Which paths a branch changed, and how much.
 
 use std::path::Path;
-
-use shprd_core::scope;
 
 use crate::git::{Git, GitError};
 
@@ -24,11 +21,65 @@ pub struct FileStat {
     pub binary: bool,
 }
 
+/// The protected paths `branch` really changes against `base` that the task's
+/// `declared` paths do not name (see [`shprd_core::gate::protected_undeclared`]).
+///
+/// The protected list is the built-ins plus `repo`'s own `high_risk_paths`
+/// from `.agents/orchestration.yaml`. It is a flag for the person, never a
+/// refusal.
+///
+/// # Errors
+///
+/// Fails when git cannot list what the branch changed.
+pub fn protected_touches(
+    repo: &Path,
+    base: &str,
+    branch: &str,
+    declared: &[String],
+) -> Result<Vec<String>, GitError> {
+    let changed = task_changes(repo, base, branch)?;
+    let globs = shprd_core::ask::high_risk_globs_in(repo);
+    Ok(shprd_core::gate::protected_undeclared(
+        &changed, declared, &globs,
+    ))
+}
+
+/// [`protected_touches`] for `task`'s latest attempt, against the run's
+/// integration branch: what its Accept card, its pull request and the merge
+/// policy read. Best effort: a branch git cannot read flags nothing.
+pub fn protected_for_task(
+    repo: &Path,
+    state: &shprd_core::state::RunState,
+    task: &shprd_core::state::Task,
+) -> Vec<String> {
+    let (Some(run), Some(attempt)) = (state.run.as_ref(), task.latest_attempt()) else {
+        return Vec::new();
+    };
+    protected_touches(repo, &run.integration_branch, &attempt.branch, &task.scope)
+        .unwrap_or_default()
+}
+
+/// The protected paths the run's integration branch changes against its base
+/// branch that no task of the run declared: the one line the milestone pull
+/// request carries. Best effort: a branch git cannot read flags nothing.
+pub fn protected_for_run(repo: &Path, state: &shprd_core::state::RunState) -> Vec<String> {
+    let Some(run) = state.run.as_ref() else {
+        return Vec::new();
+    };
+    let declared: Vec<String> = state
+        .tasks
+        .values()
+        .filter(|task| task.status != shprd_core::state::TaskStatus::Dropped)
+        .flat_map(|task| task.scope.iter().cloned())
+        .collect();
+    protected_touches(repo, &run.base_branch, &run.integration_branch, &declared)
+        .unwrap_or_default()
+}
+
 /// The paths that differ between `base` and `head`.
 ///
 /// Renames are not detected, so a rename shows up as a deletion plus an
-/// addition: both the old and the new path have to be inside a task's scope,
-/// which is what the scope check below relies on.
+/// addition, so both the old and the new path are listed.
 pub fn changed_paths(repo: &Path, base: &str, head: &str) -> Result<Vec<String>, GitError> {
     let range = format!("{base}..{head}");
     let raw = Git::new(repo).run(&["diff", "--name-only", "-z", "--no-renames", &range])?;
@@ -37,8 +88,8 @@ pub fn changed_paths(repo: &Path, base: &str, head: &str) -> Result<Vec<String>,
 
 /// What `branch` changed on its own, measured against the current `base`.
 ///
-/// The one baseline for the hand-in check, the real-diff check before review
-/// and the landing check. The range starts at the merge base of `base` and
+/// The one baseline for the hand-in's hard-list check and the protected-path
+/// flag. The range starts at the merge base of `base` and
 /// `branch` ([`crate::sync::attempt_base`]), not at the commit the task was cut
 /// from, so a task that merged the latest base is not blamed for what the base
 /// gained. A path whose content at `branch` is the same as at `base` (or at
@@ -83,7 +134,7 @@ fn blob(git: &Git, rev: &str, path: &str) -> Option<String> {
 /// It is what the accept card's Changes section reads: the same range
 /// [`changed_paths`] walks, asked for counts instead of names. `--no-renames`
 /// for the same reason: a rename is a deletion and an addition, which is what
-/// both the count and the scope check are about.
+/// the count is about.
 pub fn file_stats(repo: &Path, base: &str, head: &str) -> Result<Vec<FileStat>, GitError> {
     let range = format!("{base}..{head}");
     let raw = Git::new(repo).run(&["diff", "--numstat", "-z", "--no-renames", &range])?;
@@ -112,21 +163,6 @@ fn parse_numstat(text: &str) -> Vec<FileStat> {
                 binary,
             })
         })
-        .collect()
-}
-
-/// The paths in `paths` that fall outside `scope`.
-///
-/// A path that cannot be normalized cannot be shown to be inside the scope,
-/// so it counts as outside. Paths are returned as they were given.
-pub fn outside_scope(paths: &[String], scope: &[String]) -> Vec<String> {
-    paths
-        .iter()
-        .filter(|path| match scope::normalize(path) {
-            Ok(normalized) => !scope::within(&normalized, scope),
-            Err(_) => true,
-        })
-        .cloned()
         .collect()
 }
 
@@ -182,34 +218,5 @@ mod tests {
     fn nul_separated_output_splits_into_paths() {
         assert_eq!(split_nul("a\0b/c\0"), strings(&["a", "b/c"]));
         assert!(split_nul("").is_empty());
-    }
-
-    #[test]
-    fn a_path_outside_the_scope_is_flagged() {
-        let scope = strings(&["crates/shprd-git"]);
-        let paths = strings(&[
-            "crates/shprd-git/src/git.rs",
-            "crates/shprd-core/src/lib.rs",
-        ]);
-        assert_eq!(
-            outside_scope(&paths, &scope),
-            strings(&["crates/shprd-core/src/lib.rs"])
-        );
-    }
-
-    #[test]
-    fn an_unusable_path_counts_as_outside() {
-        let scope = strings(&["crates/shprd-git"]);
-        let paths = strings(&["/etc/passwd", "../escape", "crates/shprd-git/src/lib.rs"]);
-        assert_eq!(
-            outside_scope(&paths, &scope),
-            strings(&["/etc/passwd", "../escape"])
-        );
-    }
-
-    #[test]
-    fn a_path_that_needs_normalizing_is_accepted_inside() {
-        let scope = strings(&["crates/shprd-git"]);
-        assert!(outside_scope(&strings(&["./crates/shprd-git/"]), &scope).is_empty());
     }
 }

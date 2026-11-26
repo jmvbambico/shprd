@@ -46,4 +46,10 @@ added: number,
 /**
  * Lines deleted across every file.
  */
-deleted: number, };
+deleted: number, 
+/**
+ * The protected paths the task changed without declaring them, sorted.
+ * The card draws them as one "Touches protected paths: …" line; empty
+ * when nothing is flagged.
+ */
+protected: Array<string>, };
