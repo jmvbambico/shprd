@@ -158,6 +158,17 @@ export function changesLine(changes) {
 }
 
 /**
+ * The one line a card shows when the task changed protected paths it did not
+ * declare (`protected` in `GET /api/tasks/<id>/changes`): "Touches protected
+ * paths: AGENTS.md, docs/plan.md". `null` when nothing is flagged. It is a flag
+ * for the person accepting, never a refusal.
+ */
+export function protectedLine(changes) {
+  const paths = Array.isArray(changes?.protected) ? changes.protected.filter(Boolean) : [];
+  return paths.length === 0 ? null : `Touches protected paths: ${paths.join(", ")}`;
+}
+
+/**
  * The newest commits the service named, and how many more there are.
  *
  * `rest` is the count past what is listed, so the card says "And 2 more" instead

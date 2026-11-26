@@ -92,6 +92,7 @@ import {
   changeRows,
   changeCounts,
   changesLine,
+  protectedLine,
   commitRows,
   canReview,
   VIEW,
@@ -867,6 +868,12 @@ test("a long summary keeps its first sentence and folds the rest away", () => {
 test("the changes are counted once, from the branch git read", () => {
   // The service names the commits too: "N commits · N files changed +a −r".
   assert.equal(changesLine(CHANGES), "7 commits · 3 files changed +6 −0");
+  assert.equal(protectedLine(CHANGES), null);
+  assert.equal(protectedLine({ protected: [] }), null);
+  assert.equal(
+    protectedLine({ protected: ["AGENTS.md", "docs/plan.md"] }),
+    "Touches protected paths: AGENTS.md, docs/plan.md",
+  );
   assert.deepEqual(changeCounts(CHANGES), { commits: "7 commits", files: "3 files changed", added: "+6", removed: "−0" });
   // An older service has no commit count, and the line is the files alone.
   assert.equal(changesLine({ files: [{ path: "a", added: 1, deleted: 2 }], added: 1, deleted: 2 }), "1 file changed +1 −2");

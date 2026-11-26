@@ -524,6 +524,7 @@ impl Worker {
             live: self.facts.live(&state),
             local: self.local,
             settled_findings: self.settled_findings(&state),
+            protected: self.protected_tasks(&state),
         };
         // The ladder's facts are read before the phases because a provider cut
         // is what makes a task read "Needs you" rather than "Working".
@@ -839,6 +840,27 @@ impl Worker {
                 let path =
                     shprd_core::review::findings_path(&reviews, &run.run_id, &task.id, attempt);
                 shprd_core::review::settled_mtime(&path).is_some()
+            })
+            .map(|task| task.id.clone())
+            .collect()
+    }
+
+    /// The tasks ready to land whose real diff touches a protected path they did
+    /// not declare: they wait for the person's Accept whatever the merge policy.
+    ///
+    /// Only a task the planner could land is read, so a pass runs git for the
+    /// few tasks at the gate and not for the whole plan. A task git cannot read
+    /// here is not flagged; its landing reads the same branch and fails loudly.
+    fn protected_tasks(&self, state: &RunState) -> BTreeSet<String> {
+        state
+            .tasks
+            .values()
+            .filter(|task| {
+                !matches!(task.status, TaskStatus::Integrated | TaskStatus::Dropped)
+                    && shprd_core::rules::ready_to_land(task).is_ok()
+            })
+            .filter(|task| {
+                !shprd_git::changed::protected_for_task(&self.repo, state, task).is_empty()
             })
             .map(|task| task.id.clone())
             .collect()
@@ -1937,7 +1959,10 @@ impl Worker {
             &self.home,
             &run.run_id,
             task,
-            &pr::task_pr_body_marked(found),
+            &pr::task_pr_body_flagged(
+                found,
+                &shprd_git::changed::protected_for_task(&self.repo, state, found),
+            ),
         )
         .map_err(|err| LandFail::at(task, "writing the pull request text", err))?;
         let forge = self.forge();

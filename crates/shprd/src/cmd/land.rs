@@ -215,7 +215,7 @@ fn land_task(
         );
     }
     let title = format!("{task_id}: {}", task.title);
-    let body = render_task_body(task);
+    let body = render_task_body(ctx, &state, task);
     let home = resolve_home(home)?;
     let repo_name = repo_name(ctx)?;
     // Held from here to the merge: a spawn replacing the attempt meanwhile
@@ -539,8 +539,9 @@ fn record_landing(
 ///
 /// Landing refuses a task without an engine-recorded cross-vendor review, so
 /// the marker is a claim the log already proves by the time this runs.
-fn render_task_body(task: &Task) -> String {
-    shprd_views::pr::task_pr_body_marked(task)
+fn render_task_body(ctx: &Ctx, state: &RunState, task: &Task) -> String {
+    let protected = shprd_git::changed::protected_for_task(&ctx.root, state, task);
+    shprd_views::pr::task_pr_body_flagged(task, &protected)
 }
 
 /// Writes one task's pull request body under shprd's own home.
@@ -658,7 +659,11 @@ fn open(
         .run
         .as_ref()
         .ok_or_else(|| CliError::other(anyhow!("no run to land")))?;
-    let body = render_body(state, events);
+    let body = render_body(
+        state,
+        events,
+        &shprd_git::changed::protected_for_run(&ctx.root, state),
+    );
     let body_file = write_body(worktree, &body)?;
     let title = match integrated.first() {
         Some(task) => format!("{}: {}", run.run_id, task.title),
@@ -738,8 +743,8 @@ fn write_body(worktree: &integrate::IntegrationWorktree, body: &str) -> Result<P
 }
 
 /// The pull request body: the run's facts, the review marker, the attribution.
-fn render_body(state: &RunState, events: &[Event]) -> String {
-    let mut body = shprd_views::pr::pr_body(state, events);
+fn render_body(state: &RunState, events: &[Event], protected: &[String]) -> String {
+    let mut body = shprd_views::pr::pr_body_flagged(state, events, protected);
     if !body.ends_with('\n') {
         body.push('\n');
     }

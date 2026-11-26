@@ -234,6 +234,10 @@ pub struct ContractInput<'a> {
     /// path inside the packet)`. A proof the worker named that is not here
     /// could not be copied, and the contract says so.
     pub proof_copies: &'a [(String, Option<String>)],
+    /// The protected paths the attempt's real diff touches that the task did
+    /// not declare ([`shprd_git::changed::protected_touches`]). Flagged for the
+    /// reviewer, never refused.
+    pub protected: &'a [String],
 }
 
 /// Renders the contract a reviewer checks the diff against.
@@ -273,6 +277,11 @@ pub fn render_contract(input: &ContractInput<'_>) -> String {
         "\nA change elsewhere is fine when the task needs it: judge whether each change serves \
          the task, and name one it did not need in a finding.\n",
     );
+    if let Some(line) = shprd_core::gate::protected_line(input.protected) {
+        out.push_str(&format!(
+            "\n{line}. The task did not name them: say in a finding whether it needed them.\n"
+        ));
+    }
     out.push_str(&asks_section(&task.id, attempt, input.asks));
     out.push_str("\n## What the agent reported\n\n");
     let report = attempt.and_then(|attempt| attempt.report.as_ref());
@@ -571,6 +580,15 @@ fn write_packet(env: &ReviewEnv<'_>, task: &Task, attempt: &Attempt) -> Result<P
         CliError::other(anyhow!(err).context(format!("creating {}", dir.display())))
     })?;
     write_file(&dir.join("diff.patch"), &diff)?;
+    // The protected flag reads the same real diff, against the current base. A
+    // flag git could not compute is left off: the person still sees the diff.
+    let protected = shprd_git::changed::protected_touches(
+        &env.spawn.ctx.root,
+        &env.spawn.base_branch,
+        &attempt.branch,
+        &task.scope,
+    )
+    .unwrap_or_default();
     // The attempt's own asks come from the fold, which is the only place an
     // answer is recorded: the reviewer reads the same answer the worker did.
     let state = env.spawn.ctx.state()?;
@@ -590,6 +608,7 @@ fn write_packet(env: &ReviewEnv<'_>, task: &Task, attempt: &Attempt) -> Result<P
             task,
             asks: &asks,
             proof_copies: &proof_copies,
+            protected: &protected,
         }),
     )?;
     write_file(&dir.join("findings.schema.json"), &schema_text()?)?;
@@ -2524,6 +2543,7 @@ project_dirs = []
             task,
             asks: &asks,
             proof_copies: &[],
+            protected: &[],
         })
     }
 
@@ -2540,6 +2560,7 @@ project_dirs = []
             task: &task,
             asks: &[],
             proof_copies: &[],
+            protected: &[],
         });
         assert!(
             contract.contains("## Where the task was expected to work (a hint, not a limit)"),
@@ -2554,6 +2575,17 @@ project_dirs = []
         ] {
             assert!(!contract.contains(word), "{word:?} in {contract}");
         }
+        assert!(!contract.contains("Touches protected paths"), "{contract}");
+        let flagged = render_contract(&ContractInput {
+            task: &task,
+            asks: &[],
+            proof_copies: &[],
+            protected: &["AGENTS.md".to_string()],
+        });
+        assert!(
+            flagged.contains("Touches protected paths: AGENTS.md. The task did not name them"),
+            "{flagged}"
+        );
     }
 
     #[test]

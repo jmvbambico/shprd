@@ -273,10 +273,14 @@ const MAX_OFFERED: usize = 5;
 /// The longest a widening option's text may be, in characters.
 const MAX_OPTION_CHARS: usize = 200;
 
-/// Whether `path` is one a widening is never offered as one click: deploy
-/// workflows, `AGENTS.md`, `go.mod`/`go.sum`, `package.json`, anything under
-/// `.agents/`, and anything matching one of the repo's own `globs` (its
-/// `high_risk_paths`).
+/// Whether `path` is protected: deploy workflows, `AGENTS.md`,
+/// `go.mod`/`go.sum`, `package.json`, anything under `.agents/`, and anything
+/// matching one of the repo's own `globs` (the `high_risk_paths` of its
+/// `.agents/orchestration.yaml`, see [`crate::ask::high_risk_globs_in`]).
+///
+/// This is the one protected list. A task may change a protected path; when
+/// it did not declare it, the path is flagged where the person decides (the
+/// review contract, the Accept card, the pull request), never refused.
 pub fn is_high_risk_path(path: &str, globs: &[String]) -> bool {
     let path = path.trim_start_matches("./");
     let name = path.rsplit('/').next().unwrap_or_default();
@@ -284,6 +288,39 @@ pub fn is_high_risk_path(path: &str, globs: &[String]) -> bool {
         || (path.starts_with(".github/workflows/") && path.to_lowercase().contains("deploy"))
         || matches!(name, "AGENTS.md" | "go.mod" | "go.sum" | "package.json");
     builtin || globs.iter().any(|glob| glob_matches(glob, path))
+}
+
+/// The protected paths in `changed` that `declared` does not name, sorted and
+/// without repeats: what a task touched in the protected list without saying
+/// so. Naming a path (or a folder above it) in the task is the "says so".
+pub fn protected_undeclared(
+    changed: &[String],
+    declared: &[String],
+    globs: &[String],
+) -> Vec<String> {
+    let declared: Vec<String> = declared
+        .iter()
+        .filter_map(|entry| crate::scope::normalize(entry).ok())
+        .collect();
+    let mut out: Vec<String> = changed
+        .iter()
+        .filter_map(|path| crate::scope::normalize(path).ok())
+        .filter(|path| is_high_risk_path(path, globs))
+        .filter(|path| {
+            !declared
+                .iter()
+                .any(|entry| path == entry || path.starts_with(&format!("{entry}/")))
+        })
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// What a flagged task's review contract, Accept card and pull request say:
+/// `Touches protected paths: a, b`, or `None` when nothing is flagged.
+pub fn protected_line(paths: &[String]) -> Option<String> {
+    (!paths.is_empty()).then(|| format!("Touches protected paths: {}", paths.join(", ")))
 }
 
 /// A small glob: `*` matches within a segment, `**` across segments, and a
@@ -738,9 +775,10 @@ mod tests {
         ROUNDS_SPENT_OPTIONS, SEND_BACK_CHOICE, WIDEN_CHOICE, after_failure, answer_leaves_a_verb,
         answered_rounds_body, card_attempt, decide, failed_review_rounds, hand_in_refused_choice,
         hand_in_refused_options, hand_in_refused_options_for, high_risk_globs_from_yaml,
-        latest_failed_review, provenance, rounds_spent_answer, rounds_spent_ask, rounds_spent_body,
-        rounds_spent_followup, rounds_spent_prefix, rounds_spent_verb_ran,
-        send_back_failure_prefix, verdict, widen_note, widen_offer,
+        latest_failed_review, protected_line, protected_undeclared, provenance,
+        rounds_spent_answer, rounds_spent_ask, rounds_spent_body, rounds_spent_followup,
+        rounds_spent_prefix, rounds_spent_verb_ran, send_back_failure_prefix, verdict, widen_note,
+        widen_offer,
     };
     use crate::config::Review;
     use crate::event::{EventKind, Finding, ReviewSource, Severity};
@@ -1383,5 +1421,34 @@ mod tests {
             &state_of(vec![other.clone(), ok]),
             &other
         ));
+    }
+
+    #[test]
+    fn an_undeclared_protected_path_is_flagged_and_a_declared_one_is_not() {
+        let globs = vec!["docs/".to_string(), ".github/**".to_string()];
+        let changed = vec![
+            "src/a.rs".to_string(),
+            "docs/plan.md".to_string(),
+            "AGENTS.md".to_string(),
+            ".github/workflows/ci.yml".to_string(),
+            "Cargo.lock".to_string(),
+        ];
+        assert_eq!(
+            protected_undeclared(&changed, &["src".to_string()], &globs),
+            vec![".github/workflows/ci.yml", "AGENTS.md", "docs/plan.md"]
+        );
+        assert_eq!(
+            protected_undeclared(
+                &changed,
+                &["docs".to_string(), "AGENTS.md".to_string()],
+                &globs
+            ),
+            vec![".github/workflows/ci.yml"]
+        );
+        assert_eq!(
+            protected_line(&["AGENTS.md".to_string()]).as_deref(),
+            Some("Touches protected paths: AGENTS.md")
+        );
+        assert_eq!(protected_line(&[]), None);
     }
 }

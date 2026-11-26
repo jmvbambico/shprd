@@ -1,8 +1,8 @@
-//! Changed-path detection and scope checking, against real git.
+//! Changed-path detection and the protected-path flag, against real git.
 
 mod support;
 
-use shprd_git::changed::{changed_paths, task_changes};
+use shprd_git::changed::{changed_paths, protected_touches, task_changes};
 
 use support::Repo;
 
@@ -148,4 +148,33 @@ fn a_path_with_the_same_content_as_the_base_is_not_the_tasks_change() {
         Err(err) => panic!("task changes: {err}"),
     };
     assert_eq!(paths, strings(&["mine.txt"]));
+}
+
+#[test]
+fn the_repos_own_list_and_the_built_ins_flag_undeclared_protected_paths() {
+    let repo = Repo::new();
+    repo.commit(
+        ".agents/orchestration.yaml",
+        "high_risk_paths:\n  - docs/\n",
+        "protect docs",
+    );
+    repo.git(&["checkout", "-b", "t1"]);
+    repo.commit("src/a.rs", "a\n", "work");
+    repo.commit("docs/plan.md", "plan\n", "docs");
+    repo.commit("AGENTS.md", "rules\n", "rules");
+    repo.git(&["checkout", "main"]);
+    let flagged = match protected_touches(&repo.path, "main", "t1", &strings(&["src"])) {
+        Ok(paths) => paths,
+        Err(err) => panic!("protected touches: {err}"),
+    };
+    assert_eq!(flagged, strings(&["AGENTS.md", "docs/plan.md"]));
+    let declared = match protected_touches(&repo.path, "main", "t1", &strings(&["src", "docs"])) {
+        Ok(paths) => paths,
+        Err(err) => panic!("protected touches: {err}"),
+    };
+    assert_eq!(
+        declared,
+        strings(&["AGENTS.md"]),
+        "a declared path is not flagged"
+    );
 }

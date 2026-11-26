@@ -55,7 +55,8 @@ pub fn override_verb(ctx: &Ctx, args: &OverrideArgs) -> Result<(), CliError> {
     }
     let state = ctx.state()?;
     let question = question(&state, &task, &rule, &args.reason)?;
-    let risky = rule == ACCEPT_OUTSIDE_SCOPE && has_high_risk_path(&args.reason);
+    let globs = shprd_core::ask::high_risk_globs_in(&ctx.root);
+    let risky = rule == ACCEPT_OUTSIDE_SCOPE && has_high_risk_path(&args.reason, &globs);
     // `--yes` never answers a high-risk question: only the task id typed back.
     let ok = if risky {
         typed_confirmation(&task, &question)?
@@ -112,32 +113,13 @@ pub fn question(
     ))
 }
 
-/// Directories whose whole subtree is high-risk.
-const HIGH_RISK_DIRS: &[&str] = &[".github", ".shprd", "data/skills", "assets", "docs"];
-
-/// File names that are high-risk wherever they sit.
-const HIGH_RISK_FILES: &[&str] = &[
-    "AGENTS.md",
-    "LICENSE",
-    "Cargo.toml",
-    "Cargo.lock",
-    "rust-toolchain.toml",
-];
-
-/// Whether any path a scope override lists is high-risk: it steers the repo's
-/// rules, build, release or secrets rather than the feature at hand.
-pub fn has_high_risk_path(reason: &str) -> bool {
-    scope_override_paths(reason).iter().any(|path| {
-        let path = path.trim_start_matches("./");
-        let name = path.rsplit('/').next().unwrap_or(path);
-        HIGH_RISK_DIRS
-            .iter()
-            .any(|dir| path == *dir || path.strip_prefix(dir).is_some_and(|r| r.starts_with('/')))
-            || HIGH_RISK_FILES.contains(&name)
-            || name.starts_with(".env")
-            || name.contains("secret")
-            || name.contains("credential")
-    })
+/// Whether any path a scope override lists is protected: the one protected
+/// list ([`shprd_core::gate::is_high_risk_path`]) with the repo's own
+/// `high_risk_paths` `globs`.
+pub fn has_high_risk_path(reason: &str, globs: &[String]) -> bool {
+    scope_override_paths(reason)
+        .iter()
+        .any(|path| shprd_core::gate::is_high_risk_path(path, globs))
 }
 
 /// Asks for the task id typed back, which a stray `y` cannot answer.
@@ -374,16 +356,18 @@ mod tests {
 
     #[test]
     fn high_risk_paths_need_the_typed_confirmation() {
-        assert!(super::has_high_risk_path(
-            "paths=src/a.rs,.github/ci.yml; x"
-        ));
-        assert!(super::has_high_risk_path("paths=AGENTS.md; x"));
-        assert!(super::has_high_risk_path("paths=crates/x/Cargo.toml; x"));
-        assert!(!super::has_high_risk_path("paths=src/a.rs; x"));
-        assert!(!super::has_high_risk_path("paths=AGENTS.md.bak; x"));
-        assert!(!super::has_high_risk_path("paths=src/sesame.rs,docsx/a; x"));
-        assert!(super::has_high_risk_path("paths=docs/a.md; x"));
-        assert!(super::has_high_risk_path("paths=src/secret_sauce.rs; x"));
+        let globs = vec![".github/".to_string(), "docs/".to_string()];
+        let risky = |reason: &str| super::has_high_risk_path(reason, &globs);
+        assert!(risky("paths=src/a.rs,.github/ci.yml; x"));
+        assert!(risky("paths=AGENTS.md; x"));
+        assert!(risky("paths=docs/a.md; x"));
+        assert!(!risky("paths=src/a.rs; x"));
+        assert!(!risky("paths=AGENTS.md.bak; x"));
+        assert!(!risky("paths=src/sesame.rs,docsx/a; x"));
+        assert!(
+            !risky("paths=crates/x/Cargo.toml; x"),
+            "manifests are not protected"
+        );
     }
 
     #[test]

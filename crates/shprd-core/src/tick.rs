@@ -135,6 +135,13 @@ pub struct Facts {
     /// this fact: reading and judging the file is the executor's work.
     #[serde(default)]
     pub settled_findings: BTreeSet<String>,
+    /// The tasks whose real diff touches a protected path they did not declare
+    /// ([`crate::gate::protected_undeclared`]).
+    ///
+    /// Such a task never lands by itself: under an automatic merge policy it
+    /// waits for the person's Accept, as under `ask`. Nothing is refused.
+    #[serde(default)]
+    pub protected: BTreeSet<String>,
 }
 
 impl Facts {
@@ -395,6 +402,13 @@ fn step_for(
     let landed = matches!(task.status, TaskStatus::Integrated | TaskStatus::Dropped);
     if !busy && !landed && !nothing_to_merge && rules::ready_to_land(task).is_ok() {
         let policy = input.config.land.policy_for(landing_target);
+        // A task that touched a protected path it did not declare is the
+        // person's to accept, whatever the merge policy says.
+        let policy = if facts.protected.contains(&task.id) {
+            MergePolicy::Ask
+        } else {
+            policy
+        };
         let land = Step::Land {
             task: task.id.clone(),
             policy,
@@ -1139,6 +1153,23 @@ mod tests {
                 policy: MergePolicy::Auto,
             }]
         );
+    }
+
+    #[test]
+    fn a_task_flagged_for_a_protected_path_waits_for_accept_under_auto() {
+        let state = folded(&ready_log("A"));
+        let mut facts = Facts {
+            local: true,
+            ..Facts::default()
+        };
+        facts.protected.insert("A".to_string());
+        for policy in [MergePolicy::Auto, MergePolicy::Checks] {
+            let steps = plan_for(&state, &facts, &config(policy, 4));
+            assert!(
+                matches!(steps.as_slice(), [Step::NeedsYou { task, .. }] if task == "A"),
+                "{policy:?}: {steps:?}"
+            );
+        }
     }
 
     #[test]

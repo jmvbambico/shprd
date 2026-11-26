@@ -121,7 +121,10 @@ pub fn propose_verb(ctx: &Ctx, args: &ProposeArgs) -> Result<(), CliError> {
     let id = format!("{PROPOSE_ASK_PREFIX}{word}-{}", earlier + 1);
     let mut text = body(&args.task, args.verb, &subject, &args.reason);
     if subject == shprd_core::rules::ACCEPT_OUTSIDE_SCOPE
-        && crate::cmd::override_rule::has_high_risk_path(&args.reason)
+        && crate::cmd::override_rule::has_high_risk_path(
+            &args.reason,
+            &shprd_core::ask::high_risk_globs_in(&ctx.root),
+        )
     {
         text.push_str(&format!(
             "\nhigh-risk paths: confirming needs the task id `{}` typed back",
