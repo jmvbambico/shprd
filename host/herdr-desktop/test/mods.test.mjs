@@ -1052,6 +1052,14 @@ test("the review line names the reviewer and whether it was independent", () => 
   assert.deepEqual(reviewLine(none), { line: WORDS.noReview, degraded: false });
 });
 
+test("a failed task a person accepted offers Accept", () => {
+  const failed = { ...boardTask("T2"), status: "failed", derived: { status: "needs_you" } };
+  assert.equal(verbs(failed, "ask").accept, false);
+  const accepted = { ...failed, derived: { status: "ready" }, accepted_failure: true };
+  assert.equal(verbs(accepted, "ask").accept, true);
+  assert.equal(verbs(accepted, "checks").accept, false);
+});
+
 test("the card offers Accept only where a merge policy asks", () => {
   const ready = boardTask("T2");
   assert.equal(verbs(ready, "ask").accept, true);

@@ -321,7 +321,7 @@ export function verbs(task, policy, changes = null) {
   // A passed task whose agent took the work up again reads Working: that is not a
   // decision waiting for the person either (the row's Review follows the same word).
   const word = task?.derived?.status;
-  const reviewed = word === "ready" || (status === "passed" && (word == null || word === "needs_you"));
+  const reviewed = word === "ready" || task?.accepted_failure === true || (status === "passed" && (word == null || word === "needs_you"));
   // A task that touched a protected path it did not declare waits for the
   // person's Accept whatever the merge policy (`protected` in its changes).
   const waits = asksFirst(policy) || protectedLine(changes) !== null;

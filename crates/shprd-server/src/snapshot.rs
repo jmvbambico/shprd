@@ -176,6 +176,7 @@ pub(crate) fn task_of(state: &RunState, task: &shprd_core::state::Task, now_ms: 
             .find_map(|tag| tag.strip_prefix("phase:"))
             .map(|word| word.trim().to_string())
             .filter(|word| !word.is_empty()),
+        accepted_failure: shprd_core::rules::accepted_after_failure(task),
         added_at_ms: task.added_at_ms,
         touched_at_ms: task.touched_at_ms,
     }
