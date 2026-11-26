@@ -151,7 +151,8 @@ def main():
         check("3 the reply shows live", bool(live), str(texts[-4:]))
         check("4 the question shows once, as the person's own", len(users) == 1, str(len(users)))
         check("5 shprd's news stays a notice", len(news) >= 1 and not any("shprd-news" in (m.get("text") or "") for m in users), str(len(news)))
-        time.sleep(4)
+        # the open tab follows the record live: give its poll time, then look
+        time.sleep(25)
         sc.shot(e, out, "1-live-question-and-reply")
         # a reload: the page opens from nothing at the newest messages
         sc.app_do(e, "tab.new", space=space, name="Reloaded", mod="shprd-chat", props=json.dumps({"space": "coordinator"}))
