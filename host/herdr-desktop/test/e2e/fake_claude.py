@@ -76,9 +76,10 @@ def ask(spec, number):
     try:
         tty.setraw(fd)
         at = 0
+        typed = ""
         count = len(q["options"]) + 1
         while answer is None:
-            dialog(q, at)
+            dialog(q, at, typed if at == len(q["options"]) else None)
             k = key()
             if k == "down":
                 at = min(at + 1, count - 1)
@@ -88,17 +89,12 @@ def ask(spec, number):
                 if at < len(q["options"]):
                     answer = q["options"][at]["label"]
                 else:
-                    typed = ""
-                    while True:
-                        dialog(q, at, typed)
-                        k2 = key()
-                        if k2 == "enter":
-                            break
-                        if k2 == "backspace":
-                            typed = typed[:-1]
-                        elif len(k2) == 1:
-                            typed += k2
-                    answer = "(typed) " + typed
+                    # Like the real dialog: an empty Enter on the Type row declines.
+                    answer = "(declined)" if typed == "" else "(typed) " + typed
+            elif at == len(q["options"]) and k == "backspace":
+                typed = typed[:-1]
+            elif at == len(q["options"]) and len(k) == 1:
+                typed += k
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
     out.write("\x1b[2J\x1b[H")

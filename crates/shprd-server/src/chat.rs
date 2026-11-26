@@ -385,18 +385,19 @@ fn question_dto(pending: &PendingQuestion) -> ChatQuestionDto {
 
 /// The keys that answer a one-question, one-choice dialog, the same a person
 /// presses: Down to the row, Enter. `choice` is 0-based; the row after the last
-/// option is "Type something", which opens a text line the answer is typed into
-/// and Enter sends.
+/// option is "Type something", an inline text row: once the cursor is on it the
+/// answer is typed straight in and Enter sends. A leading Enter there would
+/// submit it empty, and claude declines the question (checked against a real
+/// claude dialog, claude 2.1.332).
 pub fn answer_steps(choice: usize, text: Option<&str>) -> Vec<AnswerStep> {
     let mut steps: Vec<AnswerStep> = (0..choice)
         .map(|_| AnswerStep::Key(TermKey::Down))
         .collect();
-    steps.push(AnswerStep::Key(TermKey::Enter));
     if let Some(text) = text {
         let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
         steps.push(AnswerStep::Text(one_line));
-        steps.push(AnswerStep::Key(TermKey::Enter));
     }
+    steps.push(AnswerStep::Key(TermKey::Enter));
     steps
 }
 

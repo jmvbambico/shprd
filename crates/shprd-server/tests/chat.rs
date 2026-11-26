@@ -1394,7 +1394,7 @@ async fn answering_with_words_goes_to_type_something_types_them_and_presses_ente
         ))
         .await;
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
-    // Two options, so "Type something" is the third row: two Downs.
+    // Two options, so "Type something" is the third row: two Downs, then the words typed in place.
     assert_eq!(
         *fixture.recorder.answers.lock().unwrap(),
         [(
@@ -1402,7 +1402,6 @@ async fn answering_with_words_goes_to_type_something_types_them_and_presses_ente
             vec![
                 AnswerStep::Key(TermKey::Down),
                 AnswerStep::Key(TermKey::Down),
-                AnswerStep::Key(TermKey::Enter),
                 AnswerStep::Text("later, please".to_string()),
                 AnswerStep::Key(TermKey::Enter),
             ]

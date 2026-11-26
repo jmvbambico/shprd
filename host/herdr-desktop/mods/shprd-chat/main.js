@@ -1460,7 +1460,7 @@ export default class Chat extends View {
           .gap(6)
           .rounded(RADIUS.card)
           .border_1()
-          .border_color(lit ? t.foreground : refused ? colors.red : card_.notice ? t.border : tone_)
+          .border_color(refused ? colors.red : lit ? t.foreground : card_.notice ? t.border : tone_)
           .bg(lit ? t.selected ?? t.raised : t.raised)
           .child(div().text_size(TEXT.id).font_medium().text_color(tone_).child(card_.title))
           .child(div().text_size(TEXT.body).text_color(t.foreground).child(card_.text))
