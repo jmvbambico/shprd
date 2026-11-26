@@ -141,6 +141,29 @@ pub fn refresh_base(git: &Git, base: &str) {
     let _ = fetch_base(git, base);
 }
 
+/// The freshest commit of `base` a new task worktree should be cut from.
+///
+/// `base`'s remote-tracking ref is fetched first (best effort). When it holds
+/// commits the local `base` does not, and the local ref is behind it rather
+/// than apart from it, the tracking ref's commit is the synced tip: a task
+/// redone after a landing merged on the forge starts from that landing, not
+/// from a stale local ref. Otherwise `base` itself is the answer. The local ref
+/// is never moved.
+pub fn freshest_base(git: &Git, base: &str) -> String {
+    refresh_base(git, base);
+    let tracking = format!("refs/remotes/{}", remote_ref(base));
+    let (Ok(local), Ok(remote)) = (git.rev_parse(base), git.rev_parse(&tracking)) else {
+        return base.to_string();
+    };
+    if local == remote {
+        return base.to_string();
+    }
+    match git.run(&["merge-base", "--is-ancestor", &local, &remote]) {
+        Ok(_) => remote,
+        Err(_) => base.to_string(),
+    }
+}
+
 /// The commit a task branch was cut from: the start of the branch's own change.
 ///
 /// Diffing a task against this commit gives only what the task did. The local

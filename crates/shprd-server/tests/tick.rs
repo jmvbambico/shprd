@@ -2975,6 +2975,88 @@ fn clashing_and_clean(fixture: &Fixture) -> [(PathBuf, String); 2] {
     [a, b]
 }
 
+#[test]
+fn a_hand_in_that_clashes_goes_back_before_its_review_and_spends_no_round() {
+    // clash-early: A's branch edits proof.log, which the integration branch has
+    // since deleted. The pass finds that before it starts a reviewer: A gets
+    // the landing's failed integrate gate, no reviewer runs, and the next pass
+    // redoes it without counting a review round.
+    let fixture = Fixture::new(vec![started()]);
+    let [(tree_a, _), _] = clashing_and_clean(&fixture);
+    git_in(&fixture.repo, &["branch", "integration/m8", "main"]);
+    for event in [
+        added(2, "A"),
+        ev(
+            3,
+            EventKind::Spawned {
+                task: String::from("A"),
+                attempt: 1,
+                agent: String::from("claude"),
+                model: None,
+                worktree: tree_a.display().to_string(),
+                branch: String::from("shprd/r1/A"),
+            },
+        ),
+        ev(
+            4,
+            EventKind::Reported {
+                task: String::from("A"),
+                attempt: 1,
+                status: ReportStatus::Completed,
+                summary: String::from("done"),
+                tests: Vec::new(),
+                checks: vec![CheckReport {
+                    gate: String::from("tests"),
+                    command: String::from("cargo test"),
+                    exit_code: Some(0),
+                    output_tail: String::new(),
+                }],
+                changed_paths: Vec::new(),
+                commit: None,
+                skills_used: Vec::new(),
+                proofs: Vec::new(),
+            },
+        ),
+    ] {
+        append(&fixture, event.actor, event.kind);
+    }
+    fixture
+        .settings("version = 1\n\n[roles.reviewer]\nagent = \"codex\"\nmodel = \"gpt-5-codex\"\n");
+    let reviewed = Arc::new(Mutex::new(Vec::new()));
+    let recorded = Arc::clone(&reviewed);
+    let review: shprd_server::Reviewer = Arc::new(move |_repo: &Path, task: &str| {
+        recorded
+            .lock()
+            .map_err(|_| String::from("the call log is poisoned"))?
+            .push(task.to_string());
+        Ok(format!("started a reviewer on {task}"))
+    });
+    let mut worker = fixture.worker(
+        Arc::new(Scripted::default()),
+        Arc::new(NoForge),
+        config(shprd_core::config::MergePolicy::Ask),
+        recording_start(Arc::new(Mutex::new(Vec::new()))),
+    );
+    worker.review = Some(review);
+    let report = worker.tick().expect("the pass ran");
+    assert!(report.ok(), "{:?}", report.steps);
+    assert!(
+        reviewed.lock().expect("calls").is_empty(),
+        "no reviewer is started on work that cannot land"
+    );
+    let state = fixture.state();
+    let task = &state.tasks["A"];
+    assert!(
+        shprd_core::rules::landing_conflict(task),
+        "{:?}",
+        task.attempts
+    );
+    assert!(
+        task.attempts[0].reviews.is_empty(),
+        "no review round was requested"
+    );
+}
+
 /// A forge that holds one open pull request per task, each at its branch tip.
 fn forge_with(tasks: &[(&str, u64, &str)]) -> Arc<SharedFake> {
     Arc::new(SharedFake::new(

@@ -560,6 +560,39 @@ fn clash(forge: &dyn Forge, git: &Git, base: &str, number: u64, head: &str) -> O
         .or_else(|| (forge.mergeable(number).ok().flatten() == Some(false)).then(Vec::new))
 }
 
+/// The files `branch` would conflict in if it landed on `base` now, or `None`
+/// when it merges cleanly or git cannot tell.
+///
+/// It is asked before a review is requested, so a task that clashes with work
+/// that landed after it was cut goes back at once, before any review round or
+/// Accept is spent on it. The base is the freshest one known: the local ref and
+/// `origin/<base>` (fetched first, best effort) are both tried, so a landing
+/// merged on the forge is not missed.
+pub fn clash_before_review(
+    repo: &std::path::Path,
+    base: &str,
+    branch: &str,
+) -> Option<Vec<String>> {
+    let git = Git::new(repo);
+    crate::sync::refresh_base(&git, base);
+    let tracking = format!("refs/remotes/{}", crate::sync::remote_ref(base));
+    let mut bases = vec![base.to_string()];
+    if git
+        .run(&[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{tracking}^{{commit}}"),
+        ])
+        .is_ok()
+    {
+        bases.push(tracking);
+    }
+    bases
+        .iter()
+        .find_map(|candidate| trial_conflicts(&git, candidate, branch))
+}
+
 /// The files a merge of `head` into `base` would leave unmerged, found with
 /// `git merge-tree`, which writes objects but touches no worktree and no ref.
 /// `None` when the merge is clean or git could not tell.

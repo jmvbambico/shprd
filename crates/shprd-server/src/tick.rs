@@ -1603,6 +1603,9 @@ impl Worker {
     /// for ever with nothing in the ledger saying why. The escalation names the
     /// failure and the one verb that recovers it.
     fn review_task(&self, state: &RunState, task: &str) -> Result<StepReport, String> {
+        if let Some(report) = self.clash_before_review(state, task)? {
+            return Ok(report);
+        }
         let review = self
             .review
             .as_ref()
@@ -1626,6 +1629,50 @@ impl Worker {
         self.notify(seq);
         after_write(&self.after_write, &self.repo);
         Ok(StepReport::done(&step, detail, seq))
+    }
+
+    /// Sends a hand-in back before its review when its branch would clash with
+    /// the integration branch as it stands now.
+    ///
+    /// The clash is recorded exactly as a landing records one (a failed
+    /// `integrate` gate and a ledger note), so the planner redoes the task at
+    /// once without spending a review round, and the person never Accepts work
+    /// that cannot land. `None` when the branch merges cleanly or git cannot
+    /// tell, and the review goes ahead.
+    fn clash_before_review(
+        &self,
+        state: &RunState,
+        task: &str,
+    ) -> Result<Option<StepReport>, String> {
+        let (Some(run), Some(found)) = (state.run.as_ref(), state.tasks.get(task)) else {
+            return Ok(None);
+        };
+        let Some(attempt) = found.latest_attempt() else {
+            return Ok(None);
+        };
+        let Some(files) =
+            land::clash_before_review(&self.repo, &run.integration_branch, &attempt.branch)
+        else {
+            return Ok(None);
+        };
+        let head = Git::new(&self.repo)
+            .rev_parse(&attempt.branch)
+            .unwrap_or_default();
+        let err = LandError::Conflict {
+            commit: head,
+            files,
+            pr: None,
+        };
+        let seq = self.record_conflict(found, &run.integration_branch, &err)?;
+        after_write(&self.after_write, &self.repo);
+        let step = Step::Review {
+            task: task.to_string(),
+        };
+        Ok(Some(StepReport::done(
+            &step,
+            conflict_message(task, &err),
+            seq,
+        )))
     }
 
     /// Passes a task on its own checks because review is off.
