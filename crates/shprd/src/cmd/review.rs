@@ -570,27 +570,11 @@ fn listed(name: &str, items: &[String]) -> String {
 ///
 /// It describes exactly what [`shprd_core::event::Finding`] deserializes, so
 /// findings that satisfy the schema are findings a gate can read unchanged. An
-/// empty array is valid: a review that found nothing is a passing review.
+/// empty array is valid: a review that found nothing is a passing review. The
+/// object `{findings, decisions}` is valid too: decisions are the worker's
+/// disclosed choices, kept apart from the defects.
 pub fn findings_schema() -> Value {
-    json!({
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "title": "shprd review findings",
-        "type": "array",
-        "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["severity", "title", "detail"],
-            "properties": {
-                "severity": {
-                    "type": "string",
-                    "enum": ["critical", "major", "minor", "trivial"]
-                },
-                "title": { "type": "string", "minLength": 1 },
-                "location": { "type": "string" },
-                "detail": { "type": "string", "minLength": 1 }
-            }
-        }
-    })
+    shprd_core::review::report_schema()
 }
 
 /// The diff between `branch` and its merge base with `base`, run in `repo`.
@@ -2578,8 +2562,13 @@ project_dirs = []
         )
         .unwrap_or_else(|err| panic!("{err}"));
         assert_eq!(
-            schema["items"]["properties"]["severity"]["enum"][0],
+            schema["oneOf"][0]["items"]["properties"]["severity"]["enum"][0],
             "critical"
+        );
+        // A reviewer may also write `{findings, decisions}`.
+        assert_eq!(
+            schema["oneOf"][1]["properties"]["decisions"]["items"]["required"][0],
+            "title"
         );
 
         let brief = std::fs::read_to_string(&report.brief).unwrap_or_else(|err| panic!("{err}"));
