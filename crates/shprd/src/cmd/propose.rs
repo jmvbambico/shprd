@@ -52,21 +52,6 @@ pub fn body(task: &str, verb: ProposedVerb, subject: &str, reason: &str) -> Stri
     format!("{task}: run `{what}`?\nreason: {}", reason.trim())
 }
 
-/// Why a proposal of `rule` cannot be confirmed as written, or `None`.
-///
-/// A scope override covers only the paths its reason lists, so a proposal
-/// without them would be confirmed into an override that lets nothing through.
-pub fn scope_proposal_problem(rule: &str, reason: &str) -> Option<String> {
-    (rule == shprd_core::rules::ACCEPT_OUTSIDE_SCOPE
-        && shprd_core::rules::scope_override_paths(reason).is_empty())
-    .then(|| {
-        format!(
-            "{rule} needs the paths it lets through: start `--reason` with \
-             `paths=src/a.rs,src/b; why`"
-        )
-    })
-}
-
 /// Raises the card that proposes `verb` on a task.
 pub fn propose_verb(ctx: &Ctx, args: &ProposeArgs) -> Result<(), CliError> {
     let state = ctx.state()?;
@@ -89,9 +74,6 @@ pub fn propose_verb(ctx: &Ctx, args: &ProposeArgs) -> Result<(), CliError> {
                     "an override proposal names a rule with `--rule`: one of {}",
                     shprd_core::rules::OVERRIDE_RULES.join(", ")
                 )));
-            }
-            if let Some(why) = scope_proposal_problem(rule, &args.reason) {
-                return Err(CliError::Invalid(anyhow!(why)));
             }
             rule.to_string()
         }
@@ -119,15 +101,7 @@ pub fn propose_verb(ctx: &Ctx, args: &ProposeArgs) -> Result<(), CliError> {
         })
         .count();
     let id = format!("{PROPOSE_ASK_PREFIX}{word}-{}", earlier + 1);
-    let mut text = body(&args.task, args.verb, &subject, &args.reason);
-    if subject == shprd_core::rules::ACCEPT_OUTSIDE_SCOPE
-        && crate::cmd::override_rule::has_high_risk_path(&args.reason)
-    {
-        text.push_str(&format!(
-            "\nhigh-risk paths: confirming needs the task id `{}` typed back",
-            args.task
-        ));
-    }
+    let text = body(&args.task, args.verb, &subject, &args.reason);
     let options = vec![
         confirm_choice(args.verb, &subject),
         LEAVE_IT_CHOICE.to_string(),
@@ -177,13 +151,5 @@ mod tests {
         );
         let text = body("T1", ProposedVerb::Drop, "", " stuck ");
         assert!(text.ends_with("\nreason: stuck"), "{text}");
-    }
-
-    #[test]
-    fn a_scope_proposal_must_list_its_paths() {
-        let rule = shprd_core::rules::ACCEPT_OUTSIDE_SCOPE;
-        assert!(scope_proposal_problem(rule, "needed it").is_some());
-        assert!(scope_proposal_problem(rule, "paths=src/a.rs; needed").is_none());
-        assert!(scope_proposal_problem("integrate_after_failed_gate", "x").is_none());
     }
 }

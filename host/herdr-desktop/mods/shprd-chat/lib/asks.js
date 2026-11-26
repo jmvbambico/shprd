@@ -142,36 +142,18 @@ export const ACTION_BUSY = {
 /** The busy word of a button that answers an ask. */
 export const ANSWER_BUSY = "Sending\u2026";
 
-/** The words a choice of a scope card begins with (`shprd_core::gate::WIDEN_CHOICE`). */
-const WIDEN_CHOICE = "widen the scope to ";
-/** The choice that stops the attempt and starts another (`SEND_BACK_CHOICE`). */
-const SEND_BACK_CHOICE = "send it back to a new attempt";
-/** The choice that leaves a scope as it is (`KEEP_SCOPE_CHOICE`). */
-const KEEP_SCOPE_CHOICE = "keep the scope";
-/** The ids of the two asks that are one scope question. */
-const SCOPE_ASK_PREFIXES = ["scope-widen-", "hand-in-refused-"];
-
-/** The button word of a choice an ask offers: the scope choices read as short verbs, the rest as written. */
+/** The button word of a choice an ask offers: the choice as written. */
 export function choiceLabel(option) {
-  const text = String(option ?? "").trim();
-  if (text.startsWith(WIDEN_CHOICE)) return "Allow these files";
-  if (text === SEND_BACK_CHOICE) return "Send back";
-  if (text === KEEP_SCOPE_CHOICE) return "Keep the scope";
-  return text;
+  return String(option ?? "").trim();
 }
 
 /**
- * The key of an ask: cards with one key are one question.
- *
- * A service that sends one is believed; the two scope asks of a task (a refused
- * hand-in's and a widening verb's) share `scope:<task>`, the same key
- * `shprd_core::ask::scope_key` gives them.
+ * The key of an ask: cards with one key are one question. A service that sends
+ * one is believed; otherwise every ask is its own question.
  */
 export function askKey(ask) {
   if (typeof ask?.key === "string" && ask.key !== "") return ask.key;
-  const id = String(ask?.id ?? "");
-  if (ask?.task && SCOPE_ASK_PREFIXES.some((prefix) => id.startsWith(prefix))) return `scope:${ask.task}`;
-  return `ask:${ask?.task ?? ""}:${id}`;
+  return `ask:${ask?.task ?? ""}:${String(ask?.id ?? "")}`;
 }
 
 /** One button that answers one ask with one of its choices. */

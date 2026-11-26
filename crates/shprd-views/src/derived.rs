@@ -489,9 +489,7 @@ impl TaskSignal {
                 .values()
                 .filter(|ask| ask.task == id && ask.answer.is_none())
                 .filter(|ask| !ask.is_retired_by_newer_attempt(task))
-                .filter(|ask| {
-                    !shprd_core::ask::is_moot_scope_card(id, &ask.id, &ask.options, &task.scope)
-                })
+                .filter(|ask| !shprd_core::ask::is_scope_card(&ask.id))
                 .map(|ask| AskFacts {
                     kind: ask.kind,
                     text: ask.text.clone(),
@@ -1959,8 +1957,8 @@ mod tests {
 
     #[test]
     #[allow(clippy::expect_used)]
-    fn a_widened_scope_leaves_no_open_scope_card_offering_only_scoped_paths() {
-        use shprd_core::ask::{AskKind, scope_widen_options};
+    fn an_open_scope_card_from_an_old_log_is_not_drawn() {
+        use shprd_core::ask::AskKind;
         let at = |seq: u64, kind: EventKind| Event {
             seq,
             at_ms: NOW + seq,
@@ -1981,14 +1979,13 @@ mod tests {
                 },
             )
         };
-        // The refused-hand-in card offers two widen choices; the person's
-        // question is not a scope card and stays whatever the scope.
-        let mut options = scope_widen_options(&[String::from("docs/a.md")]);
-        options.insert(
-            1,
-            scope_widen_options(&[String::from("docs/b.md")])[0].clone(),
-        );
-        let mut events = vec![
+        // The cards an older build raised, with its old choices.
+        let options = vec![
+            String::from("widen the scope to docs/a.md"),
+            String::from("widen the scope to docs/b.md"),
+            String::from("send it back to a new attempt"),
+        ];
+        let events = vec![
             at(
                 1,
                 EventKind::RunStarted {
@@ -2014,7 +2011,10 @@ mod tests {
             ask(
                 4,
                 "scope-widen-1",
-                scope_widen_options(&[String::from("docs/a.md")]),
+                vec![
+                    String::from("widen the scope to docs/a.md"),
+                    String::from("keep the scope"),
+                ],
             ),
             ask(5, "ask-1", vec![]),
         ];
@@ -2025,24 +2025,8 @@ mod tests {
                 .open_asks
                 .len()
         };
-        assert_eq!(open(&events), 3);
-        // docs/a.md is widened: the widen card is moot, but the refused card
-        // still offers docs/b.md.
-        events.push(at(
-            6,
-            EventKind::ScopeWidened {
-                task: String::from("T1"),
-                paths: vec![String::from("docs/a.md")],
-            },
-        ));
-        assert_eq!(open(&events), 2);
-        events.push(at(
-            7,
-            EventKind::ScopeWidened {
-                task: String::from("T1"),
-                paths: vec![String::from("docs/b.md")],
-            },
-        ));
+        // Declared paths are a hint now: every scope card a log still holds
+        // open is moot, and only the person's own question is left.
         assert_eq!(open(&events), 1, "only the person's own question is left");
     }
 

@@ -825,29 +825,6 @@ pub enum TaskCommand {
     /// The same verb as `shprd agent report`; this is the spelling a worker's
     /// brief uses.
     Report(ReportArgs),
-    /// Propose a wider scope for a task: the person decides, once, on a card.
-    ///
-    /// Raises one needs-you card on the task naming the paths and the reason,
-    /// with the choices `widen the scope to <paths>` and `keep the scope`.
-    /// Nothing is widened by this verb: only the person's answer writes the
-    /// scope-widened event (a non-human actor cannot), and on a `widen` the
-    /// task's live worker is sent one message naming the newly allowed paths.
-    /// With no worker live, the next attempt's brief lists them.
-    Widen(TaskWidenArgs),
-}
-
-/// Arguments for `agent task widen`.
-#[derive(Debug, Args)]
-pub struct TaskWidenArgs {
-    /// The task whose scope is proposed wider.
-    #[arg(long, value_name = "ID")]
-    pub task: String,
-    /// A path the task may also change; repeatable.
-    #[arg(long = "scope", value_name = "PATH", required = true)]
-    pub scope: Vec<String>,
-    /// Why the task needs them, in one sentence for the person.
-    #[arg(long, value_name = "TEXT")]
-    pub reason: String,
 }
 
 /// The ask verbs.
@@ -1031,8 +1008,9 @@ pub struct TaskAddArgs {
     /// One-line title.
     #[arg(long, value_name = "TITLE")]
     pub title: String,
-    /// Repo-relative path the task may change; repeatable.
-    #[arg(long = "scope", value_name = "PATH", required = true)]
+    /// Repo-relative path where the task is expected to work; repeatable and
+    /// optional. A hint for its worker, never a limit.
+    #[arg(long = "scope", value_name = "PATH")]
     pub scope: Vec<String>,
     /// What must be true when the task is done; repeatable.
     #[arg(long = "acceptance", value_name = "TEXT", required = true)]

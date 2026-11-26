@@ -27,6 +27,14 @@ use shprd_core::state::{OverrideRecord, RunState, Task, TaskStatus};
 /// `## Escalations` (the count, then the bodies). A section with nothing to
 /// report says `none`.
 pub fn pr_body(state: &RunState, events: &[Event]) -> String {
+    pr_body_flagged(state, events, &[])
+}
+
+/// [`pr_body`] with the integration branch's undeclared protected paths: one
+/// line, `Touches protected paths: …`, under `## Protected paths`, so the person
+/// gating the pull request sees them. Nothing is flagged when `protected` is
+/// empty, and the section then says `none`.
+pub fn pr_body_flagged(state: &RunState, events: &[Event], protected: &[String]) -> String {
     let mut out: Vec<String> = Vec::new();
     out.push("## Tasks".to_string());
     out.push(String::new());
@@ -40,6 +48,11 @@ pub fn pr_body(state: &RunState, events: &[Event]) -> String {
             out.push(task_row(task, events));
         }
     }
+
+    out.push(String::new());
+    out.push("## Protected paths".to_string());
+    out.push(String::new());
+    out.push(shprd_core::gate::protected_line(protected).unwrap_or_else(|| "none".to_string()));
 
     out.push(String::new());
     out.push("## Dropped".to_string());
@@ -119,7 +132,20 @@ pub const ATTRIBUTION: &str = "🤖 Generated with [Claude Code](https://claude.
 /// `land` verb compose one body, byte for byte: a body a reviewer read through
 /// one path is the body the other refreshes.
 pub fn task_pr_body_marked(task: &Task) -> String {
+    task_pr_body_flagged(task, &[])
+}
+
+/// [`task_pr_body_marked`] with the protected paths the task's diff touches
+/// that it did not declare: one `Touches protected paths: …` line under the
+/// summary, so the person accepting the pull request sees it.
+pub fn task_pr_body_flagged(task: &Task, protected: &[String]) -> String {
     let mut body = task_pr_body(task);
+    if let Some(line) = shprd_core::gate::protected_line(protected) {
+        body = match body.split_once("\n## Task\n") {
+            Some((head, tail)) => format!("{head}\n{line}\n\n## Task\n{tail}"),
+            None => format!("{body}\n\n{line}"),
+        };
+    }
     if !body.ends_with('\n') {
         body.push('\n');
     }
@@ -755,5 +781,27 @@ mod tests {
             body.contains("- two gates disagree on the panic policy"),
             "{body}"
         );
+    }
+
+    #[test]
+    fn a_flagged_task_body_and_run_body_name_the_protected_paths() {
+        let state = RunState::default();
+        let body = pr_body_flagged(&state, &[], &["AGENTS.md".to_string()]);
+        assert!(
+            body.contains("## Protected paths\n\nTouches protected paths: AGENTS.md\n"),
+            "{body}"
+        );
+        assert!(pr_body(&state, &[]).contains("## Protected paths\n\nnone\n"));
+        let state = fixture::state();
+        let task = match state.tasks.get("M1.1") {
+            Some(task) => task,
+            None => panic!("the fixture has M1.1"),
+        };
+        let flagged = task_pr_body_flagged(task, &[".agents/x.yaml".to_string()]);
+        assert!(
+            flagged.contains("Touches protected paths: .agents/x.yaml\n\n## Task\n"),
+            "{flagged}"
+        );
+        assert!(!task_pr_body_marked(task).contains("Touches protected paths"));
     }
 }

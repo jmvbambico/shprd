@@ -918,6 +918,11 @@ pub struct TaskChangesDto {
     pub added: u64,
     /// Lines deleted across every file.
     pub deleted: u64,
+    /// The protected paths the task changed without declaring them, sorted.
+    /// The card draws them as one "Touches protected paths: …" line; empty
+    /// when nothing is flagged.
+    #[serde(default)]
+    pub protected: Vec<String>,
 }
 
 /// How many commits `GET /api/tasks/{id}/changes` names; the count covers all.

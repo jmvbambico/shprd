@@ -1248,14 +1248,17 @@ fn uses_worktrees(env: &SpawnEnv<'_>) -> bool {
     env.settings.resolve(None).tasks().worktrees
 }
 
-/// The branch a new worktree is cut from: `tasks.base` when it names one, else
-/// the run's integration branch.
+/// What a new worktree is cut from: `tasks.base` when it names one, else the
+/// run's integration branch, at its freshest commit
+/// ([`shprd_git::sync::freshest_base`]): a task redone after a landing merged
+/// on the forge starts from that landing, not from a stale local ref.
 fn base_for_new_work(env: &SpawnEnv<'_>) -> String {
     let tasks = env.settings.resolve(None).tasks();
-    match tasks.base.trim() {
+    let base = match tasks.base.trim() {
         "" => env.base_branch.clone(),
         base => base.to_owned(),
-    }
+    };
+    shprd_git::sync::freshest_base(&Git::new(&env.ctx.root), &base)
 }
 
 /// Where an attempt works and the branch it commits on.
@@ -7669,7 +7672,7 @@ off = ["--no-fast"]
             "claude-opus-5-5",
             "## Acceptance criteria",
             "spawn opens a tab",
-            "## Scope — change only these paths",
+            "## Where to start — a hint, not a limit",
             "crates/shprd",
             "## Skills to load first",
             "- tdd",
