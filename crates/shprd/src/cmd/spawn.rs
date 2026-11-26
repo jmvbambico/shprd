@@ -7669,7 +7669,7 @@ off = ["--no-fast"]
             "claude-opus-5-5",
             "## Acceptance criteria",
             "spawn opens a tab",
-            "## Scope — change only these paths",
+            "## Where to start — a hint, not a limit",
             "crates/shprd",
             "## Skills to load first",
             "- tdd",
