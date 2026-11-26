@@ -2919,6 +2919,28 @@ project_dirs = []
     }
 
     #[test]
+    fn a_review_the_service_starts_reuses_the_resolved_host() {
+        let home = tempfile::tempdir().unwrap_or_else(|err| panic!("{err}"));
+        let repo = tempfile::tempdir().unwrap_or_else(|err| panic!("{err}"));
+        let ctx = Ctx::new(repo.path().to_path_buf(), Actor::Human, false, true);
+        let probe = crate::host::Probe {
+            core: Some("0.1.22".to_string()),
+            window: true,
+            ..Default::default()
+        };
+        let counts = crate::host::test_select::install(probe);
+        // The service resolved at start.
+        let _ = crate::host::select();
+        // Starting a review (the task does not exist, so it fails after the host
+        // is picked) and starting one again must not probe the machine again.
+        let _ = start_review(&ctx, home.path(), "no-such-task", false);
+        let _ = start_review(&ctx, home.path(), "no-such-task", true);
+        crate::host::test_select::uninstall();
+        assert_eq!(counts.resolves.get(), 1, "one probe for the whole service");
+        assert_eq!(counts.opens.get(), 3, "each review still opens the host");
+    }
+
+    #[test]
     fn a_worker_on_a_router_is_never_assumed_independent() {
         // `kilo/kilo-auto/free` names no model family, so nothing proves the
         // reviewer differs. A wrong-but-passing review is worse than a

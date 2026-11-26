@@ -118,7 +118,7 @@ pub struct Probe {
     pub herdr: bool,
     /// Whether the `tuios` binary is on `PATH`.
     pub tuios: bool,
-    /// Whether a herdr server is running: its socket is there. `auto` falls
+    /// Whether a herdr server is running: the herdr CLI got an answer from it. `auto` falls
     /// back to the herdr TUI only when this is true.
     pub herdr_running: bool,
 }
@@ -330,7 +330,79 @@ pub fn resolve() -> Resolution {
 /// next call resolves afresh — that is the "connection lost, and comes back"
 /// case. A resolution that found no running host is never kept.
 pub fn select() -> (Resolution, Box<dyn Host>) {
+    #[cfg(test)]
+    if let Some(result) = test_select::run() {
+        return result;
+    }
     select_in(&STICKY, resolve, open)
+}
+
+/// A test's own slot, resolver and opener in place of the machine's, so a test
+/// can drive a verb that calls [`select`] and count what it asked.
+#[cfg(test)]
+pub(crate) mod test_select {
+    use super::*;
+    use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
+
+    /// What the fake machine was asked.
+    #[derive(Default)]
+    pub(crate) struct Counts {
+        /// Times the machine was probed.
+        pub resolves: Cell<u32>,
+        /// Times a host was opened.
+        pub opens: Cell<u32>,
+    }
+
+    struct Installed {
+        slot: Mutex<Option<Resolution>>,
+        counts: Rc<Counts>,
+        probe: Probe,
+    }
+
+    thread_local! {
+        static INSTALLED: RefCell<Option<Installed>> = const { RefCell::new(None) };
+    }
+
+    /// Replace the machine, on this thread, with a desktop that answers; the
+    /// returned counts say how often it was probed and opened.
+    pub(crate) fn install(probe: Probe) -> Rc<Counts> {
+        let counts = Rc::new(Counts::default());
+        INSTALLED.with(|cell| {
+            *cell.borrow_mut() = Some(Installed {
+                slot: Mutex::new(None),
+                counts: counts.clone(),
+                probe,
+            });
+        });
+        counts
+    }
+
+    /// Put the real machine back.
+    pub(crate) fn uninstall() {
+        INSTALLED.with(|cell| *cell.borrow_mut() = None);
+    }
+
+    pub(super) fn run() -> Option<(Resolution, Box<dyn Host>)> {
+        INSTALLED.with(|cell| {
+            let cell = cell.borrow();
+            let installed = cell.as_ref()?;
+            Some(select_in(
+                &installed.slot,
+                || {
+                    installed
+                        .counts
+                        .resolves
+                        .set(installed.counts.resolves.get() + 1);
+                    choose(HostChoice::Auto, installed.probe.clone())
+                },
+                |_| {
+                    installed.counts.opens.set(installed.counts.opens.get() + 1);
+                    Box::new(shprd_mux_herdr::HerdrMux::with_bin("/usr/bin/true"))
+                },
+            ))
+        })
+    }
 }
 
 /// [`select`] over a slot, a resolver and an opener, so the keeping can be
@@ -340,9 +412,14 @@ fn select_in(
     resolve: impl FnOnce() -> Resolution,
     open: impl FnOnce(&mut Resolution) -> Box<dyn Host>,
 ) -> (Resolution, Box<dyn Host>) {
+    // One select at a time: two callers in the same tick must not both probe.
+    let _one_at_a_time = SELECTING.lock().unwrap_or_else(|p| p.into_inner());
     let kept = kept_slot(slot).clone();
     let mut resolution = kept.clone().unwrap_or_else(resolve);
-    if kept.is_none() && !resolution.running {
+    if kept.is_none()
+        && !resolution.running
+        && !NOTHING_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed)
+    {
         eprintln!("warning: {}", resolution.why);
     }
     let host = open(&mut resolution);
@@ -354,6 +431,13 @@ fn select_in(
     }
     (resolution, host)
 }
+
+/// Serialises [`select_in`] so the read-resolve-write is one step.
+static SELECTING: Mutex<()> = Mutex::new(());
+
+/// Set once the "nothing is running" warning has been printed, so a hostless
+/// machine is told once, not on every spawn and review.
+static NOTHING_WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// The resolution this process keeps; see [`select`].
 static STICKY: Mutex<Option<Resolution>> = Mutex::new(None);
@@ -427,7 +511,7 @@ fn probe(setting: HostChoice) -> Probe {
         core_problem: None,
         herdr: on_path("herdr"),
         tuios: on_path("tuios"),
-        herdr_running: herdr_socket().is_some_and(|socket| socket_answers(&socket)),
+        herdr_running: on_path("herdr") && herdr_server_answers(&shprd_mux_herdr::HerdrMux::new()),
     };
     let ask_core = attached || setting == HostChoice::HerdrDesktop;
     if ask_core {
@@ -437,10 +521,7 @@ fn probe(setting: HostChoice) -> Probe {
         // there". This branch only runs when a window is attached or the desktop
         // was named, so no ordinary resolve pays for the longer wait.
         match ask_core_with_retry(|timeout| {
-            HcHost::core_version(&endpoint, timeout).map_err(|error| ProbeError {
-                timed_out: matches!(error, shprd_mux_hc::Error::Timeout { .. }),
-                message: error.to_string(),
-            })
+            HcHost::core_version(&endpoint, timeout).map_err(probe_error)
         }) {
             Ok(version) => probe.core = Some(version),
             Err(error) => probe.core_problem = Some(error.message),
@@ -468,6 +549,14 @@ fn ask_core_with_retry(
     }
 }
 
+/// Classify a client error: only [`shprd_mux_hc::Error::Timeout`] is "slow".
+fn probe_error(error: shprd_mux_hc::Error) -> ProbeError {
+    ProbeError {
+        timed_out: matches!(error, shprd_mux_hc::Error::Timeout { .. }),
+        message: error.to_string(),
+    }
+}
+
 /// Why a core probe failed, and whether it was only slow.
 #[derive(Debug, PartialEq, Eq)]
 struct ProbeError {
@@ -477,23 +566,15 @@ struct ProbeError {
     message: String,
 }
 
-/// Whether something listens on the socket: a leftover socket file from a herdr
-/// that exited is not a running server.
-fn socket_answers(socket: &Path) -> bool {
-    std::os::unix::net::UnixStream::connect(socket).is_ok()
-}
-
-/// Where the `herdr` command this adapter runs will look for its server:
-/// `$HERDR_SOCKET_PATH`, else `~/.config/herdr/herdr.sock`. It is the same
-/// place the herdr adapter's own calls reach (it passes the variable through
-/// unchanged), so "is it running" is asked of the server a call would use, not of
-/// a guess. `None` when neither can be named.
-fn herdr_socket() -> Option<PathBuf> {
-    if let Some(path) = env_value("HERDR_SOCKET_PATH") {
-        return Some(PathBuf::from(path));
-    }
-    let home = env_value("HOME")?;
-    Some(PathBuf::from(home).join(".config/herdr/herdr.sock"))
+/// Whether a herdr TUI server is running: the `herdr` adapter lists its
+/// workspaces, the very call a spawn or a review makes first.
+///
+/// A socket that merely accepts a connection is not proof: `HERDR_SOCKET_PATH`
+/// in an hc child names the Herdr desktop's own socket, which listens but is not
+/// a herdr server, and a leftover socket file from a herdr that exited is not one
+/// either. Only a server that answers the herdr CLI counts.
+fn herdr_server_answers(mux: &shprd_mux_herdr::HerdrMux) -> bool {
+    mux.list_spaces().is_ok()
 }
 
 /// Whether a program is on `PATH`.
@@ -555,6 +636,7 @@ mod tests {
 
     use super::{Host, HostKind, Probe, Resolution, choose};
     use shprd_core::settings::HostChoice;
+    use std::path::{Path, PathBuf};
     use std::sync::Mutex;
 
     /// A machine with nothing on it.
@@ -631,6 +713,31 @@ mod tests {
         assert!(!chosen.why.starts_with("auto picked"), "{}", chosen.why);
         let chosen = choose(HostChoice::Auto, nothing());
         assert!(chosen.running, "a running herdr is still the answer");
+    }
+
+    #[test]
+    fn spawns_and_reviews_reuse_the_service_resolution() {
+        let counts = super::test_select::install(desktop());
+        // The service resolves at start; spawns start later through `spawn::real_mux`, and
+        // none probes again; the review path is tested in `cmd::review`.
+        let (first, _) = super::select();
+        assert_eq!(first.kind, HostKind::HerdrDesktop);
+        let _spawn = crate::cmd::spawn::real_mux();
+        let _spawn_again = crate::cmd::spawn::real_mux();
+        super::test_select::uninstall();
+        assert_eq!(counts.resolves.get(), 1, "the machine was probed once");
+        assert_eq!(counts.opens.get(), 3, "every caller still gets a host");
+    }
+
+    #[test]
+    fn only_a_timeout_is_classified_as_slow() {
+        let slow = super::probe_error(shprd_mux_hc::Error::Timeout {
+            method: "core.version".into(),
+            after: std::time::Duration::from_secs(1),
+        });
+        assert!(slow.timed_out);
+        let refused = super::probe_error(shprd_mux_hc::Error::Unreachable("no core".into()));
+        assert!(!refused.timed_out);
     }
 
     #[test]
@@ -753,17 +860,66 @@ mod tests {
         assert!(slot.lock().unwrap().is_none());
     }
 
+    /// A `herdr` stand-in that answers `workspace list` as the real CLI does: a
+    /// result from a herdr server's socket (`herdr.sock`), `server_not_running`
+    /// from anything else, and from no listener at all.
+    fn fake_herdr(dir: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = dir.join("herdr");
+        std::fs::write(
+            &bin,
+            r#"#!/bin/sh
+case "$HERDR_SOCKET_PATH" in
+  */herdr.sock) [ -S "$HERDR_SOCKET_PATH" ] && python3 -c 'import socket,sys; socket.socket(socket.AF_UNIX).connect(sys.argv[1])' "$HERDR_SOCKET_PATH" 2>/dev/null && { echo '{"id":"cli:workspace:list","result":{"type":"workspace_list","workspaces":[]}}'; exit 0; } ;;
+esac
+echo '{"id":"cli:workspace:list","error":{"code":"server_not_running","message":"no herdr server is running"}}'
+exit 1
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        bin
+    }
+
     #[test]
-    fn a_stale_socket_file_is_not_a_running_herdr() {
-        let dir = std::env::temp_dir().join(format!("shprd-sock-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("herdr.sock");
-        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
-        assert!(super::socket_answers(&path), "a listener answers");
-        drop(listener); // the file stays, nobody listens
-        assert!(path.exists());
-        assert!(!super::socket_answers(&path), "a stale file does not");
-        std::fs::remove_dir_all(&dir).unwrap();
+    fn herdr_running_is_true_only_for_a_live_herdr_server_socket() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = fake_herdr(dir.path());
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let mux = |socket: &Path| {
+            shprd_mux_herdr::HerdrMux::with_bin(&bin).with_environment(socket, &home)
+        };
+
+        // The desktop's socket, as an hc child sees it in HERDR_SOCKET_PATH: it
+        // listens, so the old "does it accept a connection" check said running.
+        let desktop = dir.path().join("desktop-core.sock");
+        let _desktop = std::os::unix::net::UnixListener::bind(&desktop).unwrap();
+        assert!(
+            std::os::unix::net::UnixStream::connect(&desktop).is_ok(),
+            "the desktop socket accepts connections"
+        );
+        assert!(
+            !super::herdr_server_answers(&mux(&desktop)),
+            "a listening desktop socket is not a herdr server"
+        );
+
+        // A leftover herdr.sock whose server exited.
+        let tui = dir.path().join("herdr.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&tui).unwrap();
+        assert!(
+            super::herdr_server_answers(&mux(&tui)),
+            "a live herdr server"
+        );
+        drop(listener);
+        assert!(tui.exists());
+        assert!(
+            !super::herdr_server_answers(&mux(&tui)),
+            "a stale socket file is not a server"
+        );
+        // And no herdr binary at all.
+        let missing = shprd_mux_herdr::HerdrMux::with_bin(dir.path().join("none"));
+        assert!(!super::herdr_server_answers(&missing));
     }
 
     #[test]
