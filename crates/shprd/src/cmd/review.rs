@@ -1577,23 +1577,59 @@ fn deliver_review_turn(
     } else {
         (rendered, "review brief")
     };
+    let started = std::time::Instant::now();
     let delivery = deliver_review_brief(mux, env, reviewer, tab, text);
     let Some(reason) = delivery.reason() else {
         return Ok(());
     };
+    let waited_ms = started.elapsed().as_millis();
     eprintln!("warning: {what} not delivered: {reason}; the brief is beside the review packet");
+    let state = env.spawn.ctx.state().ok();
+    let reviews = state
+        .as_ref()
+        .and_then(|state| state.tasks.get(task))
+        .and_then(|entry| entry.latest_attempt())
+        .map(|attempt| attempt.reviews.as_slice())
+        .unwrap_or_default();
+    let request_seq = reviews.last().map(|request| request.seq);
+    // A reviewer that is already working, or whose review already has a result,
+    // got its turn after all: the detection was late, not the delivery lost.
+    let answered = state
+        .as_ref()
+        .and_then(|state| state.tasks.get(task))
+        .and_then(|entry| entry.latest_attempt())
+        .is_some_and(|attempt| {
+            attempt.gates.iter().any(|gate| {
+                gate.gate == shprd_core::gate::REVIEW_GATE
+                    && request_seq.is_some_and(|seq| gate.seq > seq)
+            })
+        });
+    let working = matches!(
+        mux.agent_state(&tab.root_pane),
+        Ok(shprd_mux::AgentState::Working)
+    );
+    if answered || working {
+        eprintln!("note: the reviewer is already working, so no escalation is raised");
+        return Ok(());
+    }
+    // With more than one review request on the attempt the card says which it is about.
+    let which = match request_seq {
+        Some(seq) if reviews.len() > 1 => format!(" (review request #{seq})"),
+        _ => String::new(),
+    };
     let escalation = EventKind::Escalated {
         task: Some(task.to_string()),
         // The ledger says which turn was lost, the way the warning does: a
         // kickoff that never arrived and a brief that never arrived are fixed
         // the same way but are different causes to read.
         body: match delivery.blocked_by(&reviewer.agent) {
-            Some(cause) => format!("{what} not delivered: {cause}"),
-            None => format!("{what} not delivered"),
+            Some(cause) => format!("{what} not delivered: {cause}{which}"),
+            None => format!("{what} not delivered{which}"),
         },
         default_action: format!(
             "press Retry review on the task in the Tasks pane, which closes the reviewer \
-             tab and delivers the {what} again ({reason}); never type into the reviewer's tab"
+             tab and delivers the {what} again ({reason}; tried for {waited_ms} ms in all); \
+             never type into the reviewer's tab"
         ),
     };
     if let Err(err) = env.spawn.ctx.commit(escalation) {
@@ -3384,6 +3420,70 @@ project_dirs = []
         assert!(prompts(&mux).is_empty(), "nothing may be typed in");
     }
 
+    fn kickoff_env<'a>(scratch: &Scratch, ctx: &'a Ctx) -> ReviewEnv<'a> {
+        scratch.review_env_with(
+            ctx,
+            Some("codex/m1"),
+            vec![
+                Program {
+                    spec: fake_spec("sh", "pi"),
+                    installed: true,
+                },
+                Program {
+                    spec: fake_prompt_spec("codex", "openai"),
+                    installed: true,
+                },
+            ],
+        )
+    }
+
+    #[test]
+    fn a_reviewer_that_is_already_working_raises_no_kickoff_card() {
+        // Detection came late (sweatbrain seq 206-209): the reviewer was producing
+        // output by the time the wait ran out, so there is nothing to retry.
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        scratch.reported(&ctx);
+        let env = kickoff_env(&scratch, &ctx);
+        let mux = scratch.unready_mux();
+        mux.set_state_after(&reviewer_pane(), 2, AgentState::Working);
+
+        review(&mux, &env, &request(false)).unwrap_or_else(|err| panic!("{err}"));
+
+        assert!(escalations(&ctx).is_empty(), "{:?}", escalations(&ctx));
+    }
+
+    #[test]
+    fn a_kickoff_card_names_its_request_when_the_task_has_more_than_one() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        scratch.reported(&ctx);
+        let env = kickoff_env(&scratch, &ctx);
+        let mux = scratch.unready_mux();
+        review(&mux, &env, &request(false)).unwrap_or_else(|err| panic!("{err}"));
+        let again = ReviewRequest {
+            again: true,
+            ..request(false)
+        };
+        review(&mux, &env, &again).unwrap_or_else(|err| panic!("{err}"));
+
+        let escalations = escalations(&ctx);
+        assert_eq!(escalations.len(), 2, "{escalations:?}");
+        assert_eq!(escalations[0].1, "review kickoff not delivered");
+        assert!(
+            escalations[1]
+                .1
+                .starts_with("review kickoff not delivered (review request #"),
+            "{:?}",
+            escalations[1].1
+        );
+        assert!(
+            escalations[1].2.contains("ms in all"),
+            "the card states how long it waited: {:?}",
+            escalations[1].2
+        );
+    }
+
     /// A claude reviewer's environment with a private HOME, so the trust entry
     /// goes to a temp file and never the person's `~/.claude.json`.
     fn claude_review_env<'a>(scratch: &Scratch, ctx: &'a Ctx) -> ReviewEnv<'a> {
@@ -3548,16 +3648,18 @@ project_dirs = []
         let (task, body, default_action) = &escalations[0];
         assert_eq!(task.as_deref(), Some("T1"));
         assert_eq!(body, "review brief not delivered");
-        assert_eq!(
-            default_action,
-            "press Retry review on the task in the Tasks pane, which closes the reviewer tab and \
-             delivers the review brief again (the agent was not detected within 0 ms); never \
-             type into the reviewer's tab"
+        assert!(
+            default_action.starts_with(
+                "press Retry review on the task in the Tasks pane, which closes the reviewer tab \
+                 and delivers the review brief again (the agent was not detected within 0 ms; \
+                 tried for "
+            ) && default_action.ends_with(" ms in all); never type into the reviewer's tab"),
+            "{default_action}"
         );
         assert_eq!(
             detection_polls(&mux),
-            2,
-            "the brief was retried exactly once before the escalation"
+            3,
+            "the brief was retried exactly once, then the escalation looked once more at the pane"
         );
         assert!(prompts(&mux).is_empty(), "nothing may be typed in");
     }
