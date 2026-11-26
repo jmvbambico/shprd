@@ -155,6 +155,38 @@ fn build(home_flag: Option<&Path>, no_quota: bool) -> Report {
     report
 }
 
+/// What `run start` warns about: the programs that fail to start, and whether
+/// the reviewer's model reads images. Only warnings, never a refusal.
+pub fn start_warnings(home: Option<&Path>) -> Vec<String> {
+    let facts = Facts::resolve(home);
+    let mut scratch = Report::default();
+    let specs = data(&mut scratch, &facts);
+    let roles = config_section(&mut scratch, &facts);
+    let clean = worker_env(&facts);
+    let detections = detect_every(&facts, &specs, &roles);
+    let mut report = Report::default();
+    preflight_section(&mut report, &facts, &specs, &detections, &clean);
+    if let Some(reviewer) = roles.reviewer.as_deref() {
+        image_line(report.section("Review"), &specs_model(&specs, reviewer));
+    } else {
+        report
+            .section("Review")
+            .add(Level::Warn, "reviewer not set, so no cross-vendor review");
+    }
+    warnings_of(&report)
+}
+
+/// The text of every warning line on the page.
+fn warnings_of(report: &Report) -> Vec<String> {
+    report
+        .sections
+        .iter()
+        .flat_map(|section| section.lines.iter())
+        .filter(|line| line.level == Level::Warn)
+        .map(|line| line.text.clone())
+        .collect()
+}
+
 /// The machine facts every section reads, resolved once.
 struct Facts {
     /// The environment the verb started in, values included.
@@ -1440,6 +1472,29 @@ mod tests {
         assert!(why.contains("Library not loaded"), "{why}");
         let none = preflight_probes("", &[], &[], &[]);
         assert!(matches!(none.as_slice(), [(_, None)]), "{none:?}");
+    }
+
+    #[test]
+    fn run_start_warns_of_a_failing_cli_and_a_blind_reviewer() {
+        let mut page = Report::default();
+        preflight_lines(
+            page.section("Preflight"),
+            &[
+                ("node".to_owned(), Some(Ok(()))),
+                (
+                    "claude".to_owned(),
+                    Some(Err("dyld: Library not loaded".to_owned())),
+                ),
+            ],
+        );
+        image_line(page.section("Review"), "deepseek-v4");
+        let warnings = warnings_of(&page);
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(
+            warnings[0].contains("claude fails to start"),
+            "{warnings:?}"
+        );
+        assert!(warnings[1].contains("cannot read images"), "{warnings:?}");
     }
 
     #[test]
