@@ -437,10 +437,13 @@ fn probe(setting: HostChoice) -> Probe {
         // there". This branch only runs when a window is attached or the desktop
         // was named, so no ordinary resolve pays for the longer wait.
         match ask_core_with_retry(|timeout| {
-            HcHost::core_version(&endpoint, timeout).map_err(|error| error.to_string())
+            HcHost::core_version(&endpoint, timeout).map_err(|error| ProbeError {
+                timed_out: matches!(error, shprd_mux_hc::Error::Timeout { .. }),
+                message: error.to_string(),
+            })
         }) {
             Ok(version) => probe.core = Some(version),
-            Err(error) => probe.core_problem = Some(error),
+            Err(error) => probe.core_problem = Some(error.message),
         }
     } else {
         probe.core_problem =
@@ -452,10 +455,26 @@ fn probe(setting: HostChoice) -> Probe {
 /// Ask for the core's version, and once more with a longer wait when the first
 /// try fails. `ask` takes the timeout it may use; the retry is the whole reason
 /// this is a function: a probe that fails under load must not decide the host.
+///
+/// Only a timeout is retried: a core that refuses the connection outright is not
+/// there, and waiting longer for it would stall every resolve on a machine
+/// where the desktop is genuinely absent.
 fn ask_core_with_retry(
-    mut ask: impl FnMut(Duration) -> Result<String, String>,
-) -> Result<String, String> {
-    ask(PROBE_TIMEOUT).or_else(|_| ask(PROBE_RETRY_TIMEOUT))
+    mut ask: impl FnMut(Duration) -> Result<String, ProbeError>,
+) -> Result<String, ProbeError> {
+    match ask(PROBE_TIMEOUT) {
+        Err(error) if error.timed_out => ask(PROBE_RETRY_TIMEOUT),
+        other => other,
+    }
+}
+
+/// Why a core probe failed, and whether it was only slow.
+#[derive(Debug, PartialEq, Eq)]
+struct ProbeError {
+    /// The core did not answer in time (as opposed to refusing or erroring).
+    timed_out: bool,
+    /// What to tell a person.
+    message: String,
 }
 
 /// Whether something listens on the socket: a leftover socket file from a herdr
@@ -620,7 +639,10 @@ mod tests {
         let answer = super::ask_core_with_retry(|timeout| {
             asked.push(timeout);
             if asked.len() == 1 {
-                Err("timed out".to_string())
+                Err(super::ProbeError {
+                    timed_out: true,
+                    message: "timed out".to_string(),
+                })
             } else {
                 Ok("0.1.22".to_string())
             }
@@ -631,14 +653,28 @@ mod tests {
         let mut probe = desktop();
         probe.core = answer.ok();
         assert_eq!(choose(HostChoice::Auto, probe).kind, HostKind::HerdrDesktop);
-        // A core that never answers is asked twice, then reported.
+        // A core that keeps timing out is asked twice, then reported.
         let mut calls = 0;
         let failed = super::ask_core_with_retry(|_| {
             calls += 1;
-            Err("no".to_string())
+            Err(super::ProbeError {
+                timed_out: true,
+                message: "no".to_string(),
+            })
         });
         assert!(failed.is_err());
         assert_eq!(calls, 2);
+        // A core that refuses outright is not waited for.
+        let mut calls = 0;
+        let refused = super::ask_core_with_retry(|_| {
+            calls += 1;
+            Err(super::ProbeError {
+                timed_out: false,
+                message: "refused".to_string(),
+            })
+        });
+        assert!(refused.is_err());
+        assert_eq!(calls, 1);
     }
 
     /// A host that does nothing: the tests below care about the keeping.
