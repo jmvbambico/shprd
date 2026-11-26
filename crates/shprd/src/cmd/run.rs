@@ -170,7 +170,7 @@ fn ensure_branch(repo: &Path, base: &str, branch: &str) -> Result<bool, CliError
 /// collected, reported and escalated while the ledger still accepts an
 /// escalation.
 pub fn finish(mux: &dyn Host, ctx: &Ctx, home: Option<&Path>, end: EndRun) -> Result<(), CliError> {
-    let state = ctx.state().map_err(|err| anyhow::anyhow!("{err:?}"))?;
+    let state = ctx.state()?;
     let kind = end_kind(&state, end)?;
     ctx.check(&kind)?;
     let watch = watch_pane(ctx);
@@ -486,6 +486,13 @@ mod tests {
             false,
             true,
         );
+        ctx.commit(EventKind::RunStarted {
+            run_id: "rbase1".to_string(),
+            repo: repo.path().display().to_string(),
+            base_branch: "main".to_string(),
+            integration_branch: "shprd/rbase1/int".to_string(),
+        })
+        .map_err(|err| anyhow!("{err:?}"))?;
         let n = record_baselines(&ctx, "main")?;
         assert_eq!(n, 1);
         let state = ctx.state().map_err(|err| anyhow::anyhow!("{err:?}"))?;
