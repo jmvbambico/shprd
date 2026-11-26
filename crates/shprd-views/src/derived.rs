@@ -489,9 +489,7 @@ impl TaskSignal {
                 .values()
                 .filter(|ask| ask.task == id && ask.answer.is_none())
                 .filter(|ask| !ask.is_retired_by_newer_attempt(task))
-                .filter(|ask| {
-                    !shprd_core::ask::is_moot_scope_card(id, &ask.id, &ask.options, &task.scope)
-                })
+                .filter(|ask| !shprd_core::ask::is_scope_card(&ask.id))
                 .map(|ask| AskFacts {
                     kind: ask.kind,
                     text: ask.text.clone(),
@@ -1960,7 +1958,7 @@ mod tests {
     #[test]
     #[allow(clippy::expect_used)]
     fn an_open_scope_card_from_an_old_log_is_not_drawn() {
-        use shprd_core::ask::{AskKind, scope_widen_options};
+        use shprd_core::ask::AskKind;
         let at = |seq: u64, kind: EventKind| Event {
             seq,
             at_ms: NOW + seq,
@@ -1981,13 +1979,12 @@ mod tests {
                 },
             )
         };
-        // The refused-hand-in card offers two widen choices; the person's
-        // question is not a scope card and stays whatever the scope.
-        let mut options = scope_widen_options(&[String::from("docs/a.md")]);
-        options.insert(
-            1,
-            scope_widen_options(&[String::from("docs/b.md")])[0].clone(),
-        );
+        // The cards an older build raised, with its old choices.
+        let options = vec![
+            String::from("widen the scope to docs/a.md"),
+            String::from("widen the scope to docs/b.md"),
+            String::from("send it back to a new attempt"),
+        ];
         let events = vec![
             at(
                 1,
@@ -2014,7 +2011,10 @@ mod tests {
             ask(
                 4,
                 "scope-widen-1",
-                scope_widen_options(&[String::from("docs/a.md")]),
+                vec![
+                    String::from("widen the scope to docs/a.md"),
+                    String::from("keep the scope"),
+                ],
             ),
             ask(5, "ask-1", vec![]),
         ];

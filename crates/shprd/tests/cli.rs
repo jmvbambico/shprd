@@ -432,6 +432,35 @@ fn overlapping_scopes_start_side_by_side_and_add_warns() {
 }
 
 #[test]
+fn a_task_may_be_added_without_paths_and_widen_is_gone() {
+    let dir = repo();
+    let root = dir.path();
+    start(root);
+    ok(
+        root,
+        &[
+            "agent",
+            "task",
+            "add",
+            "--id",
+            "T1",
+            "--title",
+            "a task",
+            "--acceptance",
+            "it works",
+        ],
+    );
+    assert_eq!(status_of(&state(root), "T1"), "queued");
+    let widen = run(
+        root,
+        &[
+            "agent", "task", "widen", "--task", "T1", "--scope", "x", "--reason", "y",
+        ],
+    );
+    assert!(!widen.status.success(), "the widen verb is gone: {widen:?}");
+}
+
+#[test]
 fn a_changed_path_outside_the_declared_scope_is_recorded() {
     let dir = repo();
     let root = dir.path();

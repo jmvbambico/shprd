@@ -338,9 +338,7 @@ pub fn list(args: &AskListArgs, ctx: &Ctx) -> Result<(), CliError> {
     // A scope card is moot now that declared paths are only a hint, so an open
     // one a log written before that still holds is not listed as open.
     asks.retain(|ask| {
-        args.all
-            || (ask.is_open_at(now)
-                && !shprd_core::ask::is_moot_scope_card(&ask.task, &ask.id, &[], &[]))
+        args.all || (ask.is_open_at(now) && !shprd_core::ask::is_scope_card(&ask.id))
     });
     if let Some(task) = &args.task {
         asks.retain(|ask| &ask.task == task);

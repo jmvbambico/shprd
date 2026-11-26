@@ -271,6 +271,16 @@ const ASSISTANT_M11_LONG: &str =
 const ASSISTANT_M11_LONG_DIGEST: &str =
     "391d4cc326bf5fd542a2486474a1496d9da08bb2f77294fd4ca7d0a0740a0e5f";
 
+/// The coordinator wording that offered the scope-widen verb and required a
+/// scope on every task. Declared paths are an optional hint now.
+#[cfg(test)]
+const ASSISTANT_M11_SCOPE: &str =
+    include_str!("../../../data/templates/history/assistant-m11-scope.md");
+
+/// The SHA-256 of [`ASSISTANT_M11_SCOPE`].
+const ASSISTANT_M11_SCOPE_DIGEST: &str =
+    "e482982fc547944b949a371eb414a6e762aa976996db107ebbcf28f21ece1c23";
+
 /// The coordinator's retired defaults.
 const ASSISTANT_OLD: &[&str] = &[
     ASSISTANT_M9_ASKS_DIGEST,
@@ -281,6 +291,7 @@ const ASSISTANT_OLD: &[&str] = &[
     ASSISTANT_M11_ACCEPT_DIGEST,
     ASSISTANT_PRE_SHPR83_DIGEST,
     ASSISTANT_M11_LONG_DIGEST,
+    ASSISTANT_M11_SCOPE_DIGEST,
 ];
 
 /// The reviewer wording M9.6 shipped, which did not name the asks the packet

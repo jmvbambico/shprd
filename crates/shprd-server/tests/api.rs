@@ -1528,8 +1528,8 @@ async fn retrying_a_spent_review_records_no_override() {
     assert_ne!(task.status, shprd_core::state::TaskStatus::Dropped);
 }
 
-/// A repository whose `T1` (scope `tcalc/ops.py`) had a hand-in refused for
-/// `tests/test_ops.py`: the card `hand-in-refused-1-1` is open.
+/// A repository whose `T1` (scope `tcalc/ops.py`) holds the open card an older
+/// build raised for a refused hand-in: `hand-in-refused-1-1`, as its log wrote it.
 fn refused_hand_in_repo() -> TempDir {
     let repo = tempfile::tempdir().expect("repo dir");
     start_run(repo.path());
@@ -1560,9 +1560,14 @@ fn refused_hand_in_repo() -> TempDir {
             branch: "shprd/r1/T1".into(),
         },
     );
-    let ask = shprd_core::gate::hand_in_refused_ask(1, 1);
-    let body = shprd_core::gate::hand_in_refused_body("T1", 1, "path outside scope");
-    let options = shprd_core::gate::hand_in_refused_options(&["tests/test_ops.py".to_string()]);
+    let ask = String::from("hand-in-refused-1-1");
+    let body = String::from(
+        "T1: the engine refused attempt 1's hand-in, so nothing was recorded: path outside scope",
+    );
+    let options = vec![
+        String::from("widen the scope to tests/test_ops.py"),
+        String::from("send it back to a new attempt"),
+    ];
     put(
         &mut log,
         Actor::Agent {
@@ -1587,106 +1592,20 @@ fn refused_hand_in_repo() -> TempDir {
     repo
 }
 
-async fn answer_refused_card(answer: &str) -> (Fixture, Reply) {
+#[tokio::test]
+async fn an_old_open_scope_card_is_never_listed() {
     let fixture = Fixture::prepared(refused_hand_in_repo(), tempfile::tempdir().expect("state"));
-    let reply = fixture
-        .send(
-            Call::post(
-                "/api/asks/answer",
-                json!({"task": "T1", "ask": "hand-in-refused-1-1", "answer": answer}),
-            )
-            .with_token(&fixture.token)
-            .with_write_header(),
-        )
-        .await;
-    (fixture, reply)
-}
-
-#[tokio::test]
-async fn widening_the_scope_from_a_refused_hand_in_card_widens_it() {
-    let (fixture, reply) = answer_refused_card("widen the scope to tests/test_ops.py").await;
-    assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
-    let events = EventLog::read_all(&fixture.repo.path().join(".shprd").join("events.jsonl"))
-        .expect("read the log")
-        .events;
-    let state = shprd_core::state::RunState::fold(&events).expect("folds");
-    let task = state.tasks.get("T1").expect("T1");
-    assert!(
-        task.scope.iter().any(|path| path == "tests/test_ops.py"),
-        "{:?}",
-        task.scope
-    );
-    assert!(task.scope.iter().any(|path| path == "tcalc/ops.py"));
-}
-
-/// Declared paths are a hint, not a lock: a widening to a path another task in
-/// flight declares is written like any other.
-#[tokio::test]
-async fn a_widening_beside_an_overlapping_task_in_flight_is_written() {
-    let repo = refused_hand_in_repo();
-    let path = repo.path().join(".shprd").join("events.jsonl");
-    let mut log = EventLog::open(&path).expect("the log opens");
-    put(
-        &mut log,
-        Actor::Human,
-        EventKind::TaskAdded {
-            task: "T2".into(),
-            title: "t2".into(),
-            scope: vec!["tests".into()],
-            acceptance: vec!["x".into()],
-            tags: Vec::new(),
-            skills: Vec::new(),
-            deps: Vec::new(),
-        },
-    );
-    put(
-        &mut log,
-        Actor::Engine,
-        EventKind::Spawned {
-            task: "T2".into(),
-            attempt: 1,
-            agent: "claude".into(),
-            model: None,
-            worktree: "/wt/T2".into(),
-            branch: "shprd/r1/T2".into(),
-        },
-    );
-    drop(log);
-    let fixture = Fixture::prepared(repo, tempfile::tempdir().expect("state"));
-    let reply = fixture
-        .send(
-            Call::post(
-                "/api/asks/answer",
-                json!({"task": "T1", "ask": "hand-in-refused-1-1",
-                       "answer": "widen the scope to tests/test_ops.py"}),
-            )
-            .with_token(&fixture.token)
-            .with_write_header(),
-        )
-        .await;
-    assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
-    let events = EventLog::read_all(&path).expect("read the log").events;
-    assert!(
-        events
-            .iter()
-            .any(|event| matches!(event.kind, EventKind::ScopeWidened { .. })),
-        "the widening is written"
-    );
-}
-
-#[tokio::test]
-async fn sending_a_refused_hand_in_back_needs_a_host_and_consumes_nothing_without_one() {
-    let (fixture, reply) = answer_refused_card("send it back to a new attempt").await;
-    assert_ne!(reply.status, StatusCode::OK, "{:?}", reply.body);
-    let events = EventLog::read_all(&fixture.repo.path().join(".shprd").join("events.jsonl"))
-        .expect("read the log")
-        .events;
-    assert!(
-        !events
-            .iter()
-            .any(|event| matches!(event.kind, EventKind::AskAnswered { .. })),
-        "the card is still open"
-    );
+    for uri in ["/api/asks", "/api/state"] {
+        let reply = fixture
+            .send(Call::get(uri).with_token(&fixture.token))
+            .await;
+        assert_eq!(reply.status, StatusCode::OK, "{uri}: {:?}", reply.body);
+        let text = format!("{:?}", reply.body);
+        assert!(
+            !text.contains("hand-in-refused-1-1"),
+            "{uri} lists the moot card: {text}"
+        );
+    }
 }
 
 #[tokio::test]

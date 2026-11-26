@@ -532,39 +532,16 @@ pub fn by_task(asks: &[Ask]) -> BTreeMap<TaskId, Vec<Ask>> {
     grouped
 }
 
-/// What every ask id raised by `shprd agent task widen` begins with.
+/// What the id of a scope-widening card begins with. Builds before declared
+/// paths became a hint raised these; a log may still hold one, open or not.
 pub const SCOPE_WIDEN_ASK_PREFIX: &str = "scope-widen-";
 
-/// The choice that leaves a task's scope as it is.
-pub const KEEP_SCOPE_CHOICE: &str = "keep the scope";
-
-/// The id of the `n`th widening card raised for a task.
-pub fn scope_widen_ask(n: usize) -> String {
-    format!("{SCOPE_WIDEN_ASK_PREFIX}{n}")
-}
-
-/// The choices a widening card offers: widen to `paths`, or keep the scope.
-///
-/// High-risk paths (see [`crate::gate::is_high_risk_path`]) are never in the
-/// one-click option; they need the typed confirmation, and at most five folder
-/// entries are named.
-pub fn scope_widen_options(paths: &[String]) -> Vec<String> {
-    scope_widen_options_for(paths, &[])
-}
-
-/// [`scope_widen_options`] with the repo's own high-risk `globs`.
-pub fn scope_widen_options_for(paths: &[String], globs: &[String]) -> Vec<String> {
-    let offer = crate::gate::widen_offer(paths, globs);
-    let mut options = Vec::new();
-    if !offer.entries.is_empty() {
-        options.push(format!(
-            "{}{}",
-            crate::gate::WIDEN_CHOICE,
-            offer.entries.join(", ")
-        ));
-    }
-    options.push(KEEP_SCOPE_CHOICE.to_string());
-    options
+/// Whether `ask` is a scope card (a refused hand-in's or a widening's) an older
+/// build raised. Declared paths are a hint now, so every such card is moot: no
+/// client draws one, open or not, and every client asks this to agree.
+pub fn is_scope_card(ask: &str) -> bool {
+    ask.starts_with(SCOPE_WIDEN_ASK_PREFIX)
+        || ask.starts_with(crate::gate::HAND_IN_REFUSED_ASK_PREFIX)
 }
 
 /// The repo's own `high_risk_paths` globs, from `<root>/.agents/orchestration.yaml`
@@ -573,107 +550,6 @@ pub fn high_risk_globs_in(root: &Path) -> Vec<String> {
     fs::read_to_string(root.join(".agents").join("orchestration.yaml"))
         .map(|text| crate::gate::high_risk_globs_from_yaml(&text))
         .unwrap_or_default()
-}
-
-/// What a widening card says: the task, the paths and the reason given.
-pub fn scope_widen_body(task: &str, paths: &[String], reason: &str) -> String {
-    scope_widen_body_for(task, paths, reason, &[])
-}
-
-/// [`scope_widen_body`] that also says what the card does not offer: paths
-/// left off for length, and high-risk paths with the phrase to type to widen to
-/// them anyway.
-pub fn scope_widen_body_for(
-    task: &str,
-    paths: &[String],
-    reason: &str,
-    globs: &[String],
-) -> String {
-    let note = crate::gate::widen_note(&crate::gate::widen_offer(paths, globs));
-    format!(
-        "{task}: widen its scope to {}? {}{note}",
-        paths.join(", "),
-        reason.trim()
-    )
-}
-
-/// The paths `answer` widens a scope to, when `ask` is a card that offers a
-/// widening (a refused hand-in's or a widening verb's) and the answer takes it.
-///
-/// `keep the scope`, any other answer and any other ask give `None`, so nothing
-/// is written for them.
-pub fn widening_of(ask: &str, answer: &str) -> Option<Vec<String>> {
-    if !ask.starts_with(SCOPE_WIDEN_ASK_PREFIX)
-        && !ask.starts_with(crate::gate::HAND_IN_REFUSED_ASK_PREFIX)
-    {
-        return None;
-    }
-    let paths: Vec<String> = answer
-        .trim()
-        .strip_prefix(crate::gate::WIDEN_CHOICE)
-        .or_else(|| answer.trim().strip_prefix(crate::gate::HIGH_RISK_CONFIRM))?
-        .split(',')
-        .map(|path| path.trim().to_string())
-        .filter(|path| !path.is_empty())
-        .collect();
-    (!paths.is_empty()).then_some(paths)
-}
-
-/// The key both scope cards of a task share: a refused hand-in's and a widening
-/// verb's. One key is one question, so a client draws one card for it.
-pub fn scope_key(task: &str) -> String {
-    format!("scope:{task}")
-}
-
-/// The key of the scope question `ask` raises for `task`, when it is one.
-pub fn scope_key_of(task: &str, ask: &str) -> Option<String> {
-    (ask.starts_with(SCOPE_WIDEN_ASK_PREFIX)
-        || ask.starts_with(crate::gate::HAND_IN_REFUSED_ASK_PREFIX))
-    .then(|| scope_key(task))
-}
-
-/// The paths a scope card offers to widen to: those of every `widen` choice,
-/// normalised the way a scope is, without repeats.
-pub fn offered_paths(options: &[String]) -> Vec<String> {
-    let mut paths: Vec<String> = Vec::new();
-    for path in options
-        .iter()
-        .filter_map(|option| widening_of(SCOPE_WIDEN_ASK_PREFIX, option))
-        .flatten()
-    {
-        let path = crate::scope::normalize(&path).unwrap_or(path);
-        if !paths.contains(&path) {
-            paths.push(path);
-        }
-    }
-    paths
-}
-
-/// Whether a scope card offering `options` is moot because every path it offers
-/// is already in `scope`. A card that offers no paths is never moot.
-pub fn offers_only_scoped_paths(options: &[String], scope: &[String]) -> bool {
-    let paths = offered_paths(options);
-    !paths.is_empty() && paths.iter().all(|path| crate::scope::within(path, scope))
-}
-
-/// Whether the open ask `ask` of `task` is a moot scope card: every client
-/// lists asks through this, so they agree on which cards to draw.
-///
-/// A task's declared paths are a hint now, never a refusal, so every scope card
-/// (a refused hand-in's or a widening's) is moot, including one a log written
-/// before that change still holds open.
-pub fn is_moot_scope_card(task: &str, ask: &str, _options: &[String], _scope: &[String]) -> bool {
-    scope_key_of(task, ask).is_some()
-}
-
-/// What a worker is told when its scope was widened.
-pub fn widened_note(paths: &[String]) -> String {
-    format!(
-        "Your scope was widened by the person: you may now also change {}. Run \
-         `shprd agent report` again now: a refusal you saw before this note is stale (every \
-         refusal names its event seq, so a newer seq is the live one).",
-        paths.join(", ")
-    )
 }
 
 /// Words that name something only the engine does: a task's state, its scope, a
@@ -826,43 +702,19 @@ mod tests {
 
     use super::{
         Ask, AskError, AskKind, AskQueue, WorkerNotes, high_risk_globs_in, option_refusal,
-        scope_widen_body_for, scope_widen_options_for, widening_of,
     };
 
     #[test]
-    fn the_widen_card_applies_the_repos_high_risk_paths_and_says_how_to_confirm() {
+    fn the_repos_own_protected_globs_are_read_from_its_orchestration_file() {
         let dir = tempfile::tempdir().unwrap();
+        assert!(high_risk_globs_in(dir.path()).is_empty());
         std::fs::create_dir_all(dir.path().join(".agents")).unwrap();
         std::fs::write(
             dir.path().join(".agents/orchestration.yaml"),
             "high_risk_paths:\n  - infra/**\n",
         )
         .unwrap();
-        let globs = high_risk_globs_in(dir.path());
-        let paths = vec!["src/a.rs".to_string(), "infra/prod/main.tf".to_string()];
-        let options = scope_widen_options_for(&paths, &globs);
-        assert_eq!(options.len(), 2, "{options:?}");
-        assert!(!options[0].contains("infra"), "{options:?}");
-        let body = scope_widen_body_for("t", &paths, "needed", &globs);
-        assert!(body.contains(crate::gate::HIGH_RISK_CONFIRM), "{body}");
-        assert!(body.contains("infra/prod/main.tf"));
-        // The typed phrase widens to the high-risk path.
-        let typed = format!("{}infra/prod/main.tf", crate::gate::HIGH_RISK_CONFIRM);
-        assert_eq!(
-            widening_of("scope-widen-1", &typed),
-            Some(vec!["infra/prod/main.tf".to_string()])
-        );
-        // Without the fixture's globs the same path is one click.
-        assert!(scope_widen_options_for(&paths, &[])[0].contains("infra"));
-    }
-
-    #[test]
-    fn the_widened_note_tells_the_worker_to_report_again() {
-        let note = super::widened_note(&["a.rs".to_string()]);
-        assert!(
-            note.contains("a.rs") && note.contains("shprd agent report"),
-            "{note}"
-        );
+        assert_eq!(high_risk_globs_in(dir.path()), vec!["infra/**".to_string()]);
     }
 
     #[test]
@@ -1017,20 +869,6 @@ mod tests {
     }
 
     #[test]
-    fn only_a_widen_answer_on_a_widening_card_widens() {
-        assert_eq!(
-            widening_of("scope-widen-1", "widen the scope to a/b.rs, c.rs"),
-            Some(vec!["a/b.rs".to_string(), "c.rs".to_string()])
-        );
-        assert_eq!(
-            widening_of("hand-in-refused-1-1", "widen the scope to x"),
-            Some(vec!["x".to_string()])
-        );
-        assert_eq!(widening_of("scope-widen-1", "keep the scope"), None);
-        assert_eq!(widening_of("ask-1", "widen the scope to x"), None);
-    }
-
-    #[test]
     fn a_queued_note_is_listed_once_and_settled_once() {
         let dir = tempfile::tempdir().expect("temp dir");
         let notes = WorkerNotes::for_repo(dir.path());
@@ -1044,50 +882,14 @@ mod tests {
 }
 
 #[cfg(test)]
-mod scope_key_tests {
-    use super::*;
+mod scope_card_tests {
+    use super::is_scope_card;
 
     #[test]
-    fn both_scope_asks_share_one_key_and_moot_cards_are_found() {
-        assert_eq!(
-            scope_key_of("T", "scope-widen-1").as_deref(),
-            Some("scope:T")
-        );
-        assert_eq!(
-            scope_key_of("T", "hand-in-refused-1-1").as_deref(),
-            Some("scope:T")
-        );
-        assert_eq!(scope_key_of("T", "ask-1"), None);
-        let options = scope_widen_options(&["a/b.rs".to_string()]);
-        assert!(offers_only_scoped_paths(&options, &["a".to_string()]));
-        assert!(!offers_only_scoped_paths(&options, &["c".to_string()]));
-        assert!(!offers_only_scoped_paths(
-            &["other".to_string()],
-            &["a".to_string()]
-        ));
-        let scope = ["a".to_string()];
-        assert!(is_moot_scope_card("T", "scope-widen-1", &options, &scope));
-        assert!(is_moot_scope_card(
-            "T",
-            "hand-in-refused-1-1",
-            &options,
-            &["c".to_string()]
-        ));
-        assert!(!is_moot_scope_card("T", "ask-1", &options, &scope));
-    }
-
-    #[test]
-    fn every_widen_choice_counts_and_paths_are_normalised() {
-        let options = vec![
-            format!("{}./a/b.rs/", crate::gate::WIDEN_CHOICE),
-            format!("{}c/d.rs, a/b.rs", crate::gate::WIDEN_CHOICE),
-        ];
-        assert_eq!(offered_paths(&options), vec!["a/b.rs", "c/d.rs"]);
-        // One path out of scope keeps the card alive.
-        assert!(!offers_only_scoped_paths(&options, &["a".to_string()]));
-        assert!(offers_only_scoped_paths(
-            &options,
-            &["a".to_string(), "c".to_string()]
-        ));
+    fn both_old_scope_cards_are_scope_cards_and_nothing_else_is() {
+        assert!(is_scope_card("scope-widen-1"));
+        assert!(is_scope_card("hand-in-refused-1-1"));
+        assert!(!is_scope_card("ask-1"));
+        assert!(!is_scope_card("review-out-1"));
     }
 }

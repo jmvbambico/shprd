@@ -399,15 +399,10 @@ fn copy_proofs(worktree: &Path, proofs: &[String], packet: &Path) -> Vec<(String
     out
 }
 
-/// Whether an ask is a card the engine raised (a refused hand-in or a scope
-/// widening) rather than one the worker raised itself.
+/// Whether an ask is a scope card an older build raised (a refused hand-in or a
+/// scope widening) rather than one the worker raised itself.
 fn engine_card(record: &AskRecord) -> bool {
-    record
-        .id
-        .starts_with(shprd_core::ask::SCOPE_WIDEN_ASK_PREFIX)
-        || record
-            .id
-            .starts_with(shprd_core::gate::HAND_IN_REFUSED_ASK_PREFIX)
+    shprd_core::ask::is_scope_card(&record.id)
 }
 
 /// One ask as the contract lists it: text, options and the answer.

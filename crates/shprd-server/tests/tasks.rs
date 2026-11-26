@@ -441,10 +441,30 @@ async fn adding_a_task_needs_the_write_header() {
 }
 
 #[tokio::test]
-async fn a_task_with_no_title_scope_or_acceptance_is_refused() {
+async fn a_task_with_no_paths_is_added() {
+    let fixture = Fixture::new();
+    let reply = fixture
+        .add(json!({"title": "x", "scope": [], "acceptance": ["y"]}))
+        .await;
+    assert!(
+        reply.status.is_success(),
+        "{} {:?}",
+        reply.status,
+        reply.body
+    );
+    assert!(
+        fixture
+            .events()
+            .iter()
+            .any(|event| matches!(&event.kind, EventKind::TaskAdded { .. })),
+        "declared paths are an optional hint"
+    );
+}
+
+#[tokio::test]
+async fn a_task_with_no_title_or_acceptance_or_a_bad_path_is_refused() {
     for body in [
         json!({"title": "   ", "scope": ["a"], "acceptance": ["y"]}),
-        json!({"title": "x", "scope": [], "acceptance": ["y"]}),
         json!({"title": "x", "scope": ["a"], "acceptance": []}),
         json!({"title": "x", "scope": ["../escape"], "acceptance": ["y"]}),
         // Not a task at all: no title field to complain about.

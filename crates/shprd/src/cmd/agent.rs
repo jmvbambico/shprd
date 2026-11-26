@@ -7,7 +7,7 @@ use shprd_core::event::{CheckReport, EventKind, Finding, output_tail, status_lin
 
 use crate::cli::{
     AgentCommand, EscalateArgs, GateArgs, GateOutcome, HandoffArgs, OverrideArgs, PromptArgs,
-    ReportArgs, SpawnArgs, TaskAddArgs, TaskCommand, TaskStatusArgs, TaskWidenArgs,
+    ReportArgs, SpawnArgs, TaskAddArgs, TaskCommand, TaskStatusArgs,
 };
 use crate::cmd::{emit, handoff, spawn};
 use crate::ctx::{CliError, Ctx};
@@ -25,7 +25,6 @@ pub fn dispatch(
         AgentCommand::Task { cmd } => match cmd {
             TaskCommand::Add(args) => task_add(ctx, &args),
             TaskCommand::Report(args) => report(ctx, &args),
-            TaskCommand::Widen(args) => task_widen(ctx, &args),
         },
         AgentCommand::Spawn(args) => spawn_cmd(ctx, &args, home),
         AgentCommand::Prompt(args) => prompt_cmd(ctx, &args),
@@ -242,104 +241,6 @@ pub(crate) fn sync_dagr(ctx: &Ctx) {
     }
 }
 
-/// Raises the card that proposes a wider scope for a task.
-///
-/// It writes no scope: the card's `widen` answer, given by the person, does.
-fn task_widen(ctx: &Ctx, args: &TaskWidenArgs) -> Result<(), CliError> {
-    let state = ctx.state()?;
-    if !state.tasks.contains_key(&args.task) {
-        return Err(CliError::Invalid(anyhow!(
-            "no task {:?} in this run: name one `shprd status` lists",
-            args.task
-        )));
-    }
-    let mut paths = Vec::new();
-    for path in &args.scope {
-        let path = shprd_core::scope::normalize(path)
-            .map_err(|err| CliError::Invalid(anyhow!("scope path {path:?}: {err}")))?;
-        if !paths.contains(&path) {
-            paths.push(path);
-        }
-    }
-    if args.reason.trim().is_empty() {
-        return Err(CliError::Invalid(anyhow!(
-            "`--reason` is empty: tell the person why the task needs the paths"
-        )));
-    }
-    // An open scope card that already offers these paths is the one question:
-    // say which, and raise nothing.
-    let task = &state.tasks[&args.task];
-    if let Some(open) = state.asks.values().find(|ask| {
-        ask.task == args.task
-            && ask.answer.is_none()
-            && shprd_core::ask::scope_key_of(&ask.task, &ask.id).is_some()
-            && {
-                let offered = shprd_core::ask::offered_paths(&ask.options);
-                paths.iter().all(|path| offered.contains(path))
-            }
-    }) {
-        println!(
-            "ask {} already covers {} ({}): nothing new was raised",
-            open.id,
-            paths.join(", "),
-            shprd_core::ask::scope_key(&args.task)
-        );
-        return Ok(());
-    }
-    if paths
-        .iter()
-        .all(|path| shprd_core::scope::within(path, &task.scope))
-    {
-        println!(
-            "{} is already in {}'s scope: nothing was raised",
-            paths.join(", "),
-            args.task
-        );
-        return Ok(());
-    }
-    let earlier = state
-        .asks
-        .values()
-        .filter(|ask| {
-            ask.task == args.task && ask.id.starts_with(shprd_core::ask::SCOPE_WIDEN_ASK_PREFIX)
-        })
-        .count();
-    let id = shprd_core::ask::scope_widen_ask(earlier + 1);
-    let globs = shprd_core::ask::high_risk_globs_in(&ctx.root);
-    let text = shprd_core::ask::scope_widen_body_for(&args.task, &paths, &args.reason, &globs);
-    let options = shprd_core::ask::scope_widen_options_for(&paths, &globs);
-    let now_ms = shprd_core::log::Clock::now_ms(&shprd_core::log::SystemClock);
-    let ask = shprd_core::ask::Ask::new(
-        id.clone(),
-        args.task.clone(),
-        shprd_core::ask::AskKind::Question,
-        text.clone(),
-        now_ms,
-    )
-    .with_options(options.clone());
-    let queue = shprd_core::ask::AskQueue::for_repo(&ctx.root);
-    queue
-        .raise(&ask)
-        .map_err(|err| CliError::other(anyhow!(err).context("writing the ask")))?;
-    let raised = EventKind::AskRaised {
-        task: args.task.clone(),
-        ask: id.clone(),
-        ask_kind: shprd_core::ask::AskKind::Question,
-        text,
-        options,
-        created_at_ms: now_ms,
-        expires_at_ms: None,
-    };
-    let event = match ctx.commit(raised) {
-        Ok(event) => event,
-        Err(err) => {
-            let _ = queue.remove(&args.task, &id);
-            return Err(err);
-        }
-    };
-    emit(ctx, &event)
-}
-
 /// How many sends a note gets before the person is told it never arrived.
 const NOTE_SEND_CAP: u32 = 5;
 
@@ -348,7 +249,7 @@ const NOTE_SEND_CAP: u32 = 5;
 pub(crate) enum NoteSend {
     /// The worker's terminal took the note.
     Sent,
-    /// The task has no live worker: its next brief lists the paths itself.
+    /// The task has no live worker: its next brief says what the note said.
     NoWorker,
     /// A live worker's terminal refused the write; worth trying again.
     Failed,
@@ -357,7 +258,7 @@ pub(crate) enum NoteSend {
 /// Types every queued worker note into its task's live worker.
 ///
 /// A note is skipped only when the task has no live worker: the next attempt's
-/// brief is built from the widened scope and lists the paths itself. A failed
+/// brief is built from the log, which holds what the note said. A failed
 /// write to a live worker leaves the note pending for the next pass, up to
 /// [`NOTE_SEND_CAP`] tries, after which the person is told in plain words. A
 /// note is settled as sent only when it was delivered, so nothing is typed twice.
@@ -390,7 +291,7 @@ pub(crate) fn deliver_worker_notes(ctx: &Ctx) {
     for task in told {
         let status = EventKind::TaskStatus {
             task,
-            message: status_line("could not tell the worker its scope was widened"),
+            message: status_line("could not deliver a note to the worker"),
             progress: None,
         };
         let _ = ctx.commit(status);

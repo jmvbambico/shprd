@@ -765,7 +765,6 @@ fn the_condensed_coordinator_replaces_the_long_one() {
     assert!(!body.contains("Shepherdr"), "{body}");
     assert!(!body.contains("shepherdr"), "{body}");
     for needed in [
-        "shprd agent task widen",
         "shprd settings set",
         "Accept it in the Tasks pane",
         "never approve, push, merge",
@@ -859,6 +858,17 @@ fn the_scope_limit_wordings_upgrade_to_the_hint() {
         let installed = ensure(temp.path(), id).expect("the upgrade runs");
         assert_eq!(installed.change, Change::Upgraded, "{id}: {installed:?}");
     }
+    let assistant = strip_leading_comment(shipped_prompt("assistant").expect("shipped").text);
+    assert!(!assistant.contains("task widen"), "{assistant}");
+    assert!(assistant.contains("`--scope` is optional"), "{assistant}");
+    assert_eq!(
+        digest(ASSISTANT_M11_SCOPE.as_bytes()),
+        ASSISTANT_M11_SCOPE_DIGEST
+    );
+    let temp = dir();
+    std::fs::write(path_of(temp.path(), "assistant"), ASSISTANT_M11_SCOPE).expect("old install");
+    let installed = ensure(temp.path(), "assistant").expect("the upgrade runs");
+    assert_eq!(installed.change, Change::Upgraded, "{installed:?}");
     let reviewer = strip_leading_comment(shipped_prompt("reviewer").expect("shipped").text);
     assert!(
         reviewer.contains("whether each change serves the task"),

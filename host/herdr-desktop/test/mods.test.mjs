@@ -819,8 +819,11 @@ test("the add-task form says what is missing before the press", () => {
   });
   assert.equal(newTask({}).ready, false);
   assert.match(newTask({}).why, /title/);
-  assert.match(newTask({ title: "x" }).why, /folder or path/);
+  assert.match(newTask({ title: "x" }).why, /must be true/);
   assert.match(newTask({ title: "x", scope: "a" }).why, /must be true/);
+  // The paths are an optional hint: a task with none is ready.
+  assert.equal(newTask({ title: "x", acceptance: "it works" }).ready, true);
+  assert.deepEqual(newTask({ title: "x", acceptance: "it works" }).scope, []);
 });
 
 test("a panel finds the task its shared selection names, or nothing", () => {

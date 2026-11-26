@@ -473,13 +473,9 @@ pub(crate) fn list_asks(repo: &Path, now_ms: u64) -> Result<AskListDto, ApiRejec
                 .get(&ask.task)
                 .is_none_or(|task| !ask.is_retired_by_newer_attempt(task))
         })
-        // One scope question, one card: once a widening is answered, a card
-        // that offers only paths already in scope is moot.
-        .filter(|ask| {
-            state.tasks.get(&ask.task).is_none_or(|task| {
-                !shprd_core::ask::is_moot_scope_card(&ask.task, &ask.id, &ask.options, &task.scope)
-            })
-        })
+        // A scope card an older build raised is moot: declared paths are a
+        // hint now, so no client draws one.
+        .filter(|ask| !shprd_core::ask::is_scope_card(&ask.id))
         .collect();
     asks.sort_by(|left, right| {
         left.created_at_ms
@@ -521,38 +517,6 @@ pub(crate) fn answer_ask(
         before
             .check_as(ctx.actor, kind, SystemClock.now_ms())
             .map_err(|err| ApiReject::refused(err.to_string()))?;
-    }
-    // A refused hand-in's card widens the scope or sends the task back. Both
-    // are checked before the answer is consumed, for the same reason.
-    let hand_in = shprd_core::gate::hand_in_refused_choice(ask, answer);
-    let widening = match shprd_core::ask::widening_of(ask, answer) {
-        Some(paths) => {
-            // Free-typed paths are normalised like the verb's, so a stray
-            // `./` or backslash cannot widen to a path nothing matches.
-            let mut clean: Vec<String> = Vec::new();
-            for path in paths {
-                let path = shprd_core::scope::normalize(&path)
-                    .map_err(|err| ApiReject::bad_request(format!("scope path {path:?}: {err}")))?;
-                if !clean.contains(&path) {
-                    clean.push(path);
-                }
-            }
-            let paths = clean;
-            let kind = EventKind::ScopeWidened {
-                task: task.to_string(),
-                paths,
-            };
-            before
-                .check_as(ctx.actor, &kind, SystemClock.now_ms())
-                .map_err(|err| ApiReject::refused(err.to_string()))?;
-            Some(kind)
-        }
-        None => None,
-    };
-    if matches!(hand_in, Some(shprd_core::gate::HandInChoice::SendBack)) && ctx.engine.is_none() {
-        return Err(ApiReject::refused(
-            "this service was started without a host, so it cannot start another attempt",
-        ));
     }
     // A stuck review's `review again` needs a host to start the reviewer on.
     let review_again = ask.starts_with(shprd_core::review::STUCK_ASK_PREFIX)
@@ -620,40 +584,12 @@ pub(crate) fn answer_ask(
         }
         None => {}
     }
-    if let Some(kind) = widening {
-        // The scope is wider now. A worker that is running is told which paths
-        // it may change: its brief still names the old scope, so a resend would
-        // only repeat it. The note is typed by the step after this write; with
-        // no live worker, the next attempt's brief lists the paths itself.
-        let EventKind::ScopeWidened { paths, .. } = &kind else {
-            return Err(ApiReject::internal("a widening is not a widening"));
-        };
-        let note = shprd_core::ask::widened_note(paths);
-        let widened = ledger::commit(ctx.repo, ctx.actor, kind).map_err(after_answer)?;
-        ctx.hub.publish(widened.seq);
-        shprd_core::ask::WorkerNotes::for_repo(ctx.repo)
-            .queue(task, &note)
-            .map_err(|err| {
-                ApiReject::internal(format!("could not queue the worker note: {err}"))
-            })?;
-        let status = EventKind::TaskStatus {
-            task: task.to_string(),
-            message: status_line("scope widened: worker told"),
-            progress: None,
-        };
-        commit(ctx, status)?;
-    }
     if review_again && let Some(engine) = ctx.engine {
         // The answer is the person's word that the old reviewer is gone, so
         // the new one replaces it; a refusal is the review's own words.
         engine
             .review_again(ctx.repo, task)
             .map_err(ApiReject::refused)?;
-    }
-    if matches!(hand_in, Some(shprd_core::gate::HandInChoice::SendBack)) {
-        // The same two verbs the Stop and Retry buttons run.
-        stop(ctx, task)?;
-        spawn(ctx, task, "retry")?;
     }
     if let Some(step) = ctx.after_write {
         step.call(ctx.repo);

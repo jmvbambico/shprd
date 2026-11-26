@@ -504,12 +504,7 @@ fn earlier_asks(input: &BriefInput<'_>, asks: &[AskRecord]) -> String {
     let mut found: Vec<&AskRecord> = asks
         .iter()
         .filter(|ask| ask.task == input.task.id)
-        .filter(|ask| {
-            !ask.id.starts_with(shprd_core::ask::SCOPE_WIDEN_ASK_PREFIX)
-                && !ask
-                    .id
-                    .starts_with(shprd_core::gate::HAND_IN_REFUSED_ASK_PREFIX)
-        })
+        .filter(|ask| !shprd_core::ask::is_scope_card(&ask.id))
         .filter(|ask| ask.answer.is_some())
         .filter(|ask| spawn.is_none_or(|spawn| ask.raised_seq < spawn))
         .collect();

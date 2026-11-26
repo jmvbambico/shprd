@@ -52,12 +52,6 @@ pub enum RuleError {
         /// The task.
         task: TaskId,
     },
-    /// The task declares no scope.
-    #[error("task {task:?} has an empty scope")]
-    EmptyScope {
-        /// The task.
-        task: TaskId,
-    },
     /// A scope entry is not a usable repo-relative path.
     #[error("task {task:?} has a bad scope entry {path:?}: {source}")]
     BadScope {
@@ -141,15 +135,12 @@ pub enum RuleError {
         /// Who tried.
         actor: Actor,
     },
-    /// Something other than a person tried to widen a task's scope.
-    #[error("{actor:?} cannot widen a scope: only a person can")]
-    ScopeNotWidenedByHuman {
-        /// Who tried.
-        actor: Actor,
-    },
-    /// A scope widening named no path.
-    #[error("widening task {task:?}'s scope needs at least one path")]
-    EmptyScopeWidening {
+    /// A new scope widening: declared paths are a hint, so there is nothing to
+    /// widen. A log that already holds one still folds.
+    #[error(
+        "task {task:?}'s declared paths are a hint, not a limit, so a scope is no longer widened: a worker may change what the task needs"
+    )]
+    ScopeWideningRetired {
         /// The task.
         task: TaskId,
     },
@@ -618,39 +609,7 @@ pub const INTEGRATE_AFTER_FAILED_GATE: &str = "integrate_after_failed_gate";
 /// record a decision that never takes effect. `shprd override` and the rule
 /// below both read this list: adding a rule that honours an override means
 /// adding its name here.
-pub const OVERRIDE_RULES: &[&str] = &[INTEGRATE_AFTER_FAILED_GATE, ACCEPT_OUTSIDE_SCOPE];
-
-/// Rule name a human overrides to let one attempt's hand-in through a scope
-/// refusal.
-///
-/// The override is per task and covers only the attempt running when it was
-/// recorded, and only the paths its reason lists (see [`scope_override_reason`]).
-pub const ACCEPT_OUTSIDE_SCOPE: &str = "accept_outside_scope";
-
-/// Prefix the paths carry in an [`ACCEPT_OUTSIDE_SCOPE`] override's reason.
-const SCOPE_OVERRIDE_PATHS: &str = "paths=";
-
-/// The reason an [`ACCEPT_OUTSIDE_SCOPE`] override records: the paths it lets
-/// through, then why.
-pub fn scope_override_reason(paths: &[String], why: &str) -> String {
-    format!("{SCOPE_OVERRIDE_PATHS}{}; {}", paths.join(","), why.trim())
-}
-
-/// The paths an [`ACCEPT_OUTSIDE_SCOPE`] override's `reason` lets through.
-///
-/// A reason that does not start with the paths list names none, so a malformed
-/// override covers nothing.
-pub fn scope_override_paths(reason: &str) -> Vec<String> {
-    let Some(rest) = reason.trim().strip_prefix(SCOPE_OVERRIDE_PATHS) else {
-        return Vec::new();
-    };
-    let list = rest.split_once(';').map_or(rest, |(list, _)| list);
-    list.split(',')
-        .map(str::trim)
-        .filter(|path| !path.is_empty())
-        .map(str::to_string)
-        .collect()
-}
+pub const OVERRIDE_RULES: &[&str] = &[INTEGRATE_AFTER_FAILED_GATE];
 
 /// Whether `rule` names an override the rules honour.
 pub fn is_override_rule(rule: &str) -> bool {
@@ -739,17 +698,6 @@ fn check_override(
             rule: rule.to_string(),
             expected: OVERRIDE_RULES,
         });
-    }
-    if rule == ACCEPT_OUTSIDE_SCOPE {
-        let paths = scope_override_paths(reason);
-        let usable = !task.is_empty()
-            && !paths.is_empty()
-            && paths.iter().all(|path| scope::normalize(path).is_ok());
-        if !usable {
-            return Err(RuleError::EmptyOverride {
-                task: task.to_string(),
-            });
-        }
     }
     Ok(())
 }
@@ -896,9 +844,7 @@ fn check_with(
         EventKind::ReviewSkipped { task, attempt } => {
             check_review_skipped(state, actor, task, *attempt, provenance)
         }
-        EventKind::ScopeWidened { task, paths } => {
-            check_scope_widened(state, actor, task, paths, provenance)
-        }
+        EventKind::ScopeWidened { task, .. } => check_scope_widened(state, task, provenance),
         EventKind::Dry { .. } => Ok(()),
         EventKind::Available { agent, .. } => check_available(state, actor, agent, provenance),
         EventKind::HandedOff { task, to_agent, .. } => {
@@ -1333,9 +1279,6 @@ fn check_task_added(
     if title.trim().is_empty() {
         return Err(RuleError::EmptyTitle { task: id });
     }
-    if paths.is_empty() {
-        return Err(RuleError::EmptyScope { task: id });
-    }
     for path in paths {
         if let Err(source) = scope::normalize(path) {
             return Err(RuleError::BadScope {
@@ -1434,46 +1377,23 @@ fn check_spawned(
     Ok(())
 }
 
-/// Rules for widening a task's scope: only a person does it, to usable paths.
+/// Rules for a scope widening: only history holds one.
 ///
-/// A declared scope is a hint, not a lock, so a widening never waits for
-/// another task.
-///
-/// A scope a worker could widen for itself would bound nothing, which is why
-/// the actor is checked on the name, as an override is. History is not
-/// re-judged.
+/// Declared paths are a hint, not a limit, so nothing is widened any more. A
+/// log written while widenings existed still folds: history is not re-judged.
 fn check_scope_widened(
     state: &RunState,
-    actor: &Actor,
     task: &str,
-    paths: &[String],
     provenance: Provenance,
 ) -> Result<(), RuleError> {
     check_not_dropped(state, task, provenance)?;
-    let found = task_in(state, task)?;
+    task_in(state, task)?;
     if provenance == Provenance::Historical {
         return Ok(());
     }
-    if !matches!(actor, Actor::Human) {
-        return Err(RuleError::ScopeNotWidenedByHuman {
-            actor: actor.clone(),
-        });
-    }
-    if paths.is_empty() {
-        return Err(RuleError::EmptyScopeWidening {
-            task: task.to_string(),
-        });
-    }
-    for path in paths {
-        if let Err(source) = scope::normalize(path) {
-            return Err(RuleError::BadScope {
-                task: found.id.clone(),
-                path: path.clone(),
-                source,
-            });
-        }
-    }
-    Ok(())
+    Err(RuleError::ScopeWideningRetired {
+        task: task.to_string(),
+    })
 }
 
 /// Rules for an agent reporting the outcome of an attempt.
@@ -2737,10 +2657,11 @@ mod tests {
             refused(&[started(1), empty_title]),
             RuleError::EmptyTitle { .. }
         ));
-        assert!(matches!(
-            refused(&[started(1), added(2, "a", &[], &[])]),
-            RuleError::EmptyScope { .. }
-        ));
+        // Declared paths are an optional hint.
+        assert_eq!(
+            status(&folded(&[started(1), added(2, "a", &[], &[])]), "a"),
+            TaskStatus::Queued
+        );
         assert!(matches!(
             refused(&[started(1), added(2, "a", &["/abs"], &[])]),
             RuleError::BadScope { .. }
@@ -3446,72 +3367,39 @@ mod tests {
     }
 
     #[test]
-    fn only_a_human_widens_a_scope() {
+    fn a_new_widening_is_refused_and_an_old_one_still_folds() {
         let state = passed_task();
         let kind = EventKind::ScopeWidened {
             task: "a".to_string(),
             paths: vec!["tests/x.py".to_string()],
         };
-        for actor in [
-            Actor::Engine,
-            Actor::Orchestrator,
-            Actor::Agent {
-                id: "w1".to_string(),
-            },
-        ] {
-            assert!(
-                matches!(
-                    check_as(&state, &actor, &kind, 6_000),
-                    Err(RuleError::ScopeNotWidenedByHuman { .. })
-                ),
-                "{actor:?}"
-            );
-        }
-        assert!(check_as(&state, &Actor::Human, &kind, 6_000).is_ok());
-        let empty = EventKind::ScopeWidened {
-            task: "a".to_string(),
-            paths: Vec::new(),
-        };
         assert!(matches!(
-            check_as(&state, &Actor::Human, &empty, 6_000),
-            Err(RuleError::EmptyScopeWidening { .. })
+            check_as(&state, &Actor::Human, &kind, 6_000),
+            Err(RuleError::ScopeWideningRetired { .. })
         ));
+        let log = [started(1), added(2, "a", &["src/a"], &[]), ev(3, kind)];
+        assert!(
+            folded(&log).tasks["a"]
+                .scope
+                .contains(&"tests/x.py".to_string())
+        );
     }
 
     #[test]
-    fn only_a_human_records_a_scope_override() {
-        let state = passed_task();
-        let paths = vec!["src/b/y.rs".to_string()];
+    fn an_old_scope_override_folds_and_a_new_one_is_refused() {
         let kind = EventKind::Override {
             task: "a".to_string(),
-            rule: ACCEPT_OUTSIDE_SCOPE.to_string(),
-            reason: scope_override_reason(&paths, "why"),
-        };
-        for actor in [
-            Actor::Engine,
-            Actor::Orchestrator,
-            Actor::Agent {
-                id: "w1".to_string(),
-            },
-        ] {
-            assert!(
-                matches!(
-                    check_as(&state, &actor, &kind, 6_000),
-                    Err(RuleError::OverrideNotHuman { .. })
-                ),
-                "{actor:?}"
-            );
-        }
-        assert!(check_as(&state, &Actor::Human, &kind, 6_000).is_ok());
-        let no_paths = EventKind::Override {
-            task: "a".to_string(),
-            rule: ACCEPT_OUTSIDE_SCOPE.to_string(),
-            reason: "just because".to_string(),
+            rule: "accept_outside_scope".to_string(),
+            reason: "paths=src/b/y.rs; why".to_string(),
         };
         assert!(matches!(
-            check_as(&state, &Actor::Human, &no_paths, 6_000),
-            Err(RuleError::EmptyOverride { .. })
+            check_as(&passed_task(), &Actor::Human, &kind, 6_000),
+            Err(RuleError::UnknownOverrideRule { .. })
         ));
+        let mut old = ev(3, kind);
+        old.actor = Actor::Human;
+        let state = folded(&[started(1), added(2, "a", &["src/a"], &[]), old]);
+        assert_eq!(state.tasks["a"].overrides.len(), 1);
     }
 
     #[test]
