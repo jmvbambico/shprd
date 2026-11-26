@@ -236,6 +236,16 @@ impl ApiReject {
         Self::new(StatusCode::CONFLICT, ErrorCode::Refused, message)
     }
 
+    /// The agent's terminal waits on a question, so a line typed now would be
+    /// refused by the host (or land in the dialog).
+    pub fn question_waiting() -> Self {
+        Self::new(
+            StatusCode::CONFLICT,
+            ErrorCode::QuestionWaiting,
+            "a question is waiting above: answer it first. Your message was not sent",
+        )
+    }
+
     /// The event log could not be read or written.
     pub fn ledger(err: &LogError) -> Self {
         Self::new(

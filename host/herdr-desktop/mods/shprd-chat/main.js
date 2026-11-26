@@ -48,7 +48,7 @@ import {
   selectionWrites,
 } from "./lib/settings.js";
 import { answeredAsks, errorLine, noticeLine, overlay, probe, read as readOps } from "./lib/optimistic.js";
-import { answerBody, cards as cardsOf, footer, forSpace } from "./lib/asks.js";
+import { answerBody, cards as cardsOf, footer, forSpace, questionCard } from "./lib/asks.js";
 import {
   COORDINATOR,
   GUTTER,
@@ -109,6 +109,12 @@ const CARRY_KEY = "shprd.chat.carry";
 /** The round buttons in the composer's bottom row, px. */
 const ROUND = 28;
 
+/** What the send box says while a question waits above it. */
+const QUESTION_WAITING = "A question is waiting above: answer it, and your message is sent after. Your text is kept.";
+
+/** The shared key the pane's Needs you pill writes to take the chat to its card. */
+const FOCUS_KEY = "shprd.chat.focus";
+
 
 export default class Chat extends View {
   init(_props, cx) {
@@ -145,6 +151,12 @@ export default class Chat extends View {
     this.typing = null;
     this.answering = null;
     this.answerRefusal = null;
+    /** The terminal question just answered (its id), so its card does not come back before the record catches up. */
+    this.answeredQ = null;
+    /** The conversation whose typed message waits for a question to be answered. */
+    this.holdSend = null;
+    /** The last "take me to the card" request this chat acted on (the pane's Needs you pill). */
+    this.focusSeen = null;
     /** The buttons pressed, by card id: `{label, busy, phase: "busy" | "chose"}`. */
     this.pressed = new Map();
     /** The card whose Drop is waiting for its second press. */
@@ -231,7 +243,8 @@ export default class Chat extends View {
    * One command by name: `focus` (the keyboard goes to the box), `type:<words>` (as typing),
    * `enter` (what the Enter key calls), `send` (what the send button calls), `attach:<path>`,
    * `menu` (the model menu), `pick:<agent>:<model>[:<effort>]` (what the menu's answer does),
-   * `stop`, `mic`.
+   * `choose:<n>` and `reply:<words>` (press the waiting terminal question's n-th button, or answer it
+   * with words, as the card's own button and Send do), `stop`, `mic`.
    */
   command(command, cx) {
     const [name, ...rest] = command.split(":");
@@ -246,7 +259,9 @@ export default class Chat extends View {
       const [agent, model, effort] = arg.split(":");
       this.picked = { value: { agent, model, effort: effort || null, fast: false, perm: null }, stamp: 0 };
       this.applyPick();
-    } else if (name === "stop") this.stop();
+    } else if (name === "choose") this.pressShown(Number(arg));
+    else if (name === "reply") this.pressShown(null, arg);
+    else if (name === "stop") this.stop();
     else if (name === "mic") this.toggleDictation();
     cx?.notify?.();
   }
@@ -360,6 +375,7 @@ export default class Chat extends View {
           if (!this.chat.more) break;
         }
         cx.notify();
+        this.releaseHeld(slot);
       }
       const [board, asks] = await Promise.all([
         this.client.state(),
@@ -403,6 +419,8 @@ export default class Chat extends View {
     const was = this.chat.session;
     const keep = this.keep ?? null;
     this.chat = fold(this.chat, answer, keep !== null && Date.now() < keep.until ? keep.text : null);
+    // The question just answered is over, even while the record has not said so yet.
+    if (this.chat.question && this.chat.question.id === this.answeredQ) this.chat = { ...this.chat, question: null };
     if (keep !== null && (this.chat.session !== was || Date.now() >= keep.until)) this.keep = null;
     // A turn the transcript now holds is no longer an echo; a restart of the agent
     // starts another conversation, which no echo of the old one belongs to.
@@ -789,6 +807,14 @@ export default class Chat extends View {
       return;
     }
     const slot = this.slot;
+    // A question is waiting above: the box keeps the words, says so, and sends
+    // them once it is answered (or the person types them as the answer).
+    if (this.chat?.question && this.chat.question.id !== this.answeredQ) {
+      this.holdSend = slot;
+      this.refusal = QUESTION_WAITING;
+      this.cx.notify();
+      return;
+    }
     const taken = this.files ?? [];
     const typed = this.input.value();
     const echo = { ...echoOf(body), slot };
@@ -818,6 +844,17 @@ export default class Chat extends View {
         const now = this.input.value();
         this.input.set_value(now.trim() === "" ? typed : `${typed}\n${now}`);
         this.files = [...taken, ...(this.files ?? [])];
+      }
+      // The service saw a question the page had not shown yet: the same, held.
+      if (err?.code === "question_waiting") {
+        this.holdSend = slot;
+        this.holdAfter = Date.now() + FLOOR_MS;
+        if (slot === this.slot) this.refusal = QUESTION_WAITING;
+        this.inflight -= 1;
+        this.sending = this.inflight > 0;
+        this.cx.notify();
+        this.refresh();
+        return;
       }
       const said = reason(err);
       // Only the conversation the send came from shows the refusal; the sidebar's
@@ -890,6 +927,7 @@ export default class Chat extends View {
   async choose(card, button) {
     if (!button || this.answering !== null) return;
     if (button.kind === "answer") return this.answer(card, button.answer, button);
+    if (button.kind === "terminal") return this.answerTerminal(card, { option: button.option }, button);
     if (button.action === "reply") return this.type(card);
     if (button.action === "review") {
       this.confirming = null;
@@ -941,6 +979,50 @@ export default class Chat extends View {
     this.restore(card, sent.reason);
   }
 
+  /**
+   * Answers the question the agent's terminal waits on: the service presses the
+   * dialog's own keys, and the card closes. A refusal (the question was answered
+   * in the terminal meanwhile, the host could not press) puts the card back with
+   * the reason under it.
+   */
+  async answerTerminal(card, { option = null, text = null }, button = null) {
+    if (!this.client || this.answering !== null) return;
+    if (option === null && String(text ?? "").trim() === "") return;
+    this.answering = card.id;
+    this.answerRefusal = null;
+    const said = option === null ? String(text).trim() : (button?.label ?? String(option));
+    this.mark(card, button ?? { busy: "Answering\u2026", chose: said }, "busy");
+    try {
+      await this.client.answerQuestion(this.space ?? COORDINATOR, card.question, { option, text: option === null ? String(text).trim() : null });
+      this.answeredQ = card.question;
+      this.typing = null;
+      this.draft?.set_value?.("");
+      this.answering = null;
+      this.mark(card, button ?? { chose: said }, "chose");
+      // The card closes now; the record catches up on the next read.
+      this.chat = { ...this.chat, question: null };
+      this.cx.notify();
+      await this.refresh();
+      this.releaseHeld(this.slot);
+    } catch (err) {
+      this.restore(card, reason(err));
+    }
+  }
+
+  /**
+   * Sends the message that was held while a question waited, once none does: the
+   * words are still in the composer, so it is the composer's own send.
+   */
+  releaseHeld(slot) {
+    if (this.holdSend === null || this.holdSend !== slot || slot !== this.slot) return;
+    if (this.chat?.question && this.chat.question.id !== this.answeredQ) return;
+    // The service saw a question this chat's page did not: wait for the next read before trying again.
+    if (Date.now() < (this.holdAfter ?? 0)) return;
+    this.holdSend = null;
+    this.refusal = null;
+    if (this.input.value().trim() !== "" || (this.files ?? []).length > 0) this.send();
+  }
+
   /** Runs one service action a card's button names. */
   async act(card, button = null) {
     const payload = button?.payload ?? card.action;
@@ -978,6 +1060,7 @@ export default class Chat extends View {
 
   /** Sends the words typed on a card: the answer of an ask, or a reply to the agent of a notice. */
   async respond(card, text) {
+    if (card.from === "terminal") return this.answerTerminal(card, { text });
     if ((card.asks ?? []).length > 0 || card.ask) return this.answer(card, text);
     const body = outgoing(card.task || COORDINATOR, text);
     if (!body || !this.client || this.answering !== null) return;
@@ -1033,11 +1116,16 @@ export default class Chat extends View {
     probe("Chat", board);
     const gone = answeredAsks(folder);
     const open = this.asks ? { ...this.asks, asks: (this.asks.asks ?? []).filter((ask) => !gone.has(`${ask.task}/${ask.id}`)) } : this.asks;
-    const live = cardsOf(board, open);
+    // The question the agent's terminal waits on is a card of this chat, at the
+    // bottom; the one just answered stays away until the record says it is over.
+    this.focusCard();
+    const asked = this.chat?.question && this.chat.question.id !== this.answeredQ ? questionCard(this.chat.question, this.space ?? COORDINATOR) : null;
+    const live = [...cardsOf(board, open), ...(asked ? [asked] : [])];
     // A card the person just answered stays, saying what they chose, until the service stops listing it.
-    const every = this.held().size === 0 ? live : cardsOf(board, this.asks).filter((card) => this.held().has(card.id) || live.some((have) => have.id === card.id));
+    const every = this.held().size === 0 ? live : [...cardsOf(board, this.asks), ...(asked ? [asked] : [])].filter((card) => this.held().has(card.id) || live.some((have) => have.id === card.id));
     for (const id of [...this.held().keys()]) if (!every.some((card) => card.id === id)) this.held().delete(id);
     const list = this.space === null ? [] : forSpace(every, this.space);
+    this.shown = list;
     const rows = timeline(withEchoes(this.chat, this.myEchoes()), list);
     this.reveal(rows, list);
     const said =
@@ -1081,6 +1169,22 @@ export default class Chat extends View {
       )
       .when(this.working(), (el) => el.child(this.workingLine(t)))
       .child(this.composer(t, colors));
+  }
+
+  /** The waiting terminal question's card, pressed the way its button or Send presses it (live checks). */
+  pressShown(n, words = null) {
+    const card = (this.shown ?? []).find((c) => c.from === "terminal");
+    if (!card) return;
+    if (words !== null) this.respond(card, words);
+    else if (card.buttons[n - 1]) this.choose(card, card.buttons[n - 1]);
+  }
+
+  /** A request from the pane's Needs you pill to show this chat's card: the next reveal lands on it. */
+  focusCard() {
+    const want = shared(FOCUS_KEY);
+    if (!want || want.at === this.focusSeen) return;
+    this.focusSeen = want.at;
+    if (want.space === (this.space ?? COORDINATOR) && Date.now() - want.at < 10_000) this.pinned = "card";
   }
 
   /**
@@ -1311,7 +1415,7 @@ export default class Chat extends View {
    * An escalation is the engine's, with the verb a person still has to run.
    */
   card(t, colors, card_) {
-    const tone_ = card_.notice ? t.muted : card_.from === "ask" ? colors.red : colors.amber;
+    const tone_ = card_.notice ? t.muted : card_.from === "ask" || card_.from === "terminal" ? colors.red : colors.amber;
     const refused = this.answerRefusal?.card === card_.id;
     const busy = this.answering === card_.id;
     const pressed = this.held().get(card_.id) ?? null;
@@ -1332,6 +1436,21 @@ export default class Chat extends View {
           .bg(t.raised)
           .child(div().text_size(TEXT.id).font_medium().text_color(tone_).child(card_.title))
           .child(div().text_size(TEXT.body).text_color(t.foreground).child(card_.text))
+          .when(card_.from === "terminal" && pressed === null && (card_.options ?? []).length > 0, (el) =>
+            el.child(
+              v_flex()
+                .gap(3)
+                .children(
+                  card_.options.map((option) =>
+                    v_flex()
+                      .child(div().text_size(TEXT.body).font_medium().text_color(t.foreground).child(`${option.answer}. ${option.label}`))
+                      .when(option.description !== "", (inner) =>
+                        inner.child(div().pl(14).text_size(TEXT.label).text_color(t.muted).child(option.description)),
+                      ),
+                  ),
+                ),
+            ),
+          )
           .when(card_.verb !== null, (el) =>
             el.child(
               div()

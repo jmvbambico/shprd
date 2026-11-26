@@ -138,6 +138,123 @@ impl Message {
     }
 }
 
+/// One choice of a question the agent put to the person.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuestionOption {
+    /// The choice as the dialog shows it.
+    pub label: String,
+    /// What choosing it means; may be empty.
+    pub description: String,
+}
+
+/// One question of a dialog the agent is waiting on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Question {
+    /// The short tag over the question (`Host`); may be empty.
+    pub header: String,
+    /// The question itself.
+    pub question: String,
+    /// Whether more than one choice may be picked.
+    pub multi_select: bool,
+    /// The choices, in the order the dialog numbers them.
+    pub options: Vec<QuestionOption>,
+}
+
+/// A question tool call the agent made that has no answer in its record yet:
+/// its terminal shows the dialog and waits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingQuestion {
+    /// The tool call's own id, which names this question until it is answered.
+    pub id: String,
+    /// The dialog's questions, in order (almost always one).
+    pub questions: Vec<Question>,
+}
+
+/// The question a Claude Code record is waiting on, read from `bytes` (a whole
+/// record or its tail): the last `AskUserQuestion` call that no `tool_result`
+/// answers and no later reply follows. Lines that do not parse are skipped.
+pub fn claude_pending_question(bytes: &[u8]) -> Option<PendingQuestion> {
+    let mut pending: Option<PendingQuestion> = None;
+    for raw in bytes.split(|byte| *byte == b'\n') {
+        let Ok(value) = serde_json::from_slice::<Value>(raw) else {
+            continue;
+        };
+        if value.get("isSidechain") == Some(&Value::Bool(true)) {
+            continue;
+        }
+        let Some(blocks) = value
+            .get("message")
+            .and_then(|message| message.get("content"))
+            .and_then(Value::as_array)
+        else {
+            continue;
+        };
+        match value.get("type").and_then(Value::as_str) {
+            Some("assistant") => {
+                // Any later assistant line means the agent went on: it was answered.
+                pending = blocks.iter().find_map(|block| {
+                    (block.get("type").and_then(Value::as_str) == Some("tool_use")
+                        && block.get("name").and_then(Value::as_str) == Some("AskUserQuestion"))
+                    .then(|| question_of(block))
+                    .flatten()
+                });
+            }
+            Some("user") => {
+                let answered = blocks.iter().any(|block| {
+                    block.get("type").and_then(Value::as_str) == Some("tool_result")
+                        && pending.as_ref().is_some_and(|ask| {
+                            block.get("tool_use_id").and_then(Value::as_str) == Some(&ask.id)
+                        })
+                });
+                if answered {
+                    pending = None;
+                }
+            }
+            _ => {}
+        }
+    }
+    pending
+}
+
+/// One `AskUserQuestion` tool_use block as a pending question.
+fn question_of(block: &Value) -> Option<PendingQuestion> {
+    let id = block.get("id")?.as_str()?.to_owned();
+    let text = |value: &Value, key: &str| {
+        value
+            .get(key)
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_owned()
+    };
+    let questions: Vec<Question> = block
+        .get("input")?
+        .get("questions")?
+        .as_array()?
+        .iter()
+        .map(|question| Question {
+            header: text(question, "header"),
+            question: text(question, "question"),
+            multi_select: question.get("multiSelect") == Some(&Value::Bool(true)),
+            options: question
+                .get("options")
+                .and_then(Value::as_array)
+                .map(|options| {
+                    options
+                        .iter()
+                        .map(|option| QuestionOption {
+                            label: text(option, "label"),
+                            description: text(option, "description"),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        })
+        .filter(|question| !question.question.is_empty())
+        .collect();
+    (!questions.is_empty()).then_some(PendingQuestion { id, questions })
+}
+
 /// What one read answered.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Page {
@@ -387,6 +504,36 @@ impl Transcript {
                 older,
             });
         }
+    }
+
+    /// The question the agent's terminal is waiting on, for a program whose
+    /// record says so (Claude Code's question tool). `None` for any other
+    /// program and for a record with nothing unanswered.
+    pub fn pending_question(&self) -> Result<Option<PendingQuestion>, TranscriptError> {
+        let (TranscriptFormat::ClaudeJsonl, Source::File(path)) = (self.format, &self.source)
+        else {
+            return Ok(None);
+        };
+        let fail = |source: std::io::Error| TranscriptError::Read {
+            path: path.clone(),
+            source,
+        };
+        let mut file = std::fs::File::open(path).map_err(fail)?;
+        let len = file.metadata().map_err(fail)?.len();
+        let start = len.saturating_sub(MAX_BYTES as u64);
+        file.seek(SeekFrom::Start(start)).map_err(fail)?;
+        let mut buffer = Vec::with_capacity((len - start) as usize);
+        file.read_to_end(&mut buffer).map_err(fail)?;
+        // A window that starts mid-line leaves that partial line out.
+        let skip = if start > 0 {
+            buffer
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .map_or(buffer.len(), |at| at + 1)
+        } else {
+            0
+        };
+        Ok(claude_pending_question(&buffer[skip..]))
     }
 
     /// Whether `cursor` names a position in this session (not another's, not empty).
