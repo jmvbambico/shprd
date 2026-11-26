@@ -392,14 +392,24 @@ pub fn model_reads_images(model: &str) -> Option<bool> {
     let name = model.to_ascii_lowercase();
     // A vision variant of a text family (`kimi-k2-vl`) breaks the family's
     // rule: say nothing rather than guess.
-    if ["-vl", "vision", "omni"].iter().any(|w| name.contains(w)) {
+    let words: Vec<&str> = name
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+    if ["vl", "vision", "omni"].iter().any(|w| words.contains(w)) {
         return None;
     }
     const SEES: [&str; 5] = ["claude", "gpt-5", "gpt-4o", "gemini", "codex"];
     const BLIND: [&str; 5] = ["deepseek", "glm", "minimax", "qwen3-coder", "kimi-k2"];
-    if SEES.iter().any(|word| name.contains(word)) {
+    // A family name matches whole words only: `gpt-5` is the words `gpt`, `5`,
+    // so it never matches inside a longer, unrelated word.
+    let has = |family: &str| {
+        let parts: Vec<&str> = family.split('-').collect();
+        words.windows(parts.len()).any(|w| w == parts.as_slice())
+    };
+    if SEES.iter().any(|word| has(word)) {
         Some(true)
-    } else if BLIND.iter().any(|word| name.contains(word)) {
+    } else if BLIND.iter().any(|word| has(word)) {
         Some(false)
     } else {
         None
@@ -682,6 +692,11 @@ mod tests {
         assert_eq!(model_reads_images("DeepSeek-V4"), Some(false));
         assert_eq!(model_reads_images("mystery-1"), None);
         assert_eq!(model_reads_images("kimi-k2-vl"), None);
+        assert_eq!(model_reads_images("gpt-5.2-codex"), Some(true));
+        assert_eq!(model_reads_images("glm-5"), Some(false));
+        // Whole words only: a name that merely contains a family is unknown.
+        assert_eq!(model_reads_images("englmx-1"), None);
+        assert_eq!(model_reads_images("minimaxed-model"), None);
     }
 
     /// A script interactive shell can run, standing in for a real agent CLI.

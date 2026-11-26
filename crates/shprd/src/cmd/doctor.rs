@@ -1063,10 +1063,21 @@ fn preflight_section(
     detections: &[Detection],
     clean: &LaunchEnv,
 ) {
-    let pairs = clean.as_pairs();
+    let probes = preflight_probes(&facts.path_env, specs, detections, &clean.as_pairs());
+    preflight_lines(report.section("Preflight"), &probes);
+}
+
+/// Runs `node --version` and each installed agent's version command, returning
+/// one entry per program: `None` when it is not installed, else how it started.
+fn preflight_probes(
+    path_env: &str,
+    specs: &[HarnessSpec],
+    detections: &[Detection],
+    pairs: &[(String, Option<String>)],
+) -> Vec<(String, Option<Result<(), String>>)> {
     let mut probes: Vec<(String, Option<Result<(), String>>)> = Vec::new();
-    let node = find_binary("node", &facts.path_env)
-        .map(|path| preflight_probe(&path, &["--version".to_owned()], &pairs, PREFLIGHT_TIMEOUT));
+    let node = find_binary("node", path_env)
+        .map(|path| preflight_probe(&path, &["--version".to_owned()], pairs, PREFLIGHT_TIMEOUT));
     probes.push(("node".to_owned(), node));
     for detection in detections {
         let Some(binary) = &detection.binary else {
@@ -1075,10 +1086,10 @@ fn preflight_section(
         let Some(spec) = specs.iter().find(|spec| spec.id == detection.id) else {
             continue;
         };
-        let result = preflight_probe(binary, &spec.detect.version_args, &pairs, PREFLIGHT_TIMEOUT);
+        let result = preflight_probe(binary, &spec.detect.version_args, pairs, PREFLIGHT_TIMEOUT);
         probes.push((detection.id.clone(), Some(result)));
     }
-    preflight_lines(report.section("Preflight"), &probes);
+    probes
 }
 
 /// One line per probed program: started cleanly, not installed, or why not.
@@ -1406,6 +1417,29 @@ mod tests {
             "{text}"
         );
         assert!(!page.has_fail());
+    }
+
+    #[test]
+    fn preflight_runs_node_and_names_its_first_error_line() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap_or_else(|err| panic!("{err}"));
+        let node = dir.path().join("node");
+        std::fs::write(
+            &node,
+            "#!/bin/sh\necho 'dyld: Library not loaded: libnode' >&2\nexit 134\n",
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+        std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o755))
+            .unwrap_or_else(|err| panic!("{err}"));
+        let path_env = dir.path().display().to_string();
+        let probes = preflight_probes(&path_env, &[], &[], &[]);
+        let [(name, Some(Err(why)))] = probes.as_slice() else {
+            panic!("node must be probed and fail: {probes:?}");
+        };
+        assert_eq!(name, "node");
+        assert!(why.contains("Library not loaded"), "{why}");
+        let none = preflight_probes("", &[], &[], &[]);
+        assert!(matches!(none.as_slice(), [(_, None)]), "{none:?}");
     }
 
     #[test]

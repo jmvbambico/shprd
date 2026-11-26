@@ -267,7 +267,7 @@ fn image_proofs(packet: &Path) -> Vec<String> {
 /// Whether a file name is an image by its extension.
 fn is_image(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
-    ["png", "jpg", "jpeg", "gif", "webp"]
+    ["png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff"]
         .iter()
         .any(|ext| lower.ends_with(&format!(".{ext}")))
 }
@@ -276,27 +276,14 @@ fn is_image(name: &str) -> bool {
 /// its packet and its model cannot read images.
 ///
 /// Empty when there is no image proof, the model reads images, or nothing says
-/// it cannot (an unknown model is never guessed blind). Lines that speak of
-/// something seen are listed; when none do, every line is, since the packet
-/// cannot say which one the picture was for.
+/// it cannot (an unknown model is never guessed blind). Otherwise every line
+/// is listed: the packet cannot say which line a picture was proof for, and a
+/// line left off the list would read as judged.
 pub fn unjudged_lines(acceptance: &[String], images: &[String], reviewer: &str) -> Vec<String> {
     if images.is_empty() || shprd_agents::detect::model_reads_images(reviewer) != Some(false) {
         return Vec::new();
     }
-    const VISUAL: [&str; 5] = ["screenshot", "see", "shows", "visible", "looks"];
-    let visual: Vec<String> = acceptance
-        .iter()
-        .filter(|line| {
-            let lower = line.to_ascii_lowercase();
-            VISUAL.iter().any(|word| lower.contains(word))
-        })
-        .cloned()
-        .collect();
-    if visual.is_empty() {
-        acceptance.to_vec()
-    } else {
-        visual
-    }
+    acceptance.to_vec()
 }
 
 /// Records, as a card on the task, that the review was degraded by image proof
@@ -331,17 +318,20 @@ fn note_unjudged_images(
     }
 }
 
+/// The text every crash card for one reviewer tab begins with, so a pass that
+/// sees the card already in the log does not raise it twice.
+pub fn reviewer_crash_marker(task: &str, attempt: u32, tab: &str) -> String {
+    format!("reviewer crashed (exit or signal) on {task} attempt {attempt} (tab {tab}), retry?")
+}
+
 /// Records that a reviewer ended without writing findings, as a card asking
 /// whether to retry, with the last lines of its output. The card is the
-/// recorded event.
-///
-/// The caller that notices a reviewer's exit (the watcher, in a file outside
-/// this task's scope) is what calls it.
-#[allow(dead_code)]
+/// recorded event of the reviewer's exit.
 pub fn record_reviewer_crash(
     ctx: &Ctx,
     task: &str,
     attempt: u32,
+    tab: &str,
     output: &str,
 ) -> Result<(), CliError> {
     let lines: Vec<&str> = output.lines().collect();
@@ -351,7 +341,8 @@ pub fn record_reviewer_crash(
         EventKind::Escalated {
             task: Some(task.to_string()),
             body: format!(
-                "reviewer crashed (exit or signal) on attempt {attempt}, retry? Last output:\n{tail}"
+                "{} Last output:\n{tail}",
+                reviewer_crash_marker(task, attempt, tab)
             ),
             default_action: "wait for the person".to_string(),
         },
@@ -369,7 +360,11 @@ mod tests {
     #[test]
     fn blind_reviewer_with_image_proof_leaves_lines_unjudged() {
         let got = unjudged_lines(&acc(), &["a.png".into()], "pi:glm-5");
-        assert_eq!(got, vec!["the page shows a button".to_string()]);
+        assert_eq!(
+            got,
+            acc(),
+            "every line is unjudged: the picture's line is unknown"
+        );
     }
 
     #[test]
@@ -382,6 +377,7 @@ mod tests {
     #[test]
     fn images_are_told_by_extension() {
         assert!(is_image("Shot.PNG"));
+        assert!(is_image("a.bmp") && is_image("a.TIFF"));
         assert!(!is_image("out.txt"));
     }
 }

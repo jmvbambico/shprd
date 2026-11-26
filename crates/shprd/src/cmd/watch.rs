@@ -144,6 +144,11 @@ pub struct Watcher {
     /// A reviewer's bad file is one escalation, not one per tick: the mark is
     /// cleared by a rewrite, which is the reviewer's second chance.
     rejected: BTreeMap<PathBuf, SystemTime>,
+    /// Per reviewer tab: the last lines its pane showed.
+    ///
+    /// A pane that is gone cannot be read, so the output a crash card quotes is
+    /// the last sample taken while the reviewer was alive.
+    reviewer_tails: BTreeMap<String, String>,
     /// When the orchestrator was first seen waiting on a prompt of its own.
     ///
     /// `None` while it is not, so the clock starts the first tick that finds
@@ -164,6 +169,7 @@ impl Watcher {
             cooldowns: BTreeMap::new(),
             policy,
             rejected: BTreeMap::new(),
+            reviewer_tails: BTreeMap::new(),
             orchestrator_blocked_since: None,
             orchestrator_escalated: false,
         }
@@ -231,6 +237,12 @@ impl Watcher {
             };
             let path = review::findings_path(&reviews, &env.run, &task.id, attempt);
             let Some(modified) = settled_mtime(&path) else {
+                // No findings file at all: the reviewer is still working, or it
+                // ended without writing any. A file that exists but is not
+                // settled is mid-write, and is never a crash.
+                if !path.exists() {
+                    self.watch_reviewer(mux, env, state, (&task.id, attempt), lines)?;
+                }
                 continue;
             };
             if let Err(err) = verdict::read_findings(&path) {
@@ -265,6 +277,54 @@ impl Watcher {
                 verdict::Outcome::AlreadyDecided => continue,
             };
             lines.push(format!("\u{25c7} {} review {word}", task.id));
+        }
+        Ok(())
+    }
+
+    /// Samples a reviewer that has not written findings yet, and raises a card
+    /// when its tab is gone: it exited or was killed without a verdict.
+    ///
+    /// One card per reviewer tab, whichever pass or restart noticed it; a
+    /// retried review opens a new tab and is watched afresh. A host that cannot
+    /// answer says nothing about the reviewer, so it is never read as an exit.
+    fn watch_reviewer(
+        &mut self,
+        mux: &dyn Host,
+        env: &SpawnEnv<'_>,
+        state: &RunState,
+        (task, attempt): (&str, u32),
+        lines: &mut Vec<String>,
+    ) -> Result<(), CliError> {
+        let record = review::tab_record_path(&env.briefs_dir, &env.run, task, attempt);
+        let Some(tab) = std::fs::read_to_string(record)
+            .ok()
+            .map(|text| text.trim().to_string())
+            .filter(|tab| !tab.is_empty())
+        else {
+            return Ok(());
+        };
+        let marker = verdict::reviewer_crash_marker(task, attempt, &tab);
+        if state
+            .escalations
+            .iter()
+            .any(|card| card.body.starts_with(&marker))
+        {
+            return Ok(());
+        }
+        match pane_for(mux, env, &tab) {
+            Ok(Some(pane)) => {
+                if let Ok(screen) = mux.read(&pane, 20) {
+                    self.reviewer_tails.insert(tab, screen);
+                }
+            }
+            Ok(None) | Err(MuxError::NotFound { .. }) => {
+                let tail = self.reviewer_tails.remove(&tab).unwrap_or_default();
+                verdict::record_reviewer_crash(env.ctx, task, attempt, &tab, &tail)?;
+                lines.push(format!(
+                    "escalated {task}: the reviewer ended without findings"
+                ));
+            }
+            Err(err) => eprintln!("warning: cannot look up the reviewer tab of {task}: {err}"),
         }
         Ok(())
     }
@@ -3195,6 +3255,57 @@ project_dirs = []
             !lines.iter().any(|line| line.contains("review p")),
             "a review this pass did not decide is not reported as its own: {lines:?}"
         );
+    }
+
+    /// A reviewer whose tab vanishes without findings raises one card, with the
+    /// last lines it showed; a live reviewer raises none.
+    #[test]
+    fn a_reviewer_that_ends_without_findings_raises_one_crash_card() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.env(&ctx, &["codex"]);
+        awaiting_review_task(&ctx);
+        let mux = mux_with_workspace(&scratch);
+        let space = mux
+            .find_space(&spawn::repo_space_name(&scratch.repo_name()))
+            .unwrap_or_else(|err| panic!("{err}"))
+            .unwrap_or_else(|| panic!("no space"));
+        let tab = mux.with_pane(&space.id, "reviewer");
+        mux.set_screen(&tab.root_pane, "dyld: Library not loaded: libfoo");
+        let record = review::tab_record_path(&env.briefs_dir, &env.run, "T1", 1);
+        std::fs::create_dir_all(record.parent().unwrap_or(&env.briefs_dir))
+            .unwrap_or_else(|err| panic!("{err}"));
+        std::fs::write(&record, tab.id.as_str()).unwrap_or_else(|err| panic!("{err}"));
+
+        let tick_on = |mux: &FakeMux, watcher: &mut Watcher, ctx: &Ctx, env: &SpawnEnv<'_>, now| {
+            let before = events(ctx).len();
+            let lines = watcher
+                .tick(mux, env, now)
+                .unwrap_or_else(|err| panic!("{err}"));
+            (lines, events(ctx)[before..].to_vec())
+        };
+        let mut watcher = Watcher::new(Policy::default());
+        let (_, fresh) = tick_on(&mux, &mut watcher, &ctx, &env, 1_000);
+        assert!(
+            !appended(&fresh, is_escalation),
+            "a live reviewer is not a crash"
+        );
+
+        mux.close_tab(&tab.id).unwrap_or_else(|err| panic!("{err}"));
+        let (lines, fresh) = tick_on(&mux, &mut watcher, &ctx, &env, 2_000);
+        let body = fresh
+            .iter()
+            .find_map(|event| match &event.kind {
+                EventKind::Escalated { body, .. } => Some(body.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no crash card: {lines:?}"));
+        assert!(body.contains("reviewer crashed"), "{body}");
+        assert!(body.contains("retry?"), "{body}");
+        assert!(body.contains("Library not loaded"), "{body}");
+
+        let (_, again) = tick_on(&mux, &mut watcher, &ctx, &env, 3_000);
+        assert!(!appended(&again, is_escalation), "one card per crash");
     }
 
     /// A blocking finding fails the gate, and the line says so.
