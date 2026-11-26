@@ -124,7 +124,8 @@ pub fn record_baselines(ctx: &Ctx, base: &str) -> Result<usize, anyhow::Error> {
     ctx.commit(EventKind::GateBaselined {
         base_sha: sha,
         entries: ran,
-    })?;
+    })
+    .map_err(|err| anyhow!("recording the gate baseline: {err:?}"))?;
     Ok(count)
 }
 
@@ -169,7 +170,7 @@ fn ensure_branch(repo: &Path, base: &str, branch: &str) -> Result<bool, CliError
 /// collected, reported and escalated while the ledger still accepts an
 /// escalation.
 pub fn finish(mux: &dyn Host, ctx: &Ctx, home: Option<&Path>, end: EndRun) -> Result<(), CliError> {
-    let state = ctx.state()?;
+    let state = ctx.state().map_err(|err| anyhow::anyhow!("{err:?}"))?;
     let kind = end_kind(&state, end)?;
     ctx.check(&kind)?;
     let watch = watch_pane(ctx);
@@ -487,7 +488,7 @@ mod tests {
         );
         let n = record_baselines(&ctx, "main")?;
         assert_eq!(n, 1);
-        let state = ctx.state()?;
+        let state = ctx.state().map_err(|err| anyhow::anyhow!("{err:?}"))?;
         let entry = state
             .gate_baselines
             .entries
