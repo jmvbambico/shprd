@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 const FAKE_SERVICE: &str = r#"
-import json, os, sys, uuid
+import json, os, socketserver, sys, uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 state, version = sys.argv[1], sys.argv[2]
@@ -48,7 +48,16 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
-server = HTTPServer(("127.0.0.1", 0), Handler)
+class Server(HTTPServer):
+    # HTTPServer.server_bind looks the host's full name up (socket.getfqdn),
+    # which can stall for many seconds on a CI Mac; a loopback test server
+    # needs no name.
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name = "127.0.0.1"
+        self.server_port = self.server_address[1]
+
+server = Server(("127.0.0.1", 0), Handler)
 record = {"port": server.server_address[1], "id": ident, "pid": os.getpid(), "version": version, "root": ""}
 tmp = os.path.join(state, "service.json.tmp")
 with open(tmp, "w") as out:
