@@ -3,10 +3,10 @@
 //! A repository can be red before a run starts (62 eslint errors on `main`).
 //! A hand-in is then judged against that baseline: a gate that fails no worse
 //! than it did on the base is *pre-existing*, and only a regression refuses.
-//! The logic here is pure; the one file it reads and writes is the store.
+//! The logic here is pure: the baselines themselves live in the event log
+//! (`GateBaselined`) and fold into the run state.
 
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -45,50 +45,7 @@ pub struct Baselines {
     pub entries: Vec<BaselineEntry>,
 }
 
-/// Why a baseline could not be stored.
-#[derive(Debug, thiserror::Error)]
-pub enum BaselineError {
-    /// The file could not be written.
-    #[error("writing the gate baseline {path}: {source}")]
-    Write {
-        /// The file.
-        path: PathBuf,
-        /// The cause.
-        source: std::io::Error,
-    },
-    /// The entries could not be encoded.
-    #[error("encoding the gate baseline: {0}")]
-    Encode(#[from] serde_json::Error),
-}
-
-/// Where the repository at `root` keeps its baselines.
-pub fn store_path(root: &Path) -> PathBuf {
-    root.join(".shprd").join("gate-baselines.json")
-}
-
 impl Baselines {
-    /// Reads the store; a missing or unreadable one is empty (no baseline means
-    /// no leniency).
-    pub fn load(root: &Path) -> Self {
-        std::fs::read_to_string(store_path(root))
-            .ok()
-            .and_then(|text| serde_json::from_str(&text).ok())
-            .unwrap_or_default()
-    }
-
-    /// Writes the store.
-    pub fn save(&self, root: &Path) -> Result<(), BaselineError> {
-        let path = store_path(root);
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).map_err(|source| BaselineError::Write {
-                path: path.clone(),
-                source,
-            })?;
-        }
-        let text = serde_json::to_string_pretty(self)?;
-        std::fs::write(&path, text).map_err(|source| BaselineError::Write { path, source })
-    }
-
     /// The entry for `command`.
     pub fn find(&self, command: &str) -> Option<&BaselineEntry> {
         self.entries
@@ -101,7 +58,7 @@ impl Baselines {
         match self
             .entries
             .iter_mut()
-            .find(|one| one.command == entry.command)
+            .find(|one| one.command.trim() == entry.command.trim())
         {
             Some(slot) => *slot = entry,
             None => self.entries.push(entry),
@@ -290,20 +247,6 @@ mod tests {
     fn an_unreadable_failure_is_a_regression() {
         let base = entry(62, &[]);
         assert_eq!(judge(&base, "npm run lint", "boom"), Verdict::Regression);
-    }
-
-    #[test]
-    fn the_store_round_trips() {
-        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tmp: {e}"));
-        let mut stored = Baselines::default();
-        stored.upsert(entry(3, &[]).entries[0].clone());
-        stored.upsert(entry(4, &[]).entries[0].clone());
-        if let Err(e) = stored.save(dir.path()) {
-            panic!("save: {e}");
-        }
-        let back = Baselines::load(dir.path());
-        assert_eq!(back.entries.len(), 1);
-        assert_eq!(back.entries[0].fingerprint.errors, Some(4));
     }
 
     #[test]
