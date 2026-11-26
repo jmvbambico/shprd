@@ -538,7 +538,8 @@ pub const SCOPE_WIDEN_ASK_PREFIX: &str = "scope-widen-";
 
 /// Whether `ask` is a scope card (a refused hand-in's or a widening's) an older
 /// build raised. Declared paths are a hint now, so every such card is moot: no
-/// client draws one, open or not, and every client asks this to agree.
+/// client draws one as open (only `shprd ask list --all` still lists it, as
+/// history), and every client asks this to agree.
 pub fn is_scope_card(ask: &str) -> bool {
     ask.starts_with(SCOPE_WIDEN_ASK_PREFIX)
         || ask.starts_with(crate::gate::HAND_IN_REFUSED_ASK_PREFIX)

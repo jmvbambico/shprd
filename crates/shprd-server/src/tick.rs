@@ -1655,9 +1655,10 @@ impl Worker {
         else {
             return Ok(None);
         };
+        // The note names the commit when git can resolve it, else the branch.
         let head = Git::new(&self.repo)
             .rev_parse(&attempt.branch)
-            .unwrap_or_default();
+            .unwrap_or_else(|_| attempt.branch.clone());
         let err = LandError::Conflict {
             commit: head,
             files,
