@@ -1781,7 +1781,7 @@ fn check_review_requested(
 /// failed, which is what the rule means: a human's word that this failure may
 /// land. A failed task is `Failed` rather than `Passed`, so the acceptance is
 /// also what lets a landing look at the work at all.
-fn accepted_after_failure(task: &Task) -> bool {
+pub fn accepted_after_failure(task: &Task) -> bool {
     let Some(failed) = task
         .latest_attempt()
         .and_then(|attempt| attempt.gates.iter().rfind(|gate| !gate.passed))

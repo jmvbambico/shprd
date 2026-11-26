@@ -44,6 +44,7 @@ describe("Shell: tasks", () => {
         attempts: [],
         added_at_ms: 0,
         touched_at_ms: 0,
+        accepted_failure: false,
       },
     ],
     agents: [],

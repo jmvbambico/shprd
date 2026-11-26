@@ -409,6 +409,9 @@ pub struct TaskSignal {
     /// Agent stopped*, not a failed attempt's own words (M7a §5, `agents.py:170`):
     /// nothing the attempt said is the reason, the person's own stop is.
     pub stopped: bool,
+    /// True when a person accepted the newest failure
+    /// (`shprd_core::rules::accepted_after_failure`): the task then reads Ready.
+    pub accepted_failure: bool,
     /// Why a person dropped it, when one did.
     pub dropped_reason: Option<String>,
     /// Asks still waiting for the person, oldest first.
@@ -454,6 +457,7 @@ impl Default for TaskSignal {
             merge: MergeFacts::default(),
             failure: None,
             stopped: false,
+            accepted_failure: false,
             dropped_reason: None,
             open_asks: Vec::new(),
             cards: Vec::new(),
@@ -483,6 +487,7 @@ impl TaskSignal {
             wait: reported_wait(task),
             failure: failure_reason(task),
             stopped: task.latest_attempt().is_some_and(|attempt| attempt.stopped),
+            accepted_failure: shprd_core::rules::accepted_after_failure(task),
             dropped_reason: task.dropped_reason.clone(),
             open_asks: state
                 .asks
@@ -825,6 +830,11 @@ fn parked(signal: &TaskSignal) -> Derived {
             if signal.stopped {
                 return Derived::needs(Need::Stopped, STOPPED);
             }
+            // A person said "take it as it is": the failure is decided and what
+            // is left is their Accept, so it reads Ready like a passed task.
+            if signal.accepted_failure {
+                return Derived::new(DerivedStatus::Ready, None, None);
+            }
             Derived::needs(Need::Attention, signal.failure.as_deref().unwrap_or(FAILED))
         }
         TaskStatus::Dropped => {
@@ -1105,6 +1115,18 @@ mod tests {
         signal.stopped = true;
         signal.failure = Some("the agent said it gave up".to_string());
         signal
+    }
+
+    #[test]
+    fn a_failure_a_person_accepted_reads_ready() {
+        let mut signal = task(TaskStatus::Failed);
+        signal.failure = Some("a gate failed".to_string());
+        assert_eq!(
+            derive_from_fold(&signal, NOW).status,
+            DerivedStatus::NeedsYou
+        );
+        signal.accepted_failure = true;
+        assert_eq!(derive_from_fold(&signal, NOW).status, DerivedStatus::Ready);
     }
 
     /// A task in the given state with a worker that has been idle since well
@@ -1740,10 +1762,11 @@ mod tests {
             Some(signal) => derive_status(&signal, &LiveAgents::default(), fixture::NOW),
             None => panic!("the fixture has {id}"),
         };
-        // The folded fixture: landed, failed at a gate, and waiting its turn.
+        // The folded fixture: landed, failed at a gate but accepted by a person
+        // (its override), and waiting its turn.
         assert_eq!(read("M1.1").status, DerivedStatus::Done);
-        assert_eq!(read("M1.2").status, DerivedStatus::NeedsYou);
-        assert_eq!(read("M1.2").needs, Some(Need::Attention));
+        assert_eq!(read("M1.2").status, DerivedStatus::Ready);
+        assert_eq!(read("M1.2").needs, None);
         assert_eq!(read("M1.3"), Derived::new(DerivedStatus::ToDo, None, None));
         assert_eq!(TaskSignal::from_state(&state, "M9.9"), None);
     }

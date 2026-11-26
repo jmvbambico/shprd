@@ -296,6 +296,11 @@ pub struct TaskDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub phase: Option<String>,
+    /// True exactly when a person accepted the task's newest failure with an
+    /// `integrate_after_failed_gate` override: it then reads Ready and Accept is
+    /// offered although its status is still failed.
+    #[serde(default)]
+    pub accepted_failure: bool,
     /// When the task was added, ms since the Unix epoch.
     ///
     /// A board shows the newest work first and folds a run's old leftovers out
