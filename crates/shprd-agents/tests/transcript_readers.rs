@@ -1219,3 +1219,35 @@ fn a_record_longer_than_one_read_does_not_hide_what_follows() {
     assert_eq!(page.messages[2].role, Role::Assistant);
     assert!(!page.more);
 }
+
+/// A Claude record whose last tool call is a question nobody answered yet.
+#[test]
+fn claude_names_the_question_its_terminal_is_waiting_on() {
+    let bytes = fs::read(fixtures().join("claude-question/pending.jsonl")).unwrap();
+    let ask = shprd_agents::transcript::claude_pending_question(&bytes).expect("a question waits");
+    assert_eq!(ask.id, "toolu_host");
+    assert_eq!(ask.questions.len(), 1);
+    let question = &ask.questions[0];
+    assert_eq!(question.header, "Host");
+    assert!(question.question.starts_with("Can I set this repo's host"));
+    assert!(!question.multi_select);
+    let labels: Vec<&str> = question.options.iter().map(|o| o.label.as_str()).collect();
+    assert_eq!(labels, ["Yes, set it (Recommended)", "No"]);
+    assert_eq!(question.options[1].description, "Leave it on auto.");
+}
+
+/// Once the answer is recorded (or the agent went on) nothing waits.
+#[test]
+fn claude_has_no_question_once_it_is_answered() {
+    let bytes = fs::read(fixtures().join("claude-question/answered.jsonl")).unwrap();
+    assert_eq!(
+        shprd_agents::transcript::claude_pending_question(&bytes),
+        None
+    );
+    let mut more = fs::read(fixtures().join("claude-question/pending.jsonl")).unwrap();
+    more.extend_from_slice(br#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"ok"}]}}"#);
+    assert_eq!(
+        shprd_agents::transcript::claude_pending_question(&more),
+        None
+    );
+}

@@ -616,6 +616,50 @@ impl shprd_server::ChatWriter for HostChat {
             .map_err(|err| err.to_string())
     }
 
+    fn answer(
+        &self,
+        space: Option<&str>,
+        steps: &[shprd_server::AnswerStep],
+    ) -> Result<(), String> {
+        use shprd_server::AnswerStep;
+        let ctx = Ctx::new(self.repo.clone(), Actor::Human, false, true);
+        let pane = match space {
+            None => crate::cmd::spawn::coordinator_pane(self.host.as_ref(), &self.home, &ctx),
+            Some(task) => crate::cmd::spawn::task_pane(self.host.as_ref(), &self.home, &ctx, task),
+        }
+        .map_err(|err| err.to_string())?;
+        for step in steps {
+            match step {
+                AnswerStep::Key(key) => {
+                    let key = match key {
+                        shprd_server::TermKey::Down => shprd_mux::Key::Down,
+                        shprd_server::TermKey::Enter => shprd_mux::Key::Enter,
+                        other => return Err(format!("{other:?} is not a key an answer presses")),
+                    };
+                    self.host
+                        .keys(&pane, &[key])
+                        .map_err(|err| err.to_string())?;
+                    // The dialog redraws after each key: a text line opened by
+                    // Enter is not there to type into for a moment.
+                    std::thread::sleep(Duration::from_millis(120));
+                }
+                AnswerStep::Text(text) => {
+                    // Left at the cursor as typed; a host that cannot type
+                    // without submitting gets each character as a key press.
+                    if self.host.write(&pane, text, false).is_err() {
+                        let keys: Vec<shprd_mux::Key> =
+                            text.chars().map(shprd_mux::Key::Char).collect();
+                        self.host
+                            .keys(&pane, &keys)
+                            .map_err(|err| err.to_string())?;
+                    }
+                    std::thread::sleep(Duration::from_millis(120));
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn send(&self, space: Option<&str>, text: &str) -> Result<(), String> {
         // A folder that is not a repository yet becomes one now, at the person's
         // first message and not when the window merely showed it: the work
