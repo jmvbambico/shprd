@@ -2122,7 +2122,8 @@ pub(crate) fn brief_context(
         }
         notes.push_str(&format!(
             "The main checkout is at {} (read-only: read from it, never write to it); files \
-             that are untracked or git-ignored there are not in your worktree.",
+             that are untracked or git-ignored there are not in your worktree. A linked file \
+             points into it: to change one, replace the link with a copy first.",
             env.ctx.root.display()
         ));
         task.set(Key::Task(TaskKey::StartNotes), Value::Text(notes));
@@ -7162,6 +7163,12 @@ project_dirs = []
         let scratch = Scratch::new();
         let (_, brief) = spawned_with("version = 1\n", &scratch);
         assert!(!brief.contains("READ-THE-DESIGN-FIRST"), "{brief}");
+        // Only the read-only checkout line fills the start notes.
+        let start = brief.find("Before you start").map(|at| &brief[at..]);
+        assert!(
+            start.is_some_and(|rest| rest.contains("read-only: read from it")),
+            "{brief}"
+        );
         assert!(!brief.contains("Before you report"), "{brief}");
     }
 

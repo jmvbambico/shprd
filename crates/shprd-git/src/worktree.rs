@@ -694,7 +694,9 @@ fn seed_refusal(path: &str) -> Option<&'static str> {
     for part in path.components() {
         match part {
             std::path::Component::Normal(name) => {
-                if first && (name == ".git" || name == ".shprd" || name == ".dagr") {
+                // `.git` is refused at any depth (a nested repository's
+                // metadata); shprd's own directories only at the top.
+                if name == ".git" || (first && (name == ".shprd" || name == ".dagr")) {
                     return Some("a state directory is never seeded");
                 }
             }
@@ -805,11 +807,21 @@ pub fn unseen_mentions(repo: &Path, texts: &[&str], seeded: &[SeedEntry]) -> Vec
 
 /// Whether `text` names `path`: the whole path, not the tail of a longer one.
 fn names_path(text: &str, path: &str) -> bool {
+    let word = |c: char| c.is_alphanumeric() || matches!(c, '_' | '-' | '.' | '/');
+    // A directory path ends in `/`, which is its own boundary.
+    let dir = path.ends_with('/');
     text.match_indices(path).any(|(at, _)| {
-        text[..at]
-            .chars()
-            .next_back()
-            .is_none_or(|c| !(c.is_alphanumeric() || matches!(c, '_' | '-' | '.' | '/')))
+        let before = text[..at].chars().next_back().is_none_or(|c| !word(c));
+        let rest = &text[at + path.len()..];
+        let mut chars = rest.chars();
+        let after = dir
+            || match chars.next() {
+                None => true,
+                // a sentence's full stop is not part of the name
+                Some('.') => chars.next().is_none_or(|c| !word(c)),
+                Some(c) => !word(c),
+            };
+        before && after
     })
 }
 
@@ -847,6 +859,17 @@ mod tests {
             .run(&["rev-parse", "--git-path", "info/exclude"])
             .expect("git path");
         repo.join(listed.trim())
+    }
+
+    #[test]
+    fn seed_refusal_covers_nested_git_and_names_path_trailing_boundary() {
+        assert!(seed_refusal("vendor/repo/.git/config").is_some());
+        assert!(seed_refusal("config/.env").is_none());
+        assert!(names_path("edit .env now", ".env"));
+        assert!(names_path("see .env.", ".env"));
+        assert!(!names_path("edit .env.bak", ".env"));
+        assert!(!names_path("in secrets2/x", "secrets/"));
+        assert!(names_path("in secrets/x", "secrets/"));
     }
 
     #[test]
