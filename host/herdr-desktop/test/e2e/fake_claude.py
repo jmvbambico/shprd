@@ -119,7 +119,31 @@ out.write("fake claude ready\r\n")
 out.flush()
 asked = 0
 buffer = ""
+def midturn(spec):
+    """A message typed while the agent was mid-turn, the way Claude Code records it: a queue-operation
+    pair, a queued_command attachment, then the reply. `blob` first writes one record longer than a
+    read (a request dump), which is what once hid everything after it."""
+    def raw(obj):
+        with open(path, "a") as f:
+            f.write(json.dumps(obj) + "\n")
+    if spec.get("blob"):
+        raw({"type": "api-request-blob", "blob": "x" * int(spec["blob"])})
+    raw({"type": "queue-operation", "operation": "enqueue", "timestamp": stamp(), "content": spec["prompt"]})
+    raw({"type": "queue-operation", "operation": "remove", "timestamp": stamp(), "content": spec["prompt"]})
+    raw({"type": "attachment", "isSidechain": False, "timestamp": stamp(),
+         "attachment": {"type": "queued_command", "prompt": spec["prompt"], "commandMode": "prompt", "origin": {"kind": "human"}}})
+    raw({"type": "attachment", "isSidechain": False, "timestamp": stamp(),
+         "attachment": {"type": "queued_command", "prompt": '<shprd-news task="demo" event="landed">demo is done: merged</shprd-news>'}})
+    time.sleep(1)
+    append("assistant", [{"type": "text", "text": spec["reply"]}])
+
+
 while True:
+    if os.path.exists(".fake-midturn"):
+        spec = json.load(open(".fake-midturn"))
+        os.remove(".fake-midturn")
+        midturn(spec)
+        continue
     if os.path.exists(".fake-ask"):
         spec = json.load(open(".fake-ask"))
         os.remove(".fake-ask")
