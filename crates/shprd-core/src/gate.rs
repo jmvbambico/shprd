@@ -1062,6 +1062,29 @@ mod tests {
     }
 
     #[test]
+    fn this_repos_own_list_flags_docs_and_github_but_not_crates() {
+        let globs = high_risk_globs_from_yaml(include_str!("../../../.agents/orchestration.yaml"));
+        for path in [
+            "docs/plan.md",
+            ".github/workflows/ci.yml",
+            "assets/logo.svg",
+            "LICENSE",
+            "README.md",
+            "data/skills/compat.toml",
+            "rust-toolchain.toml",
+        ] {
+            let flagged = protected_undeclared(&[path.to_string()], &[], &globs);
+            assert_eq!(flagged, [path], "{path} is protected");
+            assert_eq!(
+                protected_line(&flagged),
+                Some(format!("Touches protected paths: {path}"))
+            );
+        }
+        let crates = ["crates/shprd-core/src/gate.rs".to_string()];
+        assert!(protected_undeclared(&crates, &[], &globs).is_empty());
+    }
+
+    #[test]
     fn only_drop_and_take_leave_the_person_a_verb() {
         assert!(answer_leaves_a_verb("drop it"));
         assert!(answer_leaves_a_verb("  Take it as it is "));
