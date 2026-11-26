@@ -302,10 +302,13 @@ fn desktop_problem(probe: &Probe) -> String {
 
 /// Resolve the host for this machine, without opening it.
 ///
+/// Private on purpose: every production caller goes through [`select`], which
+/// keeps the choice sticky.
+///
 /// The settings are read for this home and repository — `host` is a machine
 /// setting, so the repository's committed file cannot set it — and the machine
 /// is asked only as much as the setting needs.
-pub fn resolve() -> Resolution {
+fn resolve() -> Resolution {
     let home = crate::ctx::resolve_home(None);
     let repo = crate::ctx::resolve_root(None).ok();
     let setting = home
@@ -511,7 +514,8 @@ fn probe(setting: HostChoice) -> Probe {
         core_problem: None,
         herdr: on_path("herdr"),
         tuios: on_path("tuios"),
-        herdr_running: on_path("herdr") && herdr_server_answers(&shprd_mux_herdr::HerdrMux::new()),
+        herdr_running: on_path("herdr")
+            && herdr_server_answers(shprd_mux_herdr::HerdrMux::new(), HERDR_PROBE_TIMEOUT),
     };
     let ask_core = attached || setting == HostChoice::HerdrDesktop;
     if ask_core {
@@ -573,9 +577,21 @@ struct ProbeError {
 /// in an hc child names the Herdr desktop's own socket, which listens but is not
 /// a herdr server, and a leftover socket file from a herdr that exited is not one
 /// either. Only a server that answers the herdr CLI counts.
-fn herdr_server_answers(mux: &shprd_mux_herdr::HerdrMux) -> bool {
-    mux.list_spaces().is_ok()
+///
+/// The herdr CLI is asked on its own thread and given `timeout`: a socket that
+/// accepts and never answers would otherwise hold the serialized [`select`], and
+/// with it every spawn and review. A call that does not answer in time counts as
+/// "not running".
+fn herdr_server_answers(mux: shprd_mux_herdr::HerdrMux, timeout: Duration) -> bool {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(mux.list_spaces().is_ok());
+    });
+    rx.recv_timeout(timeout).unwrap_or(false)
 }
+
+/// How long the herdr CLI may take to answer the "is a server running" probe.
+const HERDR_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Whether a program is on `PATH`.
 fn on_path(binary: &str) -> bool {
@@ -727,6 +743,24 @@ mod tests {
         super::test_select::uninstall();
         assert_eq!(counts.resolves.get(), 1, "the machine was probed once");
         assert_eq!(counts.opens.get(), 3, "every caller still gets a host");
+    }
+
+    #[test]
+    fn a_herdr_that_never_answers_counts_as_not_running() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("shprd-fake-herdr-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("herdr");
+        std::fs::write(&bin, "#!/bin/sh\nexec sleep 3\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let started = std::time::Instant::now();
+        let answered = super::herdr_server_answers(
+            shprd_mux_herdr::HerdrMux::with_bin(&bin),
+            std::time::Duration::from_millis(300),
+        );
+        assert!(!answered, "a silent herdr is not a running one");
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -900,7 +934,7 @@ exit 1
             "the desktop socket accepts connections"
         );
         assert!(
-            !super::herdr_server_answers(&mux(&desktop)),
+            !super::herdr_server_answers(mux(&desktop), std::time::Duration::from_secs(5)),
             "a listening desktop socket is not a herdr server"
         );
 
@@ -908,18 +942,21 @@ exit 1
         let tui = dir.path().join("herdr.sock");
         let listener = std::os::unix::net::UnixListener::bind(&tui).unwrap();
         assert!(
-            super::herdr_server_answers(&mux(&tui)),
+            super::herdr_server_answers(mux(&tui), std::time::Duration::from_secs(5)),
             "a live herdr server"
         );
         drop(listener);
         assert!(tui.exists());
         assert!(
-            !super::herdr_server_answers(&mux(&tui)),
+            !super::herdr_server_answers(mux(&tui), std::time::Duration::from_secs(5)),
             "a stale socket file is not a server"
         );
         // And no herdr binary at all.
         let missing = shprd_mux_herdr::HerdrMux::with_bin(dir.path().join("none"));
-        assert!(!super::herdr_server_answers(&missing));
+        assert!(!super::herdr_server_answers(
+            missing,
+            std::time::Duration::from_secs(5)
+        ));
     }
 
     #[test]
