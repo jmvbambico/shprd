@@ -112,6 +112,12 @@ const ROUND = 28;
 /** What the send box says while a question waits above it. */
 const QUESTION_WAITING = "A question is waiting above: answer it, and your message is sent after. Your text is kept.";
 
+/** How long a just-answered terminal question stays hidden while the record catches up. */
+const ANSWER_GRACE_MS = 6000;
+
+/** How long the card the Needs you pill took the person to stays outlined. */
+const LIT_MS = 2500;
+
 /** The shared key the pane's Needs you pill writes to take the chat to its card. */
 const FOCUS_KEY = "shprd.chat.focus";
 
@@ -153,6 +159,10 @@ export default class Chat extends View {
     this.answerRefusal = null;
     /** The terminal question just answered (its id), so its card does not come back before the record catches up. */
     this.answeredQ = null;
+    /** When it was answered: the keys are pressed blind, so a question the record still shows pending after `ANSWER_GRACE_MS` was not taken, and its card returns. */
+    this.answeredAt = 0;
+    /** Until when the card a Needs you pill took the person to is outlined. */
+    this.litUntil = 0;
     /** The conversation whose typed message waits for a question to be answered. */
     this.holdSend = null;
     /** The last "take me to the card" request this chat acted on (the pane's Needs you pill). */
@@ -420,7 +430,7 @@ export default class Chat extends View {
     const keep = this.keep ?? null;
     this.chat = fold(this.chat, answer, keep !== null && Date.now() < keep.until ? keep.text : null);
     // The question just answered is over, even while the record has not said so yet.
-    if (this.chat.question && this.chat.question.id === this.answeredQ) this.chat = { ...this.chat, question: null };
+    if (this.chat.question && this.answered(this.chat.question.id)) this.chat = { ...this.chat, question: null };
     if (keep !== null && (this.chat.session !== was || Date.now() >= keep.until)) this.keep = null;
     // A turn the transcript now holds is no longer an echo; a restart of the agent
     // starts another conversation, which no echo of the old one belongs to.
@@ -809,7 +819,7 @@ export default class Chat extends View {
     const slot = this.slot;
     // A question is waiting above: the box keeps the words, says so, and sends
     // them once it is answered (or the person types them as the answer).
-    if (this.chat?.question && this.chat.question.id !== this.answeredQ) {
+    if (this.chat?.question && !this.answered(this.chat.question.id)) {
       this.holdSend = slot;
       this.refusal = QUESTION_WAITING;
       this.cx.notify();
@@ -995,6 +1005,7 @@ export default class Chat extends View {
     try {
       await this.client.answerQuestion(this.space ?? COORDINATOR, card.question, { option, text: option === null ? String(text).trim() : null });
       this.answeredQ = card.question;
+      this.answeredAt = Date.now();
       this.typing = null;
       this.draft?.set_value?.("");
       this.answering = null;
@@ -1015,7 +1026,7 @@ export default class Chat extends View {
    */
   releaseHeld(slot) {
     if (this.holdSend === null || this.holdSend !== slot || slot !== this.slot) return;
-    if (this.chat?.question && this.chat.question.id !== this.answeredQ) return;
+    if (this.chat?.question && !this.answered(this.chat.question.id)) return;
     // The service saw a question this chat's page did not: wait for the next read before trying again.
     if (Date.now() < (this.holdAfter ?? 0)) return;
     this.holdSend = null;
@@ -1119,7 +1130,7 @@ export default class Chat extends View {
     // The question the agent's terminal waits on is a card of this chat, at the
     // bottom; the one just answered stays away until the record says it is over.
     this.focusCard();
-    const asked = this.chat?.question && this.chat.question.id !== this.answeredQ ? questionCard(this.chat.question, this.space ?? COORDINATOR) : null;
+    const asked = this.chat?.question && !this.answered(this.chat.question.id) ? questionCard(this.chat.question, this.space ?? COORDINATOR) : null;
     const live = [...cardsOf(board, open), ...(asked ? [asked] : [])];
     // A card the person just answered stays, saying what they chose, until the service stops listing it.
     const every = this.held().size === 0 ? live : [...cardsOf(board, this.asks), ...(asked ? [asked] : [])].filter((card) => this.held().has(card.id) || live.some((have) => have.id === card.id));
@@ -1179,12 +1190,28 @@ export default class Chat extends View {
     else if (card.buttons[n - 1]) this.choose(card, card.buttons[n - 1]);
   }
 
+  /** Whether this terminal question was just answered and its record has not caught up yet (within the grace). */
+  answered(id) {
+    if (id !== this.answeredQ) return false;
+    if (Date.now() - this.answeredAt < ANSWER_GRACE_MS) return true;
+    // Still pending after the grace: the keys did not take, so the card comes back.
+    this.answeredQ = null;
+    return false;
+  }
+
   /** A request from the pane's Needs you pill to show this chat's card: the next reveal lands on it. */
   focusCard() {
     const want = shared(FOCUS_KEY);
     if (!want || want.at === this.focusSeen) return;
     this.focusSeen = want.at;
-    if (want.space === (this.space ?? COORDINATOR) && Date.now() - want.at < 10_000) this.pinned = "card";
+    if (want.space === (this.space ?? COORDINATOR) && Date.now() - want.at < 10_000) {
+      this.pinned = "card";
+      this.litUntil = Date.now() + LIT_MS;
+      this.cx.spawn?.(async () => {
+        await this.cx.sleep(LIT_MS + 50);
+        this.cx.notify();
+      });
+    }
   }
 
   /**
@@ -1421,6 +1448,7 @@ export default class Chat extends View {
     const pressed = this.held().get(card_.id) ?? null;
     const buttons = card_.buttons ?? [];
     const line = footer(card_);
+    const lit = Date.now() < this.litUntil;
     return this.column(
       div()
       .w_full()
@@ -1432,8 +1460,8 @@ export default class Chat extends View {
           .gap(6)
           .rounded(RADIUS.card)
           .border_1()
-          .border_color(refused ? colors.red : card_.notice ? t.border : tone_)
-          .bg(t.raised)
+          .border_color(refused ? colors.red : lit ? t.foreground : card_.notice ? t.border : tone_)
+          .bg(lit ? t.selected ?? t.raised : t.raised)
           .child(div().text_size(TEXT.id).font_medium().text_color(tone_).child(card_.title))
           .child(div().text_size(TEXT.body).text_color(t.foreground).child(card_.text))
           .when(card_.from === "terminal" && pressed === null && (card_.options ?? []).length > 0, (el) =>

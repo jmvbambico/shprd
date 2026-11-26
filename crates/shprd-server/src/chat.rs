@@ -311,10 +311,12 @@ pub(crate) fn page(
     };
     watch_transcript(state, &transcript);
     // A question the terminal waits on is the card at the bottom of the chat,
-    // whatever page of the conversation this is.
+    // whatever page of the conversation this is. A record that cannot be read for a
+    // moment (an agent restarting) leaves the card out; it does not fail the page.
     answer.question = transcript
         .pending_question()
-        .map_err(|err| ApiReject::internal(err.to_string()))?
+        .ok()
+        .flatten()
         .as_ref()
         .map(question_dto);
     // No cursor of this session (a first read, a panel that reloaded, an agent
@@ -383,18 +385,19 @@ fn question_dto(pending: &PendingQuestion) -> ChatQuestionDto {
 
 /// The keys that answer a one-question, one-choice dialog, the same a person
 /// presses: Down to the row, Enter. `choice` is 0-based; the row after the last
-/// option is "Type something", which opens a text line the answer is typed into
-/// and Enter sends.
+/// option is "Type something", an inline text row: once the cursor is on it the
+/// answer is typed straight in and Enter sends. A leading Enter there would
+/// submit it empty, and claude declines the question (checked against a real
+/// claude dialog, claude 2.1.332).
 pub fn answer_steps(choice: usize, text: Option<&str>) -> Vec<AnswerStep> {
     let mut steps: Vec<AnswerStep> = (0..choice)
         .map(|_| AnswerStep::Key(TermKey::Down))
         .collect();
-    steps.push(AnswerStep::Key(TermKey::Enter));
     if let Some(text) = text {
         let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
         steps.push(AnswerStep::Text(one_line));
-        steps.push(AnswerStep::Key(TermKey::Enter));
     }
+    steps.push(AnswerStep::Key(TermKey::Enter));
     steps
 }
 

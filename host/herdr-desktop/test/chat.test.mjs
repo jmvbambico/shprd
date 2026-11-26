@@ -53,7 +53,7 @@ import {
   toolLine,
   when,
 } from "../mods/lib/chat.js";
-import { inputState } from "./stub-gpui.js";
+import { inputState, ScrollHandle } from "./stub-gpui.js";
 import { forSpace, cards as cardsOf, questionCard } from "../mods/lib/asks.js";
 
 /** A context that answers `cx.sleep`, `cx.notify`, `cx.spawn` and `cx.timer`. */
@@ -980,4 +980,40 @@ test("the Needs you pill's request lands the chat on its card, once, and only fo
   view.pinned = null;
   view.focusCard();
   assert.equal(view.pinned, null, "the same request is acted on once");
+});
+
+test("the Needs you pill scrolls the chat to the question card and outlines it", () => {
+  const msgs = Array.from({ length: 6 }, (_, i) => ({ id: `m${i}`, role: "assistant", text: `line ${i}`, at: 1 }));
+  const { view } = panel([page({ question: QUESTION, messages: msgs })]);
+  view.chat = fold(empty(), page({ question: QUESTION, messages: msgs }));
+  view.scroll = ScrollHandle.new();
+  const list = [questionCard(QUESTION, COORDINATOR)];
+  const rows = timeline(view.chat, list);
+  const cardAt = rows.findIndex((row) => row.kind === "card");
+  assert.ok(cardAt > 0, "the card is a row after the messages");
+  view.drawn = { rows: rows.length, cards: 1 };
+  view.pinned = null;
+  view.reveal(rows, list);
+  assert.deepEqual(view.scroll.revealed, [], "nothing moves by itself");
+  herdr.setShared("shprd.chat.focus", { space: COORDINATOR, at: Date.now() + 5 });
+  view.focusCard();
+  assert.ok(Date.now() < view.litUntil, "the card is outlined");
+  view.reveal(rows, list);
+  assert.deepEqual(view.scroll.revealed, [cardAt], "the chat scrolls to the card's row");
+});
+
+test("a question answered but still pending after the grace comes back", async () => {
+  const { view } = panel([page({ question: QUESTION })]);
+  view.client.answerQuestion = async () => ({ answered: true });
+  view.chat = fold(empty(), page({ question: QUESTION }));
+  await view.answerTerminal(questionCard(QUESTION, COORDINATOR), { option: 1 });
+  assert.equal(view.answered(QUESTION.id), true, "hidden while the record catches up");
+  const realNow = Date.now;
+  try {
+    Date.now = () => realNow() + 7000;
+    assert.equal(view.answered(QUESTION.id), false, "the keys did not take: the card is back");
+    assert.equal(view.answeredQ, null);
+  } finally {
+    Date.now = realNow;
+  }
 });
