@@ -71,7 +71,7 @@ engine validates every one:
 
 | Command | Who | Does |
 |---|---|---|
-| `shprd agent task add` | orchestrator | define a task: title, scope, acceptance, tags, deps |
+| `shprd agent task add` | orchestrator | define a task: title, declared paths (`--scope`, a hint only), acceptance, tags, deps |
 | `shprd agent spawn --task` | orchestrator | start a task (or its next attempt) on the next available worker, in its own worktree and tab |
 | `shprd agent prompt --task` | orchestrator | send a message to a task's agent |
 | `shprd agent report` | worker | submit status, tests, checks, changed paths, commit, skills used, and `--proof <path>` (never in the summary); one hand-in per attempt |

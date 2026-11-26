@@ -11,7 +11,7 @@ Status: design, with the M11 service, web app and desktop built. Language: Rust
 │  engine: event log, fold, transition rules, scheduler, gate runner    │
 │  contract: AGENTS.md + .shprd/config.toml                             │
 │  roster: CLI discovery, harness table, models, fallback, quota        │
-│  git: plain-git worktrees, integration branch, cherry-pick, scopes    │
+│  git: plain-git worktrees, integration branch, cherry-pick, clashes   │
 │  review routing, landing via gh, janitor                              │
 │  views: dagr run.json, brief, status, PR body                         │
 ├───────────────────────────────────────────────────────────────────────┤

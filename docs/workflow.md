@@ -13,17 +13,22 @@ shprd up ─► plan ─► spawn ─► work ─► report ─► review ─►
    repo's workspace, starts `shprd·chat`, and starts the orchestrator CLI in its
    own tab. An unfinished run is resumed, never restarted.
 2. **Plan.** You tell the orchestrator what you want. It splits the work into
-   tasks, each with a scope (paths it may touch), acceptance criteria, and tags
+   tasks, each with declared paths (where it expects to work, a hint), acceptance criteria, and tags
    (`ui`, `bug`, `feature`, `docs`, …), using `shprd agent task add`.
 3. **Spawn.** For each task, the engine picks the first *available* worker in
    the roster, creates a worktree on `shprd/<run>/<task>`, opens a tab, and
-   hands over a brief that names the skills to load. Tasks with overlapping
-   scopes are not run in parallel.
+   hands over a brief that names the skills to load. Declared paths are a hint,
+   not a limit: a worker changes what the task needs. Tasks that depend on each
+   other are ordered with `--dep`; two tasks that clash are caught by the
+   pre-review trial merge and again by the landing merge.
 4. **Work.** The worker implements the task and runs the repo's worker-level
    checks. The watchdog follows it (see [Availability](availability.md)).
 5. **Report.** The worker submits `shprd agent report` with its tests, changed
-   paths, commit and the skills it used. The engine checks the changed paths
-   against the scope and the report against what it saw run.
+   paths, commit and the skills it used. The engine checks the report against what it saw run. No hand-in, review
+   or landing is refused for the paths it changed. The only hard refusals are
+   committing `.shprd/` (except `.shprd/config.toml`), `.dagr/` or a real
+   `.env*` file. A task that touches a protected path it did not declare waits
+   for your Accept, even under auto-merge.
 6. **Review.** A reviewer from a different vendor gets the diff and the
    acceptance criteria as text. It never gets a worktree. Code decides whether
    the work passes, from fixed severity rules. A blocking finding sends the task
