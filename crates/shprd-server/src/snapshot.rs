@@ -309,7 +309,12 @@ mod tests {
 
     /// A run with one queued task `T1`.
     fn run_with_a_task() -> RunState {
-        let events = vec![
+        RunState::fold(&task_events()).expect("the fixture log folds")
+    }
+
+    /// The events behind [`run_with_a_task`].
+    fn task_events() -> Vec<Event> {
+        vec![
             Event {
                 seq: 1,
                 at_ms: NOW,
@@ -335,8 +340,77 @@ mod tests {
                     deps: Vec::new(),
                 },
             },
-        ];
-        RunState::fold(&events).expect("the fixture log folds")
+        ]
+    }
+
+    #[test]
+    fn accepted_failure_is_true_exactly_when_the_rule_says_so() {
+        let mut events = task_events();
+        for (seq, kind) in [
+            (
+                3,
+                EventKind::Spawned {
+                    task: "T1".to_string(),
+                    attempt: 1,
+                    agent: "claude".to_string(),
+                    model: None,
+                    worktree: "/wt".to_string(),
+                    branch: "b".to_string(),
+                },
+            ),
+            (
+                4,
+                EventKind::Reported {
+                    task: "T1".to_string(),
+                    attempt: 1,
+                    status: shprd_core::event::ReportStatus::Completed,
+                    summary: "done".to_string(),
+                    tests: Vec::new(),
+                    checks: Vec::new(),
+                    changed_paths: Vec::new(),
+                    commit: None,
+                    skills_used: Vec::new(),
+                    proofs: Vec::new(),
+                },
+            ),
+        ] {
+            events.push(Event {
+                seq,
+                at_ms: NOW,
+                actor: Actor::Engine,
+                kind,
+            });
+        }
+        events.push(Event {
+            seq: 5,
+            at_ms: NOW,
+            actor: Actor::Engine,
+            kind: EventKind::GateFailed {
+                task: "T1".to_string(),
+                attempt: 1,
+                gate: "review".to_string(),
+                findings: Vec::new(),
+                source: None,
+            },
+        });
+        let run = RunState::fold(&events).expect("folds");
+        let before = snapshot(&run, NOW);
+        assert!(!before.tasks[0].accepted_failure);
+        events.push(Event {
+            seq: 6,
+            at_ms: NOW,
+            actor: Actor::Human,
+            kind: EventKind::Override {
+                task: "T1".to_string(),
+                rule: shprd_core::rules::INTEGRATE_AFTER_FAILED_GATE.to_string(),
+                reason: "take it as it is".to_string(),
+            },
+        });
+        let run = RunState::fold(&events).expect("folds");
+        let after = snapshot(&run, NOW);
+        assert!(after.tasks[0].accepted_failure);
+        let task = run.tasks.get("T1").expect("T1");
+        assert!(shprd_core::rules::accepted_after_failure(task));
     }
 
     #[test]
