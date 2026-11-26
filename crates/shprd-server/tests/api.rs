@@ -1387,6 +1387,7 @@ fn spent_review_repo() -> TempDir {
                     command: "cargo test".into(),
                     exit_code: Some(0),
                     output_tail: String::new(),
+                    pre_existing: None,
                 }],
                 changed_paths: Vec::new(),
                 commit: Some("abc123".into()),

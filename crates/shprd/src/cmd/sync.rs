@@ -72,6 +72,10 @@ pub fn sync_verb(ctx: &Ctx, home: Option<&Path>) -> Result<(), CliError> {
                 int_sha: int_sha.clone(),
             })?;
             crate::cmd::emit(ctx, &event)?;
+            // The base moved, so its gates may have: re-baseline them.
+            if let Err(err) = crate::cmd::run::record_baselines(ctx, &base) {
+                eprintln!("warning: no gate baseline recorded: {err:#}");
+            }
             if !ctx.json {
                 println!("synced {branch} with {base} at {}", short(&int_sha));
             }

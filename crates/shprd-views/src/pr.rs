@@ -14,7 +14,6 @@
 //! against `run.jsonl` line by line; nothing here summarises, praises or
 //! guesses.
 
-use shprd_core::baseline::PRE_EXISTING_LABEL;
 use shprd_core::event::{Event, EventKind, Finding, Severity};
 use shprd_core::state::{OverrideRecord, RunState, Task, TaskStatus};
 
@@ -342,18 +341,17 @@ fn gate_lines(task: &Task) -> Vec<String> {
                 ));
             }
         }
-        // A check the worker ran that failed no worse on the base is
-        // recorded as passing, labelled; say so here.
+        // A check the worker ran that failed no worse than on the base is
+        // labelled by the engine; say so here.
         if let Some(report) = &attempt.report {
             for check in &report.checks {
-                if check.output_tail.starts_with(PRE_EXISTING_LABEL) {
-                    let first = check.output_tail.lines().next().unwrap_or_default();
+                if let Some(label) = &check.pre_existing {
                     lines.push(format!(
                         "- {} a{} `{}`: fails no worse than the base, {}",
                         task.id,
                         attempt.n,
                         check.gate,
-                        cell(first)
+                        cell(label)
                     ));
                 }
             }
@@ -505,8 +503,9 @@ mod tests {
         report.checks.push(shprd_core::event::CheckReport {
             gate: "lint".into(),
             command: "npm run lint".into(),
-            exit_code: Some(0),
-            output_tail: format!("{PRE_EXISTING_LABEL} (abc, 62 errors on base); exit 1\nx"),
+            exit_code: Some(1),
+            output_tail: "62 errors".into(),
+            pre_existing: Some("pre-existing on base (abc, 62 errors on base; exit 1)".into()),
         });
         let body = task_pr_body(&state.tasks["M1.1"]);
         assert!(body.contains("pre-existing on base"), "{body}");

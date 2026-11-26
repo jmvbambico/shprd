@@ -42,7 +42,7 @@ pub fn start(ctx: &Ctx, args: &RunStartArgs) -> Result<(), CliError> {
     ctx.check(&kind)?;
     let made = ensure_branch(&ctx.root, &args.base, &args.integration)?;
     let event = ctx.commit(kind)?;
-    if let Err(err) = record_baselines(&ctx.root, &args.base) {
+    if let Err(err) = record_baselines(ctx, &args.base) {
         eprintln!("warning: no gate baseline recorded: {err:#}");
     }
     if made {
@@ -59,18 +59,19 @@ pub fn start(ctx: &Ctx, args: &RunStartArgs) -> Result<(), CliError> {
 /// Seconds a baseline step may take: the same bound `shprd gate` gives a step.
 const BASELINE_STEP_SECS: u64 = 1800;
 
-/// Runs each worker gate on a clean checkout of the base and stores how it
-/// fared, so a hand-in is judged against it and only a regression refuses.
+/// Runs each worker gate on a clean checkout of the base and records how it
+/// fared as a `GateBaselined` event, so a hand-in is judged against it and only
+/// a regression refuses.
 ///
 /// The gates run in a detached temporary worktree at the base's commit, never
 /// in the live checkout, so the fingerprint is the base's. Best effort for
 /// absent inputs: a repository with no configured worker gates, no git checkout
 /// or no readable config has no baseline, and then no gate failure is excused.
-/// A baseline that was run but could not be stored is an error.
+/// A baseline that was run but could not be recorded is an error.
 ///
-/// Callers: `run start`. Refreshing on `sync` needs a call from `sync.rs`
-/// (outside this task's scope); until then a sync leaves the start baseline.
-pub fn record_baselines(root: &Path, base: &str) -> Result<usize, anyhow::Error> {
+/// Callers: `run start` and `sync` (when the base moved).
+pub fn record_baselines(ctx: &Ctx, base: &str) -> Result<usize, anyhow::Error> {
+    let root = ctx.root.as_path();
     let repo = root.join(".shprd").join("config.toml");
     let Ok(config) = shprd_core::config::load(None, Some(&repo)) else {
         return Ok(0);
@@ -120,11 +121,10 @@ pub fn record_baselines(root: &Path, base: &str) -> Result<usize, anyhow::Error>
         .arg(&checkout)
         .output();
     let count = ran.len();
-    let mut stored = shprd_core::baseline::Baselines::default();
-    for entry in ran {
-        stored.upsert(entry);
-    }
-    stored.save(root)?;
+    ctx.commit(EventKind::GateBaselined {
+        base_sha: sha,
+        entries: ran,
+    })?;
     Ok(count)
 }
 
@@ -479,11 +479,22 @@ mod tests {
         std::fs::write(repo.path().join("a.txt"), "a")?;
         git(&["add", "a.txt"])?;
         git(&["commit", "-q", "-m", "base"])?;
-        let n = record_baselines(repo.path(), "main")?;
+        let ctx = Ctx::new(
+            repo.path().to_path_buf(),
+            shprd_core::event::Actor::Human,
+            false,
+            true,
+        );
+        let n = record_baselines(&ctx, "main")?;
         assert_eq!(n, 1);
-        let stored = shprd_core::baseline::Baselines::load(repo.path());
-        let entry = stored.entries.first().context("one baseline")?;
+        let state = ctx.state()?;
+        let entry = state
+            .gate_baselines
+            .entries
+            .first()
+            .context("one baseline")?;
         assert!(!entry.passed);
+        assert_eq!(entry.exit_code, Some(1));
         assert_eq!(entry.fingerprint.errors, Some(62));
         assert_eq!(entry.base_sha.len(), 40);
         Ok(())

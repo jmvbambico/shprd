@@ -158,19 +158,28 @@ pub fn judge(baselines: &Baselines, command: &str, output_tail: &str) -> Verdict
     }
 }
 
-/// The output tail a pre-existing failure is recorded with.
-pub fn labelled_tail(base: &BaselineEntry, output_tail: &str) -> String {
+/// The label a pre-existing failure is recorded with: the base's commit and,
+/// when it had one, its error count. The check keeps its true exit code.
+pub fn label(base: &BaselineEntry) -> String {
     let count = base
         .fingerprint
         .errors
         .map(|errors| format!(", {errors} errors on base"))
         .unwrap_or_default();
     format!(
-        "{PRE_EXISTING_LABEL} ({}{count}); exit {}\n{output_tail}",
+        "{PRE_EXISTING_LABEL} ({}{count}; exit {})",
         base.base_sha.chars().take(9).collect::<String>(),
         base.exit_code
             .map_or("none".to_string(), |code| code.to_string())
     )
+}
+
+/// The label for a failing check that failed no worse on the base, if it did.
+pub fn excuse(baselines: &Baselines, command: &str, output_tail: &str) -> Option<String> {
+    match judge(baselines, command, output_tail) {
+        Verdict::PreExisting => baselines.find(command).map(label),
+        Verdict::Regression => None,
+    }
 }
 
 #[cfg(test)]
@@ -252,6 +261,6 @@ mod tests {
     #[test]
     fn the_label_names_the_base() {
         let base = entry(62, &[]).entries[0].clone();
-        assert!(labelled_tail(&base, "x").starts_with(PRE_EXISTING_LABEL));
+        assert!(label(&base).starts_with(PRE_EXISTING_LABEL));
     }
 }
