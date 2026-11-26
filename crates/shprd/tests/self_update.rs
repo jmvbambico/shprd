@@ -120,6 +120,14 @@ fn write_script(path: &Path, text: &str) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
+/// Appends one line to the supervisor's error file, best effort.
+fn note(path: &Path, line: &str) {
+    use std::io::Write;
+    if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(file, "{line}");
+    }
+}
+
 /// Starts `<install> serve` whenever none is running, as the layout's footer does.
 struct Supervisor {
     stop: Arc<AtomicBool>,
@@ -134,7 +142,17 @@ impl Supervisor {
             let mut children: Vec<Child> = Vec::new();
             while !flag.load(Ordering::SeqCst) {
                 // Reaping is what lets the helper see the old service as gone.
-                children.retain_mut(|child| matches!(child.try_wait(), Ok(None)));
+                children.retain_mut(|child| match child.try_wait() {
+                    Ok(None) => true,
+                    Ok(Some(status)) => {
+                        note(&errors, &format!("serve {} exited: {status}", child.id()));
+                        false
+                    }
+                    Err(err) => {
+                        note(&errors, &format!("serve {} unreadable: {err}", child.id()));
+                        false
+                    }
+                });
                 if children.is_empty() {
                     let mut command = Command::new(&install);
                     // The fake service's own errors are kept, so a test that
@@ -152,8 +170,9 @@ impl Supervisor {
                     for (key, value) in &env {
                         command.env(key, value);
                     }
-                    if let Ok(child) = command.spawn() {
-                        children.push(child);
+                    match command.spawn() {
+                        Ok(child) => children.push(child),
+                        Err(err) => note(&errors, &format!("serve did not start: {err}")),
                     }
                     std::thread::sleep(Duration::from_millis(300));
                 }
