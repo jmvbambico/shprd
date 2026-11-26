@@ -123,7 +123,7 @@ Lanes: M2.1 first (the runner and ledger everything else uses), then M2.3 ∥ M2
 outside scope refused, conflict recorded and work retained, janitor never
 touches a non-`shprd/*` branch, restore round-trips.
 
-> Later change (M11): scope refusals were removed. A task's declared paths are a hint, no hand-in, review or landing is refused for paths, and a task touching a protected path waits for Accept. See [workflow](workflow.md).
+> Later change (M11): scope refusals were removed. A task's declared paths are a hint, no hand-in, review or landing is refused for paths, and a task touching an undeclared protected path waits for Accept. See [workflow](workflow.md).
 
 ---
 
