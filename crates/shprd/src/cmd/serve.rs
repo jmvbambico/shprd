@@ -72,6 +72,10 @@ pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>, named: bool) -> Res
     // half-happen on one multiplexer and half on another (M10.9).
     let (resolution, host) = crate::host::select();
     let host: Arc<dyn Host> = Arc::from(host);
+    // `select` keeps this resolution for the whole process, and a review or a
+    // spawn the service starts later (`spawn::real_mux`) goes through the same
+    // `select`, so it gets this answer back without probing under load. It is
+    // asked afresh only if the host stops opening and comes back.
     // Everything the service reads from the machine is resolved here, once: the
     // discovery files' state directory, the person's home, their prompts and the
     // harness table. The service itself reads no environment variable.
