@@ -139,6 +139,8 @@ const WAITING_WORDS = ["needs_you", "to_do", "scheduled", "queued"];
  * started) and untouched for [`STALE_MS`], plus a Queued task that waits on one of
  * them (it can never start while its dependency is stuck).
  *
+ * A task with an open ask is never old: the person owes it an answer.
+ *
  * A task the service gave no `touched_at_ms` (an older service) is never old, and
  * Working, Ready, Merging and Done are never old: they are moving, or waiting for
  * a decision the person is expected to make on fresh work.
@@ -146,7 +148,12 @@ const WAITING_WORDS = ["needs_you", "to_do", "scheduled", "queued"];
 export function staleIds(state, now = Date.now()) {
   const tasks = (state?.tasks ?? []).filter(isLive);
   const stale = new Set();
+  // A task with an open ask (a spent review's "retry / take it / drop it", an
+  // agent's question) is waiting on the person however long it has sat: it is
+  // never an old leftover, or its card is folded away and the badge stays quiet.
+  const asking = new Set((state?.asks ?? []).map((ask) => ask?.task));
   for (const task of tasks) {
+    if (asking.has(task.id)) continue;
     const touched = task?.touched_at_ms;
     if (!Number.isFinite(touched) || touched <= 0) continue;
     if (!WAITING_WORDS.includes(task?.derived?.status)) continue;
