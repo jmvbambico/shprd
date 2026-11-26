@@ -20,7 +20,7 @@ use shprd_agents::spec::TranscriptFormat;
 use shprd_agents::transcript::cwd_slug;
 use shprd_core::event::{Actor, EventKind};
 use shprd_core::log::{EventLog, SystemClock};
-use shprd_server::{App, ChatWriter};
+use shprd_server::{AnswerStep, App, ChatWriter, TermKey};
 use tempfile::TempDir;
 use tower::ServiceExt;
 
@@ -37,6 +37,8 @@ const PORT: u16 = 18_082;
 #[derive(Debug, Default)]
 struct Recorder {
     lines: Mutex<Vec<(Option<String>, String)>>,
+    /// The steps each answer pressed, by space.
+    answers: Mutex<Vec<(Option<String>, Vec<AnswerStep>)>>,
     /// The spaces an Escape was pressed in.
     stops: Mutex<Vec<Option<String>>>,
     refuse: bool,
@@ -61,6 +63,14 @@ impl ChatWriter for Recorder {
 
     fn coordinator_running(&self) -> Option<bool> {
         self.running
+    }
+
+    fn answer(&self, space: Option<&str>, steps: &[AnswerStep]) -> Result<(), String> {
+        self.answers
+            .lock()
+            .unwrap()
+            .push((space.map(str::to_owned), steps.to_vec()));
+        Ok(())
     }
 
     fn started_ms(&self, space: Option<&str>) -> Option<u64> {
@@ -180,6 +190,36 @@ impl Fixture {
             text.push('\n');
         }
         std::fs::write(dir.join(name), text).unwrap();
+    }
+
+    /// Appends one raw JSONL line to the coordinator's record.
+    fn append_line(&self, value: Value) {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(self.coordinator_record())
+            .unwrap();
+        writeln!(file, "{value}").unwrap();
+    }
+
+    /// The coordinator's agent calls its question tool and waits.
+    fn ask_question(&self, id: &str) {
+        self.append_line(json!({
+            "type": "assistant",
+            "isSidechain": false,
+            "message": {"role": "assistant", "content": [{
+                "type": "tool_use", "id": id, "name": "AskUserQuestion",
+                "input": {"questions": [{
+                    "header": "Host",
+                    "question": "Set the host to herdr-desktop?",
+                    "multiSelect": false,
+                    "options": [
+                        {"label": "Yes", "description": "set it"},
+                        {"label": "No", "description": "leave it"},
+                    ],
+                }]},
+            }]},
+        }));
     }
 
     /// Appends one message to the coordinator's record, as a CLI would.
@@ -1286,4 +1326,146 @@ async fn no_coordinator_running_means_no_conversation_not_the_newest_one_in_the_
     assert!(reply.messages().is_empty(), "{}", reply.body);
     assert!(reply.body["session"].is_null(), "{}", reply.body);
     assert!(reply.note().contains("isn't running"), "{}", reply.note());
+}
+
+fn answer_call(fixture: &Fixture, body: Value) -> Call {
+    Call::post("/api/chat/answer", body)
+        .with_token(&fixture.token)
+        .with_write_header()
+}
+
+#[tokio::test]
+async fn a_waiting_question_is_on_the_page_from_the_first_read_and_goes_when_answered() {
+    let fixture = Fixture::new("claude");
+    fixture.write_session(fixture.repo.path(), "s1.jsonl", &[(true, "go")]);
+    assert!(fixture.chat("coordinator", "").await.body["question"].is_null());
+    fixture.ask_question("toolu_1");
+    // A fresh read (a chat opened now, or after a restart) finds it in the record.
+    let reply = fixture.chat("coordinator", "").await;
+    let question = &reply.body["question"];
+    assert_eq!(question["id"], "toolu_1");
+    assert_eq!(question["header"], "Host");
+    assert_eq!(question["question"], "Set the host to herdr-desktop?");
+    assert_eq!(question["options"][1]["label"], "No");
+    assert_eq!(question["options"][1]["description"], "leave it");
+    assert_eq!(question["answerable"], true);
+    fixture.append_line(json!({
+        "type": "user", "isSidechain": false,
+        "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "toolu_1", "content": "No"}
+        ]},
+    }));
+    assert!(fixture.chat("coordinator", "").await.body["question"].is_null());
+}
+
+#[tokio::test]
+async fn answering_a_choice_presses_down_to_its_row_then_enter() {
+    let fixture = Fixture::new("claude");
+    fixture.write_session(fixture.repo.path(), "s1.jsonl", &[(true, "go")]);
+    fixture.ask_question("toolu_1");
+    let reply = fixture
+        .send(answer_call(
+            &fixture,
+            json!({"space": "coordinator", "id": "toolu_1", "option": 2}),
+        ))
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert_eq!(
+        *fixture.recorder.answers.lock().unwrap(),
+        [(
+            None,
+            vec![
+                AnswerStep::Key(TermKey::Down),
+                AnswerStep::Key(TermKey::Enter)
+            ]
+        )]
+    );
+}
+
+#[tokio::test]
+async fn answering_with_words_goes_to_type_something_types_them_and_presses_enter() {
+    let fixture = Fixture::new("claude");
+    fixture.write_session(fixture.repo.path(), "s1.jsonl", &[(true, "go")]);
+    fixture.ask_question("toolu_1");
+    let reply = fixture
+        .send(answer_call(
+            &fixture,
+            json!({"space": "coordinator", "id": "toolu_1", "text": " later,\nplease "}),
+        ))
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    // Two options, so "Type something" is the third row: two Downs.
+    assert_eq!(
+        *fixture.recorder.answers.lock().unwrap(),
+        [(
+            None,
+            vec![
+                AnswerStep::Key(TermKey::Down),
+                AnswerStep::Key(TermKey::Down),
+                AnswerStep::Key(TermKey::Enter),
+                AnswerStep::Text("later, please".to_string()),
+                AnswerStep::Key(TermKey::Enter),
+            ]
+        )]
+    );
+}
+
+#[tokio::test]
+async fn an_answer_to_a_question_that_is_not_waiting_presses_nothing() {
+    let fixture = Fixture::new("claude");
+    fixture.write_session(fixture.repo.path(), "s1.jsonl", &[(true, "go")]);
+    fixture.ask_question("toolu_1");
+    let stale = fixture
+        .send(answer_call(
+            &fixture,
+            json!({"space": "coordinator", "id": "toolu_0", "option": 1}),
+        ))
+        .await;
+    assert_eq!(stale.status, StatusCode::CONFLICT);
+    let beyond = fixture
+        .send(answer_call(
+            &fixture,
+            json!({"space": "coordinator", "id": "toolu_1", "option": 3}),
+        ))
+        .await;
+    assert_eq!(beyond.status, StatusCode::BAD_REQUEST);
+    let no_header = fixture
+        .send(
+            Call::post(
+                "/api/chat/answer",
+                json!({"space": "coordinator", "id": "toolu_1", "option": 1}),
+            )
+            .with_token(&fixture.token),
+        )
+        .await;
+    assert_eq!(no_header.status, StatusCode::FORBIDDEN);
+    assert!(fixture.recorder.answers.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_send_while_a_question_waits_is_a_typed_question_waiting_and_types_nothing() {
+    let fixture = Fixture::new("claude");
+    fixture.write_session(fixture.repo.path(), "s1.jsonl", &[(true, "go")]);
+    fixture.ask_question("toolu_1");
+    let reply = fixture
+        .send(
+            Call::post(
+                "/api/chat",
+                json!({"space": "coordinator", "text": "hello"}),
+            )
+            .with_token(&fixture.token)
+            .with_write_header(),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::CONFLICT);
+    assert_eq!(reply.body["code"], "question_waiting");
+    assert!(
+        !reply.body["message"]
+            .as_str()
+            .unwrap()
+            .contains("herdr-core"),
+        "the raw host error is never shown: {}",
+        reply.body
+    );
+    assert!(fixture.recorder.lines().is_empty());
 }

@@ -36,9 +36,9 @@ use crate::agents::AgentOpener;
 use crate::auth;
 use crate::chat::{self, ChatHost, ChatWriter, Space};
 use crate::dto::{
-    Action, ActionReply, AgentTabDto, AnswerAsk, AskListDto, AskReply, ChangeDto, ChatDto,
-    ChatSendReply, ChatStopReply, ClientMessage, ErrorCode, GraphDto, HealthDto, PromptDto,
-    PromptListDto, RosterDto, SettingsDto, SettingsWriteDto, SnapshotDto, WsMessage,
+    Action, ActionReply, AgentTabDto, AnswerAsk, AskListDto, AskReply, ChangeDto, ChatAnswerReply,
+    ChatDto, ChatSendReply, ChatStopReply, ClientMessage, ErrorCode, GraphDto, HealthDto,
+    PromptDto, PromptListDto, RosterDto, SettingsDto, SettingsWriteDto, SnapshotDto, WsMessage,
 };
 use crate::engine::Engine;
 use crate::error::{ApiReject, ServerError};
@@ -749,6 +749,7 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/api/asks/answer", post(answer))
         .route("/api/chat", get(chat_page).post(chat_send))
         .route("/api/chat/stop", post(chat_stop))
+        .route("/api/chat/answer", post(chat_answer))
         .route("/api/terminal", get(crate::terminal::socket))
         .route("/api/action", post(action))
         .route("/api/graph", get(graph))
@@ -956,6 +957,15 @@ async fn chat_send(
     body: Bytes,
 ) -> Result<Json<ChatSendReply>, ApiReject> {
     let answer = blocking(move || chat::send(&state, &body)).await?;
+    Ok(Json(answer?))
+}
+
+/// `POST /api/chat/answer`: answer the question a space's terminal waits on.
+async fn chat_answer(
+    State(state): State<AppState>,
+    body: Bytes,
+) -> Result<Json<ChatAnswerReply>, ApiReject> {
+    let answer = blocking(move || chat::answer(&state, &body)).await?;
     Ok(Json(answer?))
 }
 

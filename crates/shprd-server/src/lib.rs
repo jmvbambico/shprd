@@ -93,7 +93,7 @@ pub use actions::default_run;
 pub use agents::{AgentOpener, Agents, OpenedTab};
 pub use api::{App, BODY_LIMIT, WsLimits};
 pub use changes::Touch;
-pub use chat::{COORDINATOR, ChatHost, ChatWriter, Space as ChatSpace};
+pub use chat::{AnswerStep, COORDINATOR, ChatHost, ChatWriter, Space as ChatSpace, answer_steps};
 pub use engine::{Engine, Resender};
 pub use error::{ApiReject, ServerError};
 pub use graph::{Dagr, Located, Missing, Origin};
