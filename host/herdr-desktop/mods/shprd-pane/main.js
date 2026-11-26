@@ -29,12 +29,15 @@
 
 import { View, div, image, svg } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { exec, hc, home, openOverlay, panes, props, run, spaces, terminals, theme } from "herdr";
+import { exec, hc, home, openOverlay, panes, props, run, setShared, spaces, terminals, theme } from "herdr";
 
 import { CHAT_MOD, PARK_LABEL, agentLabel, chatLabel, endAgent, paneChat } from "./lib/chat.js";
 import { menuHeight, MENU, paneMenu } from "./lib/menu.js";
 import { button, iconFile, segmented } from "./lib/panel.js";
 import { RADIUS, TEXT } from "./lib/tokens.js";
+
+/** The shared key `shprd-chat` watches to show its card. */
+const FOCUS_KEY = "shprd.chat.focus";
 
 /**
  * Runs an app command and answers what it returned (`herdr-app do`): `run` gives
@@ -127,6 +130,16 @@ export default class Pane extends View {
       this.busy = false;
       cx.notify();
     });
+  }
+
+  /**
+   * The Needs you pill: opens the chat (when the terminal is shown) and asks it to
+   * scroll to its waiting card (`shprd.chat.focus`, read by `shprd-chat`).
+   */
+  toCard(self, view, cx) {
+    if (view.space === null) return;
+    setShared(FOCUS_KEY, { space: view.space, at: Date.now() });
+    if (!view.chatMode && view.canSwitch) this.toChat(self, view, cx);
   }
 
   /**
@@ -251,6 +264,7 @@ export default class Pane extends View {
       .when(status === "blocked", (el) =>
         el.child(
           div()
+            .id(`pane-needs-${id}`)
             .flex_none()
             .px(6)
             .h(18)
@@ -261,6 +275,13 @@ export default class Pane extends View {
             .text_size(TEXT.id)
             .font_semibold()
             .text_color(t.blocked)
+            .cursor_pointer()
+            // The pill takes you to what needs you: the chat, scrolled to its card.
+            .on_click((_event, own) => {
+              own?.stop_propagation?.();
+              this.toCard(self, view, own);
+              own?.notify?.();
+            })
             .child("Needs you"),
         ),
       )

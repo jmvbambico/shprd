@@ -233,6 +233,69 @@ function fromAsk(ask) {
   };
 }
 
+/** The word a card's buttons are answered with when they press keys in a terminal. */
+export const TERMINAL_BUSY = "Answering\u2026";
+
+/**
+ * The card for the question an agent's terminal waits on (`GET /api/chat`'s
+ * `question`): its header, the question, and each option with what it means,
+ * one button each, and a free-text answer. It is answered through
+ * `POST /api/chat/answer`, which presses the dialog's own keys, so it is a
+ * card of the chat's own space and not an ask of the run.
+ *
+ * A dialog the chat cannot answer (several questions, several choices at once)
+ * is drawn with no buttons and says to answer it in the terminal.
+ */
+export function questionCard(question, space) {
+  if (!question) return null;
+  const task = space === "coordinator" ? null : space;
+  const options = (question.options ?? []).map((option, at) => ({
+    label: choiceLabel(option.label),
+    description: String(option.description ?? ""),
+    answer: at + 1,
+  }));
+  const answerable = question.answerable === true;
+  const more = Number(question.more ?? 0);
+  return {
+    id: `terminal:${question.id}`,
+    key: `terminal:${question.id}`,
+    from: "terminal",
+    task,
+    space,
+    ask: null,
+    asks: [],
+    question: question.id,
+    kind: "question",
+    notice: false,
+    title: String(question.header ?? "").trim() === "" ? "Question" : question.header,
+    text: question.question ?? "",
+    options,
+    buttons: answerable
+      ? options.map((option) => ({
+          id: `terminal:${question.id}:${option.answer}`,
+          label: option.label,
+          description: option.description,
+          busy: TERMINAL_BUSY,
+          chose: option.label,
+          kind: "terminal",
+          option: option.answer,
+        }))
+      : [],
+    freeText: answerable,
+    verb: null,
+    action: null,
+    actionLabel: "",
+    default_action: null,
+    ifNothing: answerable
+      ? ""
+      : more > 0
+        ? "This dialog has more questions: answer it in the terminal."
+        : "This dialog takes several choices: answer it in the terminal.",
+    at: null,
+    expires: null,
+  };
+}
+
 /** The body a spawn records when the brief never reached the agent. */
 export const BRIEF_LOST = "brief not delivered";
 
