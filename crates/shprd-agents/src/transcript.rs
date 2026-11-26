@@ -477,10 +477,13 @@ impl Transcript {
             };
             let (whole, used) = whole_lines(&buffer[skip..], end >= len);
             let mut lines: Vec<(usize, Message)> = Vec::new();
+            let mut delivered = Delivered::default();
             let mut at = start as usize + skip;
             for raw in whole.split_inclusive(|byte| *byte == b'\n') {
                 let text = raw.strip_suffix(b"\n").unwrap_or(raw);
-                if let Some(message) = parse_line(self.format, text) {
+                if let Some(message) = parse_line(self.format, text)
+                    && delivered.admit(&message, is_queued_line(self.format, text))
+                {
                     lines.push((at, message));
                 }
                 at += raw.len();
@@ -489,7 +492,6 @@ impl Transcript {
                 window = window.saturating_mul(2);
                 continue;
             }
-            dedupe_delivered_at(&mut lines);
             let dropped = lines.len().saturating_sub(MAX_MESSAGES);
             let kept = lines.split_off(dropped);
             let older = match kept.first() {
@@ -616,6 +618,7 @@ impl Transcript {
         };
         let body = &buffer[..used];
         let mut messages = Vec::new();
+        let mut delivered = Delivered::default();
         let mut position = start as usize;
         for line in body.split_inclusive(|byte| *byte == b'\n') {
             // A page that fills up stops at a line boundary, so the next read
@@ -625,12 +628,13 @@ impl Transcript {
             }
             position += line.len();
             let text = line.strip_suffix(b"\n").unwrap_or(line);
-            if let Some(message) = parse_line(self.format, text) {
+            if let Some(message) = parse_line(self.format, text)
+                && delivered.admit(&message, is_queued_line(self.format, text))
+            {
                 messages.push(message);
             }
         }
         let more = position < len as usize;
-        dedupe_delivered(&mut messages);
         Ok(Page {
             messages,
             cursor: self.cursor(position),
@@ -690,48 +694,42 @@ impl Transcript {
     }
 }
 
-/// How close, in ms, two identical user messages must be to be one message
-/// recorded twice (a queued command and the `user` record of the same text).
+/// How close, in ms, a queued command and a `user` record of the same words
+/// must be to be one message recorded twice.
 const DELIVERY_WINDOW_MS: i64 = 30_000;
 
-/// Whether `next` is `earlier` recorded a second time: the same words from the
-/// person, stamped within [`DELIVERY_WINDOW_MS`] of each other.
-fn same_delivery(earlier: &Message, next: &Message) -> bool {
-    earlier.role == Role::User
-        && next.role == Role::User
-        && earlier.text == next.text
-        && matches!((earlier.at_ms, next.at_ms),
-            (Some(a), Some(b)) if (b - a).abs() <= DELIVERY_WINDOW_MS)
+/// Spots a message the record holds twice: a queued command and a `user` record
+/// of the same text, stamped within [`DELIVERY_WINDOW_MS`] of each other. Two
+/// records of the same kind are never merged, so a person who sends the same
+/// words twice sees both. It sees one read's lines only.
+#[derive(Default)]
+struct Delivered {
+    seen: Vec<(Message, bool)>,
 }
 
-/// Drops a user message that repeats an earlier one recorded moments before.
-fn dedupe_delivered(messages: &mut Vec<Message>) {
-    let mut kept: Vec<Message> = Vec::with_capacity(messages.len());
-    for message in messages.drain(..) {
-        if !kept
-            .iter()
-            .rev()
-            .any(|earlier| same_delivery(earlier, &message))
-        {
-            kept.push(message);
+impl Delivered {
+    /// Whether `message` (from a queued command when `queued`) is new; it is not
+    /// when the other kind of record already holds the same words just before.
+    fn admit(&mut self, message: &Message, queued: bool) -> bool {
+        if message.role != Role::User {
+            return true;
         }
+        let repeat = self.seen.iter().rev().any(|(earlier, was_queued)| {
+            *was_queued != queued
+                && earlier.text == message.text
+                && matches!((earlier.at_ms, message.at_ms),
+                    (Some(a), Some(b)) if (b - a).abs() <= DELIVERY_WINDOW_MS)
+        });
+        if !repeat {
+            self.seen.push((message.clone(), queued));
+        }
+        !repeat
     }
-    *messages = kept;
 }
 
-/// [`dedupe_delivered`] for messages that carry their file position.
-fn dedupe_delivered_at(lines: &mut Vec<(usize, Message)>) {
-    let mut kept: Vec<(usize, Message)> = Vec::with_capacity(lines.len());
-    for (at, message) in lines.drain(..) {
-        if !kept
-            .iter()
-            .rev()
-            .any(|(_, earlier)| same_delivery(earlier, &message))
-        {
-            kept.push((at, message));
-        }
-    }
-    *lines = kept;
+/// Whether a Claude Code line is a queued command's record.
+fn is_queued_line(format: TranscriptFormat, line: &[u8]) -> bool {
+    format == TranscriptFormat::ClaudeJsonl && line.windows(16).any(|w| w == b"\"queued_command\"")
 }
 
 /// The whole lines of `buffer`, and how many bytes they take.

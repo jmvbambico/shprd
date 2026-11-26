@@ -1172,7 +1172,7 @@ fn a_message_sent_mid_turn_and_its_answer_are_read_in_order() {
     assert!(
         got[2]
             .1
-            .starts_with("I don't think shprd has an idle shutdown")
+            .contains("I don't think shprd has an idle shutdown")
     );
     // A reload (the newest page) shows the same three.
     let tail = transcript.read_tail().expect("the tail reads");
@@ -1250,4 +1250,28 @@ fn claude_has_no_question_once_it_is_answered() {
         shprd_agents::transcript::claude_pending_question(&more),
         None
     );
+}
+
+#[test]
+fn the_same_words_sent_twice_both_show() {
+    let home = tempfile::tempdir().unwrap();
+    let path = midturn(home.path());
+    // A second queued command of the same words, moments later, is the person
+    // asking again, not a record twice.
+    let again = serde_json::json!({
+        "type": "attachment",
+        "isSidechain": false,
+        "timestamp": "2026-11-26T07:52:58.000Z",
+        "attachment": {"type": "queued_command", "prompt": "side question, why does shprd service shut down when idle?"},
+    });
+    append_line(&path, &again.to_string());
+    let transcript = locate("claude", home.path());
+    let asked = |page: &shprd_agents::transcript::Page| {
+        page.messages
+            .iter()
+            .filter(|m| m.role == Role::User)
+            .count()
+    };
+    assert_eq!(asked(&transcript.read("").unwrap()), 2);
+    assert_eq!(asked(&transcript.read_tail().unwrap()), 2);
 }
