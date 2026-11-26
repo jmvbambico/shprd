@@ -491,6 +491,10 @@ fn report(ctx: &Ctx, args: &ReportArgs) -> Result<(), CliError> {
         .iter()
         .map(|spec| parse_check(spec))
         .collect::<Result<Vec<CheckReport>, CliError>>()?;
+    let checks = match ctx.state() {
+        Ok(state) => label_pre_existing(&state.gate_baselines, checks),
+        Err(_) => checks,
+    };
     let proofs = proof_paths(ctx, args)?;
     if matches!(args.status, crate::cli::StatusArg::Completed) {
         refuse_forbidden_commits(ctx, args)?;
@@ -509,6 +513,27 @@ fn report(ctx: &Ctx, args: &ReportArgs) -> Result<(), CliError> {
     };
     let event = ctx.commit(kind)?;
     emit(ctx, &event)
+}
+
+/// Labels a failing check that failed no worse on the base as pre-existing.
+///
+/// The check keeps its real exit code and output; the label is for the card
+/// and the PR body, and the rules re-judge against the event log's baseline
+/// before accepting the hand-in.
+fn label_pre_existing(
+    baselines: &shprd_core::baseline::Baselines,
+    checks: Vec<CheckReport>,
+) -> Vec<CheckReport> {
+    checks
+        .into_iter()
+        .map(|mut check| {
+            if check.exit_code != Some(0) {
+                check.pre_existing =
+                    shprd_core::baseline::excuse(baselines, &check.command, &check.output_tail);
+            }
+            check
+        })
+        .collect()
 }
 
 /// Refuses a completed hand-in whose branch commits a path no task may commit
@@ -718,6 +743,7 @@ fn parse_check(spec: &str) -> Result<CheckReport, CliError> {
         command: command.to_string(),
         exit_code,
         output_tail,
+        pre_existing: None,
     })
 }
 
@@ -917,6 +943,44 @@ mod tests {
         }
         assert_eq!(told, ["T1"]);
         assert!(notes.pending().is_empty());
+    }
+
+    #[test]
+    fn a_pre_existing_failure_keeps_its_real_exit_code_and_is_labelled() {
+        use super::{CheckReport, label_pre_existing};
+        use shprd_core::baseline::{BaselineEntry, Baselines, Fingerprint};
+        let base = Baselines {
+            entries: vec![BaselineEntry {
+                command: "npm run lint".into(),
+                passed: false,
+                exit_code: Some(1),
+                fingerprint: Fingerprint {
+                    errors: Some(62),
+                    files: vec![],
+                },
+                base_sha: "abcdef123456".into(),
+            }],
+        };
+        let failing = |tail: &str| CheckReport {
+            gate: "lint".into(),
+            command: "npm run lint".into(),
+            exit_code: Some(1),
+            output_tail: tail.into(),
+            pre_existing: None,
+        };
+        let same = label_pre_existing(&base, vec![failing("62 errors")]);
+        assert_eq!(same[0].exit_code, Some(1), "the true exit code stays");
+        assert_eq!(same[0].output_tail, "62 errors");
+        assert!(
+            same[0]
+                .pre_existing
+                .as_deref()
+                .is_some_and(|l| l.starts_with("pre-existing on base"))
+        );
+        let worse = label_pre_existing(&base, vec![failing("70 errors")]);
+        assert!(worse[0].pre_existing.is_none());
+        let none = label_pre_existing(&Baselines::default(), vec![failing("62 errors")]);
+        assert!(none[0].pre_existing.is_none());
     }
 
     #[test]

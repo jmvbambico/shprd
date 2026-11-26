@@ -527,6 +527,7 @@ mod tests {
                 command: String::from("cargo test"),
                 exit_code: Some(0),
                 output_tail: String::new(),
+                pre_existing: None,
             }],
             changed_paths: Vec::new(),
             commit: Some(String::from("abc123")),

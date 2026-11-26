@@ -275,6 +275,7 @@ pub fn kind_name(kind: &EventKind) -> &'static str {
         EventKind::WatchLaunched { .. } => "watch_launched",
         EventKind::OrchestratorNotified { .. } => "orchestrator_notified",
         EventKind::BaseSynced { .. } => "base_synced",
+        EventKind::GateBaselined { .. } => "gate_baselined",
         EventKind::Nudged { .. } => "nudged",
         EventKind::Backup { .. } => "backup",
         EventKind::ProviderGaveUp { .. } => "provider_gave_up",

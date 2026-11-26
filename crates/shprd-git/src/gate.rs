@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use shprd_core::baseline::{BaselineEntry, fingerprint};
 use shprd_core::event::{GATE_OUTPUT_TAIL_CHARS, GateStep};
 use shprd_core::spawn;
 
@@ -64,6 +65,38 @@ pub fn run_gate(
         }
     }
     GateRun { passed, steps }
+}
+
+/// Runs each of `commands` on its own in `worktree` (the base) and records how
+/// each fared, passing or failing, with a fingerprint of the failure.
+///
+/// Unlike [`run_gate`] a failure does not stop the rest: a baseline needs every
+/// gate's state.
+pub fn run_baseline(
+    worktree: &Path,
+    commands: &[String],
+    base_sha: &str,
+    timeout_per_step: Duration,
+    env: &[(String, Option<String>)],
+) -> Vec<BaselineEntry> {
+    commands
+        .iter()
+        .map(|command| {
+            let step = run_step(worktree, command, timeout_per_step, env);
+            let passed = step.exit_code == Some(0);
+            BaselineEntry {
+                command: command.clone(),
+                passed,
+                exit_code: step.exit_code,
+                fingerprint: if passed {
+                    Default::default()
+                } else {
+                    fingerprint(&step.output_tail)
+                },
+                base_sha: base_sha.to_string(),
+            }
+        })
+        .collect()
 }
 
 /// Runs one command, and captures the tail of what it printed.
@@ -373,6 +406,22 @@ mod tests {
             &env,
         );
         assert!(run.passed, "{run:?}");
+    }
+
+    #[test]
+    fn a_baseline_records_every_gate_with_its_failure() {
+        let dir = worktree();
+        let entries = run_baseline(
+            dir.path(),
+            &commands(&["echo '5 errors'; exit 1", "true"]),
+            "abc",
+            Duration::from_secs(10),
+            &[],
+        );
+        assert_eq!(entries.len(), 2, "a failure does not stop the rest");
+        assert!(!entries[0].passed);
+        assert_eq!(entries[0].fingerprint.errors, Some(5));
+        assert!(entries[1].passed);
     }
 
     #[test]

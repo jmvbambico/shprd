@@ -803,6 +803,7 @@ mod tests {
                     command: "cargo test".to_string(),
                     exit_code: Some(0),
                     output_tail: "ok".to_string(),
+                    pre_existing: None,
                 }],
                 changed_paths: vec![format!("src/{id}/x.rs")],
                 commit: Some(format!("{id}-commit")),

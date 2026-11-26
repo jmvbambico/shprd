@@ -808,6 +808,7 @@ async fn a_reopen_moves_a_handed_in_task_back_to_working_and_refuses_a_working_o
                 command: "cargo test".to_string(),
                 exit_code: Some(0),
                 output_tail: String::new(),
+                pre_existing: None,
             }],
             changed_paths: vec!["kept.txt".to_string()],
             commit: None,

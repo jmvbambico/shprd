@@ -922,6 +922,8 @@ fn check_with(
         // and any pass may record one.
         EventKind::OrchestratorNotified { .. } => Ok(()),
         EventKind::BaseSynced { .. } => check_base_synced(actor, provenance),
+        // A baseline excuses failing gates, so a worker may not write one.
+        EventKind::GateBaselined { .. } => check_base_synced(actor, provenance),
         EventKind::RunFinished { abandoned } => {
             check_run_finished(state, actor, abandoned, provenance)
         }
@@ -1471,7 +1473,10 @@ fn check_reported(
                 attempt,
             });
         }
-        if check.exit_code != Some(0) {
+        if check.exit_code != Some(0)
+            && crate::baseline::excuse(&state.gate_baselines, &check.command, &check.output_tail)
+                .is_none()
+        {
             return Err(RuleError::HandInCheckFailed {
                 task: task.to_string(),
                 attempt,
@@ -2229,6 +2234,7 @@ mod tests {
             command: format!("cargo {gate}"),
             exit_code,
             output_tail: "ok".to_string(),
+            pre_existing: None,
         }
     }
 
@@ -2886,6 +2892,63 @@ mod tests {
             reported_with(4, "a", 1, ReportStatus::Blocked),
         ]);
         assert_eq!(status(&state, "a"), TaskStatus::Failed);
+    }
+
+    /// A failing gate that fails no worse than the base is accepted with its
+    /// true exit code; a regression is refused; an agent cannot write a baseline.
+    #[test]
+    fn only_a_regression_refuses_a_failing_gate() {
+        use crate::baseline::{BaselineEntry, Fingerprint};
+        let baselined = |seq| {
+            ev(
+                seq,
+                EventKind::GateBaselined {
+                    base_sha: "abc".to_string(),
+                    entries: vec![BaselineEntry {
+                        command: "cargo clippy".to_string(),
+                        passed: false,
+                        exit_code: Some(1),
+                        fingerprint: Fingerprint {
+                            errors: Some(62),
+                            files: Vec::new(),
+                        },
+                        base_sha: "abc".to_string(),
+                    }],
+                },
+            )
+        };
+        let failing = |tail: &str| CheckReport {
+            gate: "clippy".to_string(),
+            command: "cargo clippy".to_string(),
+            exit_code: Some(1),
+            output_tail: tail.to_string(),
+            pre_existing: None,
+        };
+        let run = |tail: &str| {
+            let events = [
+                started(1),
+                baselined(2),
+                added(3, "a", &["src/a"], &[]),
+                spawned(4, "a", 1, "agent-1"),
+                hand_in(5, "a", 1, vec![failing(tail)]),
+            ];
+            let (last, earlier) = events.split_last().expect("events");
+            folded(earlier).check_as(&last.actor, &last.kind, last.at_ms)
+        };
+        assert!(run("62 errors").is_ok());
+        assert!(matches!(
+            run("70 errors"),
+            Err(RuleError::HandInCheckFailed { .. })
+        ));
+        let forged = baselined(2);
+        let state = folded(&[started(1)]);
+        let agent = Actor::Agent {
+            id: "agent-1".to_string(),
+        };
+        assert!(matches!(
+            state.check_as(&agent, &forged.kind, 0),
+            Err(RuleError::SyncNotAllowed { .. })
+        ));
     }
 
     /// A hand-in that names a failing gate is refused, and the refusal names
