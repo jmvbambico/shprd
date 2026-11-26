@@ -1132,6 +1132,94 @@ fn a_small_record_is_one_tail_page_with_nothing_older() {
     assert_eq!(tail.cursor, whole.cursor);
 }
 
+/// The recorded mid-turn session, placed where Claude Code writes `session`.
+fn midturn(home: &Path) -> PathBuf {
+    let folder = home.join(".claude/projects/-work-repo");
+    fs::create_dir_all(&folder).unwrap();
+    let path = folder.join("mid-session.jsonl");
+    fs::copy(
+        fixtures().join("claude-midturn").join("session.jsonl"),
+        &path,
+    )
+    .unwrap();
+    path
+}
+
+#[test]
+fn a_message_sent_mid_turn_and_its_answer_are_read_in_order() {
+    let home = tempfile::tempdir().unwrap();
+    midturn(home.path());
+    let transcript = locate("claude", home.path());
+    let page = transcript.read("").expect("the fixture reads");
+    let got: Vec<(Role, &str)> = page
+        .messages
+        .iter()
+        .map(|m| (m.role, m.text.as_str()))
+        .collect();
+    // The queue-operation records are bookkeeping; the queued command is the
+    // person's own message once; shprd's news stays news.
+    assert_eq!(got.len(), 3, "{got:?}");
+    assert_eq!(
+        got[0],
+        (
+            Role::User,
+            "side question, why does shprd service shut down when idle?"
+        )
+    );
+    assert_eq!(got[1].0, Role::News);
+    assert!(got[1].1.contains("fb-preflight is done"));
+    assert_eq!(got[2].0, Role::Assistant);
+    assert!(
+        got[2]
+            .1
+            .contains("I don't think shprd has an idle shutdown")
+    );
+    // A reload (the newest page) shows the same three.
+    let tail = transcript.read_tail().expect("the tail reads");
+    assert_eq!(tail.messages, page.messages);
+}
+
+#[test]
+fn a_queued_message_also_recorded_as_a_user_line_shows_once() {
+    let home = tempfile::tempdir().unwrap();
+    let path = midturn(home.path());
+    let twice = serde_json::json!({
+        "type": "user",
+        "isSidechain": false,
+        "timestamp": "2026-11-26T07:52:52.900Z",
+        "message": {"role": "user", "content": "side question, why does shprd service shut down when idle?"},
+    });
+    append_line(&path, &twice.to_string());
+    let transcript = locate("claude", home.path());
+    let page = transcript.read("").unwrap();
+    let asked = page
+        .messages
+        .iter()
+        .filter(|m| m.role == Role::User)
+        .count();
+    assert_eq!(asked, 1, "{:?}", page.messages);
+}
+
+#[test]
+fn a_record_longer_than_one_read_does_not_hide_what_follows() {
+    // The cause of the missing reply: a program's request dump can be a line of
+    // megabytes, bigger than one read, so the cursor never passed it and
+    // nothing after it showed live.
+    let home = tempfile::tempdir().unwrap();
+    let path = midturn(home.path());
+    let fixture = fs::read_to_string(&path).unwrap();
+    let huge = serde_json::json!({
+        "type": "api-request-blob",
+        "blob": "x".repeat(shprd_agents::transcript::MAX_BYTES * 2),
+    });
+    fs::write(&path, format!("{huge}\n{fixture}")).unwrap();
+    let transcript = locate("claude", home.path());
+    let page = transcript.read("").unwrap();
+    assert_eq!(page.messages.len(), 3, "{:?}", page.messages);
+    assert_eq!(page.messages[2].role, Role::Assistant);
+    assert!(!page.more);
+}
+
 /// A Claude record whose last tool call is a question nobody answered yet.
 #[test]
 fn claude_names_the_question_its_terminal_is_waiting_on() {
@@ -1162,4 +1250,28 @@ fn claude_has_no_question_once_it_is_answered() {
         shprd_agents::transcript::claude_pending_question(&more),
         None
     );
+}
+
+#[test]
+fn the_same_words_sent_twice_both_show() {
+    let home = tempfile::tempdir().unwrap();
+    let path = midturn(home.path());
+    // A second queued command of the same words, moments later, is the person
+    // asking again, not a record twice.
+    let again = serde_json::json!({
+        "type": "attachment",
+        "isSidechain": false,
+        "timestamp": "2026-11-26T07:52:58.000Z",
+        "attachment": {"type": "queued_command", "prompt": "side question, why does shprd service shut down when idle?"},
+    });
+    append_line(&path, &again.to_string());
+    let transcript = locate("claude", home.path());
+    let asked = |page: &shprd_agents::transcript::Page| {
+        page.messages
+            .iter()
+            .filter(|m| m.role == Role::User)
+            .count()
+    };
+    assert_eq!(asked(&transcript.read("").unwrap()), 2);
+    assert_eq!(asked(&transcript.read_tail().unwrap()), 2);
 }

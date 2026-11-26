@@ -477,10 +477,13 @@ impl Transcript {
             };
             let (whole, used) = whole_lines(&buffer[skip..], end >= len);
             let mut lines: Vec<(usize, Message)> = Vec::new();
+            let mut delivered = Delivered::default();
             let mut at = start as usize + skip;
             for raw in whole.split_inclusive(|byte| *byte == b'\n') {
                 let text = raw.strip_suffix(b"\n").unwrap_or(raw);
-                if let Some(message) = parse_line(self.format, text) {
+                if let Some(message) = parse_line(self.format, text)
+                    && delivered.admit(&message, is_queued_line(self.format, text))
+                {
                     lines.push((at, message));
                 }
                 at += raw.len();
@@ -587,17 +590,35 @@ impl Transcript {
                 path: path.to_path_buf(),
                 source,
             })?;
-        let mut buffer = vec![0u8; MAX_BYTES];
-        let read = file
-            .read(&mut buffer)
-            .map_err(|source| TranscriptError::Read {
-                path: path.to_path_buf(),
-                source,
-            })?;
-        buffer.truncate(read);
-        let at_eof = start + read as u64 >= len;
-        let (body, _) = whole_lines(&buffer, at_eof);
+        let mut size = MAX_BYTES;
+        // A record longer than one read (a program's request dump can run to
+        // megabytes) holds no whole line in the buffer: read wider until a line
+        // fits, or the cursor would never pass it and nothing after it shows.
+        let (buffer, used) = loop {
+            file.seek(SeekFrom::Start(start))
+                .map_err(|source| TranscriptError::Read {
+                    path: path.to_path_buf(),
+                    source,
+                })?;
+            let mut buffer = Vec::with_capacity(size.min(len as usize));
+            let read = (&mut file)
+                .take(size as u64)
+                .read_to_end(&mut buffer)
+                .map_err(|source| TranscriptError::Read {
+                    path: path.to_path_buf(),
+                    source,
+                })?;
+            let at_eof = start + read as u64 >= len;
+            let (body, _) = whole_lines(&buffer, at_eof);
+            if !body.is_empty() || at_eof {
+                let used = body.len();
+                break (buffer, used);
+            }
+            size = size.saturating_mul(2);
+        };
+        let body = &buffer[..used];
         let mut messages = Vec::new();
+        let mut delivered = Delivered::default();
         let mut position = start as usize;
         for line in body.split_inclusive(|byte| *byte == b'\n') {
             // A page that fills up stops at a line boundary, so the next read
@@ -607,7 +628,9 @@ impl Transcript {
             }
             position += line.len();
             let text = line.strip_suffix(b"\n").unwrap_or(line);
-            if let Some(message) = parse_line(self.format, text) {
+            if let Some(message) = parse_line(self.format, text)
+                && delivered.admit(&message, is_queued_line(self.format, text))
+            {
                 messages.push(message);
             }
         }
@@ -669,6 +692,44 @@ impl Transcript {
             older: None,
         })
     }
+}
+
+/// How close, in ms, a queued command and a `user` record of the same words
+/// must be to be one message recorded twice.
+const DELIVERY_WINDOW_MS: i64 = 30_000;
+
+/// Spots a message the record holds twice: a queued command and a `user` record
+/// of the same text, stamped within [`DELIVERY_WINDOW_MS`] of each other. Two
+/// records of the same kind are never merged, so a person who sends the same
+/// words twice sees both. It sees one read's lines only.
+#[derive(Default)]
+struct Delivered {
+    seen: Vec<(Message, bool)>,
+}
+
+impl Delivered {
+    /// Whether `message` (from a queued command when `queued`) is new; it is not
+    /// when the other kind of record already holds the same words just before.
+    fn admit(&mut self, message: &Message, queued: bool) -> bool {
+        if message.role != Role::User {
+            return true;
+        }
+        let repeat = self.seen.iter().rev().any(|(earlier, was_queued)| {
+            *was_queued != queued
+                && earlier.text == message.text
+                && matches!((earlier.at_ms, message.at_ms),
+                    (Some(a), Some(b)) if (b - a).abs() <= DELIVERY_WINDOW_MS)
+        });
+        if !repeat {
+            self.seen.push((message.clone(), queued));
+        }
+        !repeat
+    }
+}
+
+/// Whether a Claude Code line is a queued command's record.
+fn is_queued_line(format: TranscriptFormat, line: &[u8]) -> bool {
+    format == TranscriptFormat::ClaudeJsonl && line.windows(16).any(|w| w == b"\"queued_command\"")
 }
 
 /// The whole lines of `buffer`, and how many bytes they take.
@@ -878,11 +939,28 @@ fn claude_message(value: &Value) -> Option<Message> {
         return None;
     }
     let kind = value.get("type")?.as_str()?;
-    let content = value.get("message")?.get("content")?;
     let at_ms = value
         .get("timestamp")
         .and_then(|at| at.as_str())
         .and_then(iso_ms);
+    // A message typed while the agent was mid-turn is not a `user` record: the
+    // CLI queues it and records its delivery as a `queued_command` attachment.
+    // (The `queue-operation` lines around it are bookkeeping, not read.)
+    if kind == "attachment" {
+        let attachment = value.get("attachment")?;
+        if attachment.get("type")?.as_str()? != "queued_command" {
+            return None;
+        }
+        let prompt = attachment.get("prompt")?.as_str()?;
+        let message = Message {
+            role: Role::User,
+            text: claude_person(prompt.trim())?,
+            tools: Vec::new(),
+            at_ms,
+        };
+        return (!message.is_empty()).then_some(message);
+    }
+    let content = value.get("message")?.get("content")?;
     let (role, text, tools) = match kind {
         // A user line is not always the person's: Claude Code writes a slash
         // command, a system reminder and a local command's output there too, so
