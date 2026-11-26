@@ -1619,10 +1619,10 @@ async fn widening_the_scope_from_a_refused_hand_in_card_widens_it() {
     assert!(task.scope.iter().any(|path| path == "tcalc/ops.py"));
 }
 
-/// F13: a widening the rules refuse for overlap (another task in flight holds
-/// the path) reaches the client in the server's words, and the card stays open.
+/// Declared paths are a hint, not a lock: a widening to a path another task in
+/// flight declares is written like any other.
 #[tokio::test]
-async fn a_widening_refused_for_overlap_shows_its_reason_and_keeps_the_card_open() {
+async fn a_widening_beside_an_overlapping_task_in_flight_is_written() {
     let repo = refused_hand_in_repo();
     let path = repo.path().join(".shprd").join("events.jsonl");
     let mut log = EventLog::open(&path).expect("the log opens");
@@ -1664,25 +1664,13 @@ async fn a_widening_refused_for_overlap_shows_its_reason_and_keeps_the_card_open
             .with_write_header(),
         )
         .await;
-    assert_ne!(reply.status, StatusCode::OK, "{:?}", reply.body);
-    let text = format!("{:?}", reply.body);
-    assert!(
-        text.contains("T2") && text.contains("overlap"),
-        "the refusal names the task and the overlap: {text}"
-    );
+    assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
     let events = EventLog::read_all(&path).expect("read the log").events;
     assert!(
-        !events
+        events
             .iter()
-            .any(|event| matches!(event.kind, EventKind::AskAnswered { .. })),
-        "the card is still open"
-    );
-    let queue = shprd_core::ask::AskQueue::for_repo(fixture.repo.path());
-    assert!(
-        queue
-            .answer_path("T1", "hand-in-refused-1-1")
-            .is_ok_and(|p| !p.exists()),
-        "no answer file is left behind"
+            .any(|event| matches!(event.kind, EventKind::ScopeWidened { .. })),
+        "the widening is written"
     );
 }
 

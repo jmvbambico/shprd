@@ -2852,54 +2852,50 @@ fn spawned_ev(seq: u64, id: &str) -> Event {
 }
 
 #[test]
-fn a_task_waiting_for_a_running_tasks_scope_is_queued_never_failing() {
-    // Bug 7 of SHPR-54's QA: T4 shares a path with the running T1. Its start was
-    // planned, refused by the spawn rule, and on the third pass became a card.
-    // It waits instead: no start is tried, no step fails, no card is written,
-    // and its status line says what it waits for.
+fn a_task_sharing_a_running_tasks_paths_starts_and_its_old_wait_line_clears() {
+    // Declared paths are a hint, not a lock: T4 names the file the running T1
+    // names, and starts. The "in use by" line an older build left on its card
+    // is cleared on the pass.
     let fixture = Fixture::new(vec![
         started(),
         added_scoped(2, "T1", "calc/ops.py"),
         spawned_ev(3, "T1"),
         added_scoped(4, "T4", "calc/ops.py"),
+        added_scoped(5, "T5", "calc"),
+        ev(
+            6,
+            EventKind::TaskStatus {
+                task: "T5".to_string(),
+                message: "Waiting: calc is in use by T1".to_string(),
+                progress: None,
+            },
+        ),
     ]);
     let calls = Arc::new(Mutex::new(Vec::new()));
+    let mut cfg = config(shprd_core::config::MergePolicy::Auto);
+    // One slot (T1 has no live agent here, so it holds none): T4 takes it, and
+    // T5 stays queued at the cap.
+    cfg.tick.max_running = 1;
     let worker = fixture.worker(
         Arc::new(Scripted::default()),
         Arc::new(NoForge),
-        config(shprd_core::config::MergePolicy::Auto),
+        cfg,
         recording_start(Arc::clone(&calls)),
     );
-    for pass in 1..=5 {
-        let report = worker.tick().expect("the pass ran");
-        assert!(
-            report.ok(),
-            "pass {pass} must not fail a step: {:?}",
-            report.steps
-        );
-    }
-    assert!(
-        calls.lock().expect("calls").is_empty(),
-        "T4 is never started"
-    );
+    let report = worker.tick().expect("the pass ran");
+    assert!(report.ok(), "{:?}", report.steps);
+    assert_eq!(*calls.lock().expect("calls"), vec![String::from("T4")]);
     let state = fixture.state();
     assert!(state.escalations.is_empty(), "{:?}", state.escalations);
-    let status = state.tasks["T4"]
+    let status = state.tasks["T5"]
         .last_status
         .as_ref()
         .expect("a status line");
-    assert_eq!(status.message, "Waiting: calc/ops.py is in use by T1");
-    assert_eq!(
-        state.tasks["T4"].status,
-        shprd_core::state::TaskStatus::Queued
-    );
+    assert_eq!(status.message, "No longer waiting");
 }
 
 #[test]
-fn an_overlapping_task_at_the_head_does_not_hold_back_disjoint_ones() {
-    // Bug 8: T4 waits on T1's scope; T5 and T6 are disjoint and start in the
-    // same pass, T4 first in the queue notwithstanding. T7 shares a path with
-    // T5, which this very pass starts, so it waits rather than failing.
+fn overlapping_tasks_all_start_in_one_pass() {
     let fixture = Fixture::new(vec![
         started(),
         added_scoped(2, "T1", "calc/ops.py"),
@@ -2911,7 +2907,7 @@ fn an_overlapping_task_at_the_head_does_not_hold_back_disjoint_ones() {
     ]);
     let calls = Arc::new(Mutex::new(Vec::new()));
     let mut cfg = config(shprd_core::config::MergePolicy::Auto);
-    cfg.tick.max_running = 4;
+    cfg.tick.max_running = 5;
     let worker = fixture.worker(
         Arc::new(Scripted::default()),
         Arc::new(NoForge),
@@ -2922,7 +2918,12 @@ fn an_overlapping_task_at_the_head_does_not_hold_back_disjoint_ones() {
     assert!(report.ok(), "{:?}", report.steps);
     assert_eq!(
         *calls.lock().expect("calls"),
-        vec![String::from("T5"), String::from("T6")]
+        vec![
+            String::from("T4"),
+            String::from("T5"),
+            String::from("T6"),
+            String::from("T7")
+        ]
     );
 }
 

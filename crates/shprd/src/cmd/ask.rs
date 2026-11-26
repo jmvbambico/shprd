@@ -335,7 +335,13 @@ pub fn list(args: &AskListArgs, ctx: &Ctx) -> Result<(), CliError> {
     let mut asks = queue
         .all()
         .map_err(|err| CliError::other(anyhow!(err).context("reading the ask queue")))?;
-    asks.retain(|ask| args.all || ask.is_open_at(now));
+    // A scope card is moot now that declared paths are only a hint, so an open
+    // one a log written before that still holds is not listed as open.
+    asks.retain(|ask| {
+        args.all
+            || (ask.is_open_at(now)
+                && !shprd_core::ask::is_moot_scope_card(&ask.task, &ask.id, &[], &[]))
+    });
     if let Some(task) = &args.task {
         asks.retain(|ask| &ask.task == task);
     }

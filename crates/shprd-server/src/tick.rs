@@ -41,7 +41,7 @@ use shprd_core::event::{
 use shprd_core::gate;
 use shprd_core::log::{Clock, SystemClock};
 use shprd_core::rules::RuleError;
-use shprd_core::state::{ResourceStatus, RunState, Task};
+use shprd_core::state::{ResourceStatus, RunState, Task, TaskStatus};
 use shprd_core::tick::{self, Facts, Input, Phase, PrFacts, Step};
 use shprd_git::forge::Forge;
 use shprd_git::git::Git;
@@ -548,15 +548,8 @@ impl Worker {
         // says it on the debug channel instead. The step still runs and its
         // failure is still recorded: what goes quiet is the terminal.
         let quiet = self.quiet_failures(&state);
+        self.clear_scope_waits(&state);
         for step in steps {
-            // A wait is the task's status line and nothing more: it is reported
-            // only on the pass that wrote it, so an idle queue stays quiet.
-            if let Step::Wait { task, path, other } = &step {
-                if let Some(done) = self.hold(&state, task, path, other) {
-                    report.steps.push(done);
-                }
-                continue;
-            }
             let result = self.run_step(&config, &state, &step, &quiet);
             report.steps.push(result);
         }
@@ -1245,8 +1238,6 @@ impl Worker {
         let mut cause: Option<String> = None;
         let result = match step {
             Step::Start { task } => self.start_task(task),
-            // Never reached: `tick` turns a wait into `hold` before it gets here.
-            Step::Wait { .. } => Ok(StepReport::done(step, "waiting", None)),
             Step::Review { task } => self.review_task(state, task),
             Step::SkipReview { task } => self.skip_review(state, task),
             Step::Verdict { task } => self.verdict_task(config, state, task),
@@ -1301,36 +1292,21 @@ impl Worker {
         }
     }
 
-    /// Says on a queued task's card that it waits for another task's scope.
+    /// Clears the "Waiting: <path> is in use by <task>" line a queued task kept
+    /// from when declared paths were a lock.
     ///
-    /// The line reads "Waiting: <path> is in use by <task>" and is written once
-    /// while it stays true. Returns a report only when it wrote the line: the
-    /// task is Queued, nothing failed, and nobody needs to be told.
-    fn hold(&self, state: &RunState, task: &str, path: &str, other: &str) -> Option<StepReport> {
-        let message = waiting_message(&format!(
-            "task {task:?} path {path:?} overlaps task {other:?}"
-        ));
-        let found = state.tasks.get(task)?;
-        if found
-            .last_status
-            .as_ref()
-            .is_some_and(|status| status.message == message)
-        {
-            return None;
-        }
-        let progress = found
-            .last_status
-            .as_ref()
-            .and_then(|status| status.progress);
-        match self.commit(EventKind::TaskStatus {
-            task: task.to_string(),
-            message: message.clone(),
-            progress,
-        }) {
-            Ok(seq) => Some(StepReport::ok("wait", task, message, Some(seq))),
-            Err(err) => {
-                tracing::warn!(%task, %err, "could not write why the task waits");
-                None
+    /// Nothing waits on a path any more, but a task held at the running cap gets
+    /// no step, so its old line would otherwise stay on its card. Once cleared
+    /// the line reads "No longer waiting", so this writes nothing on later passes.
+    fn clear_scope_waits(&self, state: &RunState) {
+        for (id, task) in &state.tasks {
+            let stale = task.status == TaskStatus::Queued
+                && task.last_status.as_ref().is_some_and(|status| {
+                    status.message.starts_with(WAITING_PREFIX)
+                        && status.message.contains(" is in use by ")
+                });
+            if stale {
+                self.clear_waiting(state, id);
             }
         }
     }
@@ -2664,17 +2640,11 @@ pub async fn run(
 /// What a card's status line begins with while a step is refused.
 const WAITING_PREFIX: &str = "Waiting: ";
 
-/// The status line for a step that failed with `reason`: a scope overlap reads
-/// "Waiting: <path> is in use by <task>", anything else carries the reason.
+/// The status line for a step that failed with `reason`.
 fn waiting_message(reason: &str) -> String {
-    let quoted: Vec<&str> = reason.split('"').skip(1).step_by(2).collect();
-    let text = match (reason.contains(" overlaps task "), quoted.as_slice()) {
-        (true, [_, path, other, ..]) => format!("{path} is in use by {other}"),
-        _ => reason.to_string(),
-    };
     let line = format!(
         "{WAITING_PREFIX}{}",
-        text.split_whitespace().collect::<Vec<_>>().join(" ")
+        reason.split_whitespace().collect::<Vec<_>>().join(" ")
     );
     if line.chars().count() <= shprd_core::event::ENGINE_STATUS_MAX_CHARS {
         return line;
@@ -2690,15 +2660,6 @@ fn waiting_message(reason: &str) -> String {
 #[cfg(test)]
 mod waiting_tests {
     use super::waiting_message;
-
-    #[test]
-    fn an_overlap_reads_as_a_path_in_use() {
-        let reason = r#"task "serve-space-label" path "crates/shprd/tests" overlaps task "install-layout-source""#;
-        assert_eq!(
-            waiting_message(reason),
-            "Waiting: crates/shprd/tests is in use by install-layout-source"
-        );
-    }
 
     #[test]
     fn another_refusal_carries_its_reason_capped() {

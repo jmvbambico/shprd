@@ -1,9 +1,6 @@
-//! Which paths a branch changed, how much, and whether they stayed inside a
-//! scope.
+//! Which paths a branch changed, and how much.
 
 use std::path::Path;
-
-use shprd_core::scope;
 
 use crate::git::{Git, GitError};
 
@@ -27,8 +24,7 @@ pub struct FileStat {
 /// The paths that differ between `base` and `head`.
 ///
 /// Renames are not detected, so a rename shows up as a deletion plus an
-/// addition: both the old and the new path have to be inside a task's scope,
-/// which is what the scope check below relies on.
+/// addition, so both the old and the new path are listed.
 pub fn changed_paths(repo: &Path, base: &str, head: &str) -> Result<Vec<String>, GitError> {
     let range = format!("{base}..{head}");
     let raw = Git::new(repo).run(&["diff", "--name-only", "-z", "--no-renames", &range])?;
@@ -83,7 +79,7 @@ fn blob(git: &Git, rev: &str, path: &str) -> Option<String> {
 /// It is what the accept card's Changes section reads: the same range
 /// [`changed_paths`] walks, asked for counts instead of names. `--no-renames`
 /// for the same reason: a rename is a deletion and an addition, which is what
-/// both the count and the scope check are about.
+/// the count is about.
 pub fn file_stats(repo: &Path, base: &str, head: &str) -> Result<Vec<FileStat>, GitError> {
     let range = format!("{base}..{head}");
     let raw = Git::new(repo).run(&["diff", "--numstat", "-z", "--no-renames", &range])?;
@@ -112,21 +108,6 @@ fn parse_numstat(text: &str) -> Vec<FileStat> {
                 binary,
             })
         })
-        .collect()
-}
-
-/// The paths in `paths` that fall outside `scope`.
-///
-/// A path that cannot be normalized cannot be shown to be inside the scope,
-/// so it counts as outside. Paths are returned as they were given.
-pub fn outside_scope(paths: &[String], scope: &[String]) -> Vec<String> {
-    paths
-        .iter()
-        .filter(|path| match scope::normalize(path) {
-            Ok(normalized) => !scope::within(&normalized, scope),
-            Err(_) => true,
-        })
-        .cloned()
         .collect()
 }
 
@@ -182,34 +163,5 @@ mod tests {
     fn nul_separated_output_splits_into_paths() {
         assert_eq!(split_nul("a\0b/c\0"), strings(&["a", "b/c"]));
         assert!(split_nul("").is_empty());
-    }
-
-    #[test]
-    fn a_path_outside_the_scope_is_flagged() {
-        let scope = strings(&["crates/shprd-git"]);
-        let paths = strings(&[
-            "crates/shprd-git/src/git.rs",
-            "crates/shprd-core/src/lib.rs",
-        ]);
-        assert_eq!(
-            outside_scope(&paths, &scope),
-            strings(&["crates/shprd-core/src/lib.rs"])
-        );
-    }
-
-    #[test]
-    fn an_unusable_path_counts_as_outside() {
-        let scope = strings(&["crates/shprd-git"]);
-        let paths = strings(&["/etc/passwd", "../escape", "crates/shprd-git/src/lib.rs"]);
-        assert_eq!(
-            outside_scope(&paths, &scope),
-            strings(&["/etc/passwd", "../escape"])
-        );
-    }
-
-    #[test]
-    fn a_path_that_needs_normalizing_is_accepted_inside() {
-        let scope = strings(&["crates/shprd-git"]);
-        assert!(outside_scope(&strings(&["./crates/shprd-git/"]), &scope).is_empty());
     }
 }

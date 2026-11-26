@@ -600,88 +600,19 @@ pub fn findings_schema() -> Value {
 /// since this one forked. It is taken against the freshest of the local base
 /// and `origin/<base>` (fetched first), so a landing merged on the forge, which
 /// moves only the remote ref, is not read as the task's work.
-fn diff_against_merge_base(
-    repo: &Path,
-    base: &str,
-    branch: &str,
-    scope: &[String],
-) -> Result<Result<String, Vec<String>>, CliError> {
+///
+/// The task's declared scope is a hint, not a limit: a diff that leaves it is
+/// reviewed like any other, and the reviewer judges whether each change serves
+/// the task.
+fn diff_against_merge_base(repo: &Path, base: &str, branch: &str) -> Result<String, CliError> {
     let git = Git::new(repo);
     let merge_base = shprd_git::sync::attempt_base(&git, base, branch, true).map_err(|err| {
         CliError::other(anyhow!(err).context(format!("finding where {branch} forked from {base}")))
     })?;
-    // The scope is judged on this real diff, never on the worker's `--changed`
-    // list: a file it left off the list still stops the review here.
-    let changed = shprd_git::changed::task_changes(repo, base, branch).map_err(|err| {
-        CliError::other(anyhow!(err).context(format!("listing what {branch} changed")))
-    })?;
-    let outside = shprd_git::changed::outside_scope(&changed, scope);
-    if !outside.is_empty() {
-        return Ok(Err(outside));
-    }
     git.run(&["diff", &format!("{merge_base}..{branch}")])
-        .map(Ok)
         .map_err(|err| {
             CliError::other(anyhow!(err).context(format!("diffing {branch} against {base}")))
         })
-}
-
-/// Puts the refused-hand-in card in front of the person for a branch whose real
-/// diff leaves the task's scope, the same card a hand-in listing such a path
-/// raises (`shprd agent report`).
-///
-/// Best effort, and one open card per attempt: the tick tries the review again
-/// every pass, and a card that could not be written must not hide the refusal.
-fn raise_out_of_scope_card(ctx: &Ctx, task: &str, attempt: u32, outside: &[String]) {
-    use shprd_core::ask::{Ask, AskKind, AskQueue};
-    use shprd_core::gate;
-    let Ok(state) = ctx.state() else { return };
-    let prefix = format!("{}{attempt}-", gate::HAND_IN_REFUSED_ASK_PREFIX);
-    let mine = || {
-        state
-            .asks
-            .values()
-            .filter(|ask| ask.task == task && ask.id.starts_with(&prefix))
-    };
-    if mine().any(|ask| ask.answer.is_none()) {
-        return;
-    }
-    let id = gate::hand_in_refused_ask(attempt, mine().count() + 1);
-    let reason = format!(
-        "the branch changes paths outside the task's scope: {}",
-        outside.join(", ")
-    );
-    // The repo's own high-risk list is never one click: those paths need the
-    // typed confirmation, and the card says so.
-    let globs = shprd_core::ask::high_risk_globs_in(&ctx.root);
-    let note = gate::widen_note(&gate::widen_offer(outside, &globs));
-    let text = gate::hand_in_refused_body(task, attempt, &format!("{reason}.{note}"));
-    let options = gate::hand_in_refused_options_for(outside, &globs);
-    let now_ms = shprd_core::log::Clock::now_ms(&shprd_core::log::SystemClock);
-    let ask = Ask::new(
-        id.clone(),
-        task.to_string(),
-        AskKind::Question,
-        text.clone(),
-        now_ms,
-    )
-    .with_options(options.clone());
-    let queue = AskQueue::for_repo(&ctx.root);
-    if queue.raise(&ask).is_err() {
-        return;
-    }
-    let raised = ctx.commit(EventKind::AskRaised {
-        task: task.to_string(),
-        ask: id.clone(),
-        ask_kind: AskKind::Question,
-        text,
-        options,
-        created_at_ms: now_ms,
-        expires_at_ms: None,
-    });
-    if raised.is_err() {
-        let _ = queue.remove(task, &id);
-    }
 }
 
 /// Writes the packet a reviewer reads, and returns its folder.
@@ -692,25 +623,10 @@ fn raise_out_of_scope_card(ctx: &Ctx, task: &str, attempt: u32, outside: &[Strin
 /// attempt refreshes the packet instead of appending to it.
 fn write_packet(env: &ReviewEnv<'_>, task: &Task, attempt: &Attempt) -> Result<PathBuf, CliError> {
     let dir = packet_dir(&env.reviews_dir, &env.spawn.run, &task.id, attempt.n);
-    // The diff is read, and its scope judged, before the packet's folder exists:
-    // a refused review leaves nothing behind.
-    let diff = match diff_against_merge_base(
-        &env.spawn.ctx.root,
-        &env.spawn.base_branch,
-        &attempt.branch,
-        &task.scope,
-    )? {
-        Ok(diff) => diff,
-        Err(outside) => {
-            raise_out_of_scope_card(env.spawn.ctx, &task.id, attempt.n, &outside);
-            return Err(CliError::Refused(
-                shprd_core::rules::RuleError::PathOutOfScope {
-                    task: task.id.clone(),
-                    path: outside.join(", "),
-                },
-            ));
-        }
-    };
+    // The diff is read before the packet's folder exists: a review that cannot
+    // read it leaves nothing behind.
+    let diff =
+        diff_against_merge_base(&env.spawn.ctx.root, &env.spawn.base_branch, &attempt.branch)?;
     std::fs::create_dir_all(&dir).map_err(|err| {
         CliError::other(anyhow!(err).context(format!("creating {}", dir.display())))
     })?;
@@ -4491,10 +4407,25 @@ project_dirs = []
         commit_file(&repo, "own.txt");
         git_ok(&repo, &["branch", "-f", "integration/m11", &seed]);
 
-        let diff = diff_against_merge_base(&repo, "integration/m11", "task", &["own.txt".into()])
-            .unwrap()
-            .unwrap();
+        let diff = diff_against_merge_base(&repo, "integration/m11", "task").unwrap();
         assert!(diff.contains("own.txt"), "{diff}");
         assert!(!diff.contains("landed.txt"), "{diff}");
+    }
+
+    #[test]
+    fn the_packet_is_written_for_a_diff_outside_the_declared_paths() {
+        let temp = TempDir::new().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        git_ok(&repo, &["init", "-b", "integration/m11"]);
+        git_ok(&repo, &["config", "user.name", "tests"]);
+        git_ok(&repo, &["config", "user.email", "tests@example.invalid"]);
+        git_ok(&repo, &["config", "commit.gpgsign", "false"]);
+        commit_file(&repo, "seed.txt");
+        git_ok(&repo, &["checkout", "-b", "task"]);
+        // A task that declared some other folder changes a file outside it.
+        commit_file(&repo, "elsewhere.txt");
+        let diff = diff_against_merge_base(&repo, "integration/m11", "task").unwrap();
+        assert!(diff.contains("elsewhere.txt"), "{diff}");
     }
 }

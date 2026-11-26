@@ -656,10 +656,14 @@ pub fn offers_only_scoped_paths(options: &[String], scope: &[String]) -> bool {
     !paths.is_empty() && paths.iter().all(|path| crate::scope::within(path, scope))
 }
 
-/// Whether the open ask `ask` of `task` is a scope card made moot by `scope`:
-/// every client lists asks through this, so they agree on which cards to draw.
-pub fn is_moot_scope_card(task: &str, ask: &str, options: &[String], scope: &[String]) -> bool {
-    scope_key_of(task, ask).is_some() && offers_only_scoped_paths(options, scope)
+/// Whether the open ask `ask` of `task` is a moot scope card: every client
+/// lists asks through this, so they agree on which cards to draw.
+///
+/// A task's declared paths are a hint now, never a refusal, so every scope card
+/// (a refused hand-in's or a widening's) is moot, including one a log written
+/// before that change still holds open.
+pub fn is_moot_scope_card(task: &str, ask: &str, _options: &[String], _scope: &[String]) -> bool {
+    scope_key_of(task, ask).is_some()
 }
 
 /// What a worker is told when its scope was widened.
@@ -1063,6 +1067,12 @@ mod scope_key_tests {
         ));
         let scope = ["a".to_string()];
         assert!(is_moot_scope_card("T", "scope-widen-1", &options, &scope));
+        assert!(is_moot_scope_card(
+            "T",
+            "hand-in-refused-1-1",
+            &options,
+            &["c".to_string()]
+        ));
         assert!(!is_moot_scope_card("T", "ask-1", &options, &scope));
     }
 

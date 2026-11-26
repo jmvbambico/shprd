@@ -14,7 +14,7 @@ use crate::event::{
 };
 use crate::gate::REVIEW_GATE;
 use crate::scope::{self, ScopeError};
-use crate::state::{AgentInfo, Attempt, ResourceStatus, ReviewRequest, RunState, Task, TaskStatus};
+use crate::state::{AgentInfo, ResourceStatus, ReviewRequest, RunState, Task, TaskStatus};
 
 /// Why an event was refused.
 #[derive(Debug, Error)]
@@ -153,23 +153,26 @@ pub enum RuleError {
         /// The task.
         task: TaskId,
     },
-    /// The task's scope clashes with another task's.
-    #[error("task {task:?} path {path:?} overlaps task {other:?}")]
-    ScopeConflict {
-        /// The task being spawned.
-        task: TaskId,
-        /// The other task holding the scope.
-        other: TaskId,
-        /// The clashing path.
-        path: String,
-    },
-    /// A changed path is not usable, or not inside the task's scope.
-    #[error("task {task:?} changed {path:?}, which is not inside its scope")]
-    PathOutOfScope {
+    /// A changed path is not a usable repo-relative path.
+    #[error("task {task:?} changed {path:?}, which is not a repo-relative path")]
+    BadChangedPath {
         /// The task.
         task: TaskId,
         /// The path, as given.
         path: String,
+    },
+    /// A hand-in changes a path no task may commit: shprd's own state or a
+    /// real environment file (see [`scope::forbidden`]).
+    #[error(
+        "task {task:?} changes {path:?}, which no task may commit because {why}: remove it from the branch and hand in again"
+    )]
+    ForbiddenPath {
+        /// The task.
+        task: TaskId,
+        /// The path.
+        path: String,
+        /// Why the path is off limits, in plain words.
+        why: &'static str,
     },
     /// The attempt has not reported yet.
     #[error("task {task:?} attempt {attempt} has not reported")]
@@ -647,20 +650,6 @@ pub fn scope_override_paths(reason: &str) -> Vec<String> {
         .filter(|path| !path.is_empty())
         .map(str::to_string)
         .collect()
-}
-
-/// Whether a person let `path` through the scope for `attempt` of `task`.
-///
-/// Only an override recorded after the attempt started counts, so an earlier
-/// attempt's override never covers a later one.
-fn scope_accepted(task: &Task, attempt: &Attempt, path: &str) -> bool {
-    let Some(spawn) = attempt.spawn_seq else {
-        return false;
-    };
-    task.overrides
-        .iter()
-        .filter(|record| record.rule == ACCEPT_OUTSIDE_SCOPE && record.seq > spawn)
-        .any(|record| scope::within(path, &scope_override_paths(&record.reason)))
 }
 
 /// Whether `rule` names an override the rules honour.
@@ -1442,44 +1431,13 @@ fn check_spawned(
             agent: agent.clone(),
         });
     }
-    if let Some((other, path)) = scope_holder(state, found) {
-        return Err(RuleError::ScopeConflict {
-            task: task.to_string(),
-            other,
-            path,
-        });
-    }
     Ok(())
 }
 
-/// The task in flight whose scope keeps `task` from starting, and the first
-/// path that clashes: `(other task, path)`.
+/// Rules for widening a task's scope: only a person does it, to usable paths.
 ///
-/// A task is in flight while its agent works or while its hand-in waits to be
-/// accepted (`Reported`, `Passed`). The planner asks this before it plans a
-/// start, so a task that waits for another's scope is waiting, not failing; the
-/// spawn rule asks it too, so the two never disagree.
-pub fn scope_holder(state: &RunState, task: &crate::state::Task) -> Option<(String, String)> {
-    state.tasks.iter().find_map(|(other_id, other)| {
-        let busy = matches!(
-            other.status,
-            TaskStatus::Working | TaskStatus::Reported | TaskStatus::Passed
-        );
-        if other_id == &task.id || !busy {
-            return None;
-        }
-        first_overlap(&task.scope, &other.scope).map(|path| (other_id.clone(), path))
-    })
-}
-
-/// The first path of `a` that clashes with a path of `b`, for a planner that
-/// holds the scopes of the starts it has already planned.
-pub fn scope_clash(a: &[String], b: &[String]) -> Option<String> {
-    first_overlap(a, b)
-}
-
-/// Rules for widening a task's scope: only a person does it, to paths that
-/// are usable and that no other task in flight holds.
+/// A declared scope is a hint, not a lock, so a widening never waits for
+/// another task.
 ///
 /// A scope a worker could widen for itself would bound nothing, which is why
 /// the actor is checked on the name, as an override is. History is not
@@ -1506,38 +1464,16 @@ fn check_scope_widened(
             task: task.to_string(),
         });
     }
-    let mut added = Vec::new();
     for path in paths {
-        let normalized = scope::normalize(path).map_err(|_| RuleError::PathOutOfScope {
-            task: task.to_string(),
-            path: path.clone(),
-        })?;
-        added.push(normalized);
-    }
-    for (other_id, other) in &state.tasks {
-        let busy = matches!(
-            other.status,
-            TaskStatus::Working | TaskStatus::Reported | TaskStatus::Passed
-        );
-        if other_id == &found.id || !busy {
-            continue;
-        }
-        if let Some(path) = first_overlap(&added, &other.scope) {
-            return Err(RuleError::ScopeConflict {
-                task: task.to_string(),
-                other: other_id.clone(),
-                path,
+        if let Err(source) = scope::normalize(path) {
+            return Err(RuleError::BadScope {
+                task: found.id.clone(),
+                path: path.clone(),
+                source,
             });
         }
     }
     Ok(())
-}
-
-/// The first entry of `a` that clashes with an entry of `b`.
-fn first_overlap(a: &[String], b: &[String]) -> Option<String> {
-    a.iter()
-        .find(|left| scope::overlaps(std::slice::from_ref(left), b))
-        .cloned()
 }
 
 /// Rules for an agent reporting the outcome of an attempt.
@@ -1578,25 +1514,28 @@ fn check_reported(
             found: found.status,
         });
     }
+    // The declared scope is a hint, so a changed path outside it is the
+    // review's to judge, not a refusal. Only the hard list refuses, and only for
+    // a hand-in being written now: history is not re-judged.
+    if provenance == Provenance::Historical {
+        return Ok(());
+    }
     for path in changed_paths {
-        let normalized = match scope::normalize(path) {
-            Ok(normalized) => normalized,
-            Err(_) => {
-                return Err(RuleError::PathOutOfScope {
-                    task: task.to_string(),
-                    path: path.clone(),
-                });
-            }
-        };
-        if !scope::within(&normalized, &found.scope) && !scope_accepted(found, current, &normalized)
-        {
-            return Err(RuleError::PathOutOfScope {
+        let Ok(normalized) = scope::normalize(path) else {
+            return Err(RuleError::BadChangedPath {
                 task: task.to_string(),
                 path: path.clone(),
             });
+        };
+        if let Some(why) = scope::forbidden(&normalized) {
+            return Err(RuleError::ForbiddenPath {
+                task: task.to_string(),
+                path: normalized,
+                why,
+            });
         }
     }
-    if provenance == Provenance::Historical || status != ReportStatus::Completed {
+    if status != ReportStatus::Completed {
         return Ok(());
     }
     if checks.is_empty() {
@@ -2859,17 +2798,43 @@ mod tests {
     }
 
     #[test]
-    fn overlapping_scope_spawn_is_refused() {
-        assert!(matches!(
-            refused(&[
-                started(1),
-                added(2, "a", &["src"], &[]),
-                added(3, "b", &["src/b.rs"], &[]),
-                spawned(4, "a", 1, "agent-1"),
-                spawned(5, "b", 1, "agent-2"),
-            ]),
-            RuleError::ScopeConflict { .. }
-        ));
+    fn overlapping_scopes_start_side_by_side() {
+        let log = [
+            started(1),
+            added(2, "a", &["src"], &[]),
+            added(3, "b", &["src/b.rs"], &[]),
+            spawned(4, "a", 1, "agent-1"),
+            spawned(5, "b", 1, "agent-2"),
+        ];
+        let state = folded(&log);
+        assert_eq!(status(&state, "a"), TaskStatus::Working);
+        assert_eq!(status(&state, "b"), TaskStatus::Working);
+        // Appended now, not only folded: the spawn rule holds no lock either.
+        assert!(
+            folded(&log[..4])
+                .check_as(&Actor::Engine, &log[4].kind, log[4].at_ms)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_send_back_starts_beside_an_overlapping_task_in_flight() {
+        let log = [
+            started(1),
+            added(2, "a", &["src"], &[]),
+            added(3, "b", &["src/b.rs"], &[]),
+            spawned(4, "b", 1, "agent-2"),
+            reported_with(5, "b", 1, ReportStatus::Failed),
+            spawned(6, "a", 1, "agent-1"),
+            spawned(7, "b", 2, "agent-2"),
+        ];
+        let state = folded(&log[..6]);
+        assert!(
+            state
+                .check_as(&Actor::Engine, &log[6].kind, log[6].at_ms)
+                .is_ok()
+        );
+        assert_eq!(status(&folded(&log), "b"), TaskStatus::Working);
     }
 
     #[test]
@@ -2886,25 +2851,57 @@ mod tests {
     }
 
     #[test]
-    fn changed_path_must_stay_inside_scope() {
+    fn a_hand_in_outside_its_declared_paths_is_recorded() {
+        let log = [
+            started(1),
+            added(2, "a", &["src/a"], &[]),
+            spawned(3, "a", 1, "agent-1"),
+            reported(4, "a", 1, &["src/a/x.rs", "src/b/x.rs", "Cargo.lock"]),
+        ];
+        assert!(
+            folded(&log[..3])
+                .check_as(&log[3].actor, &log[3].kind, log[3].at_ms)
+                .is_ok()
+        );
+        assert_eq!(status(&folded(&log), "a"), TaskStatus::Reported);
         assert!(matches!(
-            refused(&[
-                started(1),
-                added(2, "a", &["src/a"], &[]),
-                spawned(3, "a", 1, "agent-1"),
-                reported(4, "a", 1, &["src/b/x.rs"]),
-            ]),
-            RuleError::PathOutOfScope { .. }
-        ));
-        assert!(matches!(
-            refused(&[
+            refused_append(&[
                 started(1),
                 added(2, "a", &["src/a"], &[]),
                 spawned(3, "a", 1, "agent-1"),
                 reported(4, "a", 1, &["../escape"]),
             ]),
-            RuleError::PathOutOfScope { .. }
+            RuleError::BadChangedPath { .. }
         ));
+    }
+
+    #[test]
+    fn a_hand_in_that_commits_shprd_state_or_an_env_file_is_refused() {
+        for path in [".shprd/events.jsonl", ".dagr/run.json", "web/.env.local"] {
+            let log = [
+                started(1),
+                added(2, "a", &["src/a"], &[]),
+                spawned(3, "a", 1, "agent-1"),
+                reported(4, "a", 1, &["src/a/x.rs", path]),
+            ];
+            match refused_append(&log) {
+                RuleError::ForbiddenPath { path: named, .. } => assert_eq!(named, path),
+                other => panic!("{path}: expected ForbiddenPath, got {other:?}"),
+            }
+            // History is not re-judged: a log that already holds one folds.
+            assert_eq!(status(&folded(&log), "a"), TaskStatus::Reported);
+        }
+        let ok = [
+            started(1),
+            added(2, "a", &["src/a"], &[]),
+            spawned(3, "a", 1, "agent-1"),
+            reported(4, "a", 1, &[".shprd/config.toml", ".env.example"]),
+        ];
+        assert!(
+            folded(&ok[..3])
+                .check_as(&ok[3].actor, &ok[3].kind, ok[3].at_ms)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -3479,66 +3476,6 @@ mod tests {
             check_as(&state, &Actor::Human, &empty, 6_000),
             Err(RuleError::EmptyScopeWidening { .. })
         ));
-    }
-
-    /// A scope override for `task` listing `paths`, recorded by a human.
-    fn scope_overrode(seq: u64, task: &str, paths: &[&str]) -> Event {
-        let paths: Vec<String> = paths.iter().map(|p| p.to_string()).collect();
-        let mut event = ev(
-            seq,
-            EventKind::Override {
-                task: task.to_string(),
-                rule: ACCEPT_OUTSIDE_SCOPE.to_string(),
-                reason: scope_override_reason(&paths, "needed for the fix"),
-            },
-        );
-        event.actor = Actor::Human;
-        event
-    }
-
-    #[test]
-    fn a_scope_override_lets_the_listed_path_through() {
-        let mut log = vec![
-            started(1),
-            added(2, "a", &["src/a"], &[]),
-            spawned(3, "a", 1, "agent-1"),
-        ];
-        let out = reported(5, "a", 1, &["src/a/x.rs", "src/b/y.rs"]);
-        let mut refused_log = log.clone();
-        refused_log.push(out.clone());
-        assert!(matches!(
-            refused_append(&refused_log),
-            RuleError::PathOutOfScope { .. }
-        ));
-        log.push(scope_overrode(4, "a", &["src/b/y.rs"]));
-        log.push(out);
-        assert_eq!(status(&folded(&log), "a"), TaskStatus::Reported);
-    }
-
-    #[test]
-    fn a_scope_override_covers_only_the_paths_it_lists() {
-        let log = vec![
-            started(1),
-            added(2, "a", &["src/a"], &[]),
-            spawned(3, "a", 1, "agent-1"),
-            scope_overrode(4, "a", &["src/b/y.rs"]),
-            reported(5, "a", 1, &["src/c/z.rs"]),
-        ];
-        assert!(matches!(refused(&log), RuleError::PathOutOfScope { .. }));
-    }
-
-    #[test]
-    fn a_scope_override_covers_only_its_own_attempt() {
-        let log = vec![
-            started(1),
-            added(2, "a", &["src/a"], &[]),
-            spawned(3, "a", 1, "agent-1"),
-            scope_overrode(4, "a", &["src/b/y.rs"]),
-            reported_with(5, "a", 1, ReportStatus::Failed),
-            spawned(8, "a", 2, "agent-1"),
-            reported(9, "a", 2, &["src/b/y.rs"]),
-        ];
-        assert!(matches!(refused(&log), RuleError::PathOutOfScope { .. }));
     }
 
     #[test]

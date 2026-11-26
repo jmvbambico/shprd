@@ -1959,7 +1959,7 @@ mod tests {
 
     #[test]
     #[allow(clippy::expect_used)]
-    fn a_widened_scope_leaves_no_open_scope_card_offering_only_scoped_paths() {
+    fn an_open_scope_card_from_an_old_log_is_not_drawn() {
         use shprd_core::ask::{AskKind, scope_widen_options};
         let at = |seq: u64, kind: EventKind| Event {
             seq,
@@ -1988,7 +1988,7 @@ mod tests {
             1,
             scope_widen_options(&[String::from("docs/b.md")])[0].clone(),
         );
-        let mut events = vec![
+        let events = vec![
             at(
                 1,
                 EventKind::RunStarted {
@@ -2025,24 +2025,8 @@ mod tests {
                 .open_asks
                 .len()
         };
-        assert_eq!(open(&events), 3);
-        // docs/a.md is widened: the widen card is moot, but the refused card
-        // still offers docs/b.md.
-        events.push(at(
-            6,
-            EventKind::ScopeWidened {
-                task: String::from("T1"),
-                paths: vec![String::from("docs/a.md")],
-            },
-        ));
-        assert_eq!(open(&events), 2);
-        events.push(at(
-            7,
-            EventKind::ScopeWidened {
-                task: String::from("T1"),
-                paths: vec![String::from("docs/b.md")],
-            },
-        ));
+        // Declared paths are a hint now: every scope card a log still holds
+        // open is moot, and only the person's own question is left.
         assert_eq!(open(&events), 1, "only the person's own question is left");
     }
 

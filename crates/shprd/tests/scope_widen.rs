@@ -463,21 +463,12 @@ fn open_ask_ids(state: &Path) -> (Vec<String>, Vec<String>) {
 }
 
 #[test]
-fn the_asks_and_the_state_agree_a_widened_card_is_gone() {
+fn the_asks_and_the_state_agree_a_scope_card_is_never_drawn() {
+    // Declared paths are a hint, so every scope card is moot: neither the asks
+    // list nor the snapshot draws one, answered or not.
     let (repo, state, home) = fixture();
     assert!(raise(repo.path(), "T1").status.success());
     let _service = Service::start(repo.path(), state.path(), home.path());
-    let (asks, snapshot) = open_ask_ids(state.path());
-    assert_eq!(asks, ["scope-widen-1"]);
-    assert_eq!(snapshot, ["scope-widen-1"]);
-    assert_eq!(
-        answer(
-            state.path(),
-            repo.path(),
-            "widen the scope to docs/extra.md, crates/other"
-        ),
-        200
-    );
     let (asks, snapshot) = open_ask_ids(state.path());
     assert!(
         asks.is_empty() && snapshot.is_empty(),

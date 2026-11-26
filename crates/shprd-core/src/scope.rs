@@ -79,6 +79,36 @@ pub fn normalize(path: &str) -> Result<String, ScopeError> {
     Ok(text.to_string())
 }
 
+/// Why `path` may never be committed by any task, or `None` when it may.
+///
+/// This is the one hard list left from task scopes: shprd's own state
+/// (`.shprd/`, except the tracked `.shprd/config.toml`, and `.dagr/`) and real
+/// environment files (`.env`, `.env.<name>`, at any depth; `.env.example` and
+/// other templates are fine). Everything else a task changes is judged by its
+/// review and, for protected paths, by the person at the gate.
+///
+/// `path` is expected to be normalized.
+pub fn forbidden(path: &str) -> Option<&'static str> {
+    if path == ".shprd" || (is_child(path, ".shprd") && path != ".shprd/config.toml") {
+        return Some("it is shprd's own state");
+    }
+    if path == ".dagr" || is_child(path, ".dagr") {
+        return Some("it is shprd's own state");
+    }
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let env = name == ".env"
+        || name.strip_prefix(".env.").is_some_and(|suffix| {
+            !matches!(
+                suffix,
+                "example" | "sample" | "template" | "dist" | "defaults" | "schema"
+            )
+        });
+    if env {
+        return Some("it is an environment file, which may hold secrets");
+    }
+    None
+}
+
 /// True when the first component of `text` looks like a Windows drive (`C:`
 /// or `c:src`), which no repo-relative scope may.
 fn starts_with_drive(text: &str) -> bool {
@@ -411,5 +441,31 @@ mod tests {
             Some("client/src/components")
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_shprd_state_and_real_env_files_are_forbidden() {
+        for no in [
+            ".shprd/events.jsonl",
+            ".shprd",
+            ".dagr/run.json",
+            ".env",
+            ".env.local",
+            "web/.env.production",
+        ] {
+            assert!(forbidden(no).is_some(), "{no}");
+        }
+        for ok in [
+            ".shprd/config.toml",
+            ".env.example",
+            "web/.env.sample",
+            "src/env.rs",
+            "Cargo.lock",
+            "docs/plan.md",
+            ".github/workflows/ci.yml",
+            "secrets.md",
+        ] {
+            assert!(forbidden(ok).is_none(), "{ok}");
+        }
     }
 }

@@ -158,19 +158,6 @@ pub enum Step {
         /// The task to start.
         task: String,
     },
-    /// Say that a queued task waits for another task's scope.
-    ///
-    /// Nothing is started and nothing fails: the task stays Queued with a
-    /// status line, and the next pass asks again. It is a step so the planner
-    /// stays pure and the executor owns the write.
-    Wait {
-        /// The queued task that waits.
-        task: String,
-        /// The path both tasks hold.
-        path: String,
-        /// The task in flight that holds it.
-        other: String,
-    },
     /// Start the engine's reviewer on a task that just handed in.
     Review {
         /// The task to review.
@@ -251,7 +238,6 @@ impl Step {
             | Self::Review { task }
             | Self::SkipReview { task }
             | Self::Verdict { task }
-            | Self::Wait { task, .. }
             | Self::Land { task, .. }
             | Self::MarkLanded { task, .. }
             | Self::NeedsYou { task, .. }
@@ -264,7 +250,6 @@ impl Step {
     pub fn action(&self) -> &'static str {
         match self {
             Self::Start { .. } => "start",
-            Self::Wait { .. } => "wait",
             Self::Review { .. } => "review",
             Self::SkipReview { .. } => "skip_review",
             Self::Verdict { .. } => "verdict",
@@ -323,24 +308,13 @@ pub fn plan(input: &Input<'_>) -> Vec<Step> {
     let max_running = input.config.tick.max_running.max(1);
     let mut running = running_count(state, input.facts, input.phases);
     let mut steps = Vec::new();
-    // The scopes of the starts this pass has already planned: two queued tasks
-    // that share a path must not both start in one pass.
-    let mut claimed: Vec<(String, Vec<String>)> = Vec::new();
     for (id, task) in &state.tasks {
         let phase = input
             .phases
             .get(id)
             .copied()
             .unwrap_or_else(|| Phase::of(task.status));
-        if let Some(step) = step_for(
-            input,
-            task,
-            phase,
-            &target,
-            &mut running,
-            max_running,
-            &mut claimed,
-        ) {
+        if let Some(step) = step_for(input, task, phase, &target, &mut running, max_running) {
             steps.push(step);
         }
     }
@@ -359,7 +333,6 @@ fn step_for(
     landing_target: &str,
     running: &mut u32,
     max_running: u32,
-    claimed: &mut Vec<(String, Vec<String>)>,
 ) -> Option<Step> {
     let state = input.state;
     let facts = input.facts;
@@ -470,26 +443,13 @@ fn step_for(
     {
         return None;
     }
-    // A task that shares a path with one in flight, or with a start planned
-    // earlier in this pass, waits for it. That is not a failed start: it takes
-    // no slot and the tasks after it in the queue are still considered.
-    let holder = rules::scope_holder(state, task).or_else(|| {
-        claimed.iter().find_map(|(other, scope)| {
-            rules::scope_clash(&task.scope, scope).map(|path| (other.clone(), path))
-        })
-    });
-    if let Some((other, path)) = holder {
-        return Some(Step::Wait {
-            task: task.id.clone(),
-            path,
-            other,
-        });
-    }
+    // Declared paths are a hint, not a lock: two tasks that name the same file
+    // run together, and a real clash is caught when the second one lands. Order
+    // between tasks comes from their declared dependencies.
     if *running >= max_running {
         return None;
     }
     *running += 1;
-    claimed.push((task.id.clone(), task.scope.clone()));
     Some(Step::Start {
         task: task.id.clone(),
     })
@@ -1010,45 +970,35 @@ mod tests {
     }
 
     #[test]
-    fn a_task_on_a_busy_scope_waits_and_the_rest_start() {
+    fn tasks_with_overlapping_paths_start_in_the_same_pass() {
         let log = vec![
             started(1),
             added_scoped(2, "T1", "calc"),
             spawned(3, "T1", 1),
             added_scoped(4, "T4", "calc/ops.py"),
             added_scoped(5, "T5", "README.md"),
-            added_scoped(6, "T6", "docs"),
-            added_scoped(7, "T7", "README.md"),
+            added_scoped(6, "T7", "README.md"),
         ];
         let state = folded(&log);
         let steps = plan_for(&state, &Facts::default(), &config(MergePolicy::Ask, 4));
         assert_eq!(
             steps,
             vec![
-                Step::Wait {
-                    task: "T4".to_string(),
-                    path: "calc/ops.py".to_string(),
-                    other: "T1".to_string()
+                Step::Start {
+                    task: "T4".to_string()
                 },
                 Step::Start {
                     task: "T5".to_string()
                 },
                 Step::Start {
-                    task: "T6".to_string()
-                },
-                // T7 clashes with T5, started in this same pass.
-                Step::Wait {
-                    task: "T7".to_string(),
-                    path: "README.md".to_string(),
-                    other: "T5".to_string()
+                    task: "T7".to_string()
                 },
             ]
         );
     }
 
     #[test]
-    fn a_task_waiting_for_a_handed_in_task_waits_too() {
-        // Reported, not yet accepted: it still holds its scope.
+    fn a_task_beside_a_handed_in_task_on_the_same_paths_starts() {
         let log = vec![
             started(1),
             added_scoped(2, "T6", "src/T6"),
@@ -1059,13 +1009,11 @@ mod tests {
         let state = folded(&log);
         let steps = plan_for(&state, &Facts::default(), &config(MergePolicy::Ask, 4));
         assert!(
-            steps.iter().any(|step| matches!(
-                step,
-                Step::Wait { task, other, .. } if task == "T7" && other == "T6"
-            )),
+            steps
+                .iter()
+                .any(|step| matches!(step, Step::Start { task } if task == "T7")),
             "{steps:?}"
         );
-        assert!(!steps.iter().any(|step| matches!(step, Step::Start { .. })));
     }
 
     #[test]

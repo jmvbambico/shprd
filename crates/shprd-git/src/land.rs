@@ -330,13 +330,6 @@ pub enum LandError {
         /// The head that should have been restored.
         expected: String,
     },
-    /// The branch's real diff touches paths outside the task's scope, whatever
-    /// the hand-in listed.
-    #[error("the branch changes {} path(s) outside the task's scope", paths.len())]
-    OutOfScope {
-        /// The paths outside the scope, as git printed them.
-        paths: Vec<String>,
-    },
 }
 
 impl LandError {
@@ -368,11 +361,6 @@ impl LandError {
             LandError::NotRestored { .. } => {
                 String::from("a failed merge could not be undone cleanly")
             }
-            LandError::OutOfScope { paths } => format!(
-                "it changes {} outside its scope ({})",
-                if paths.len() == 1 { "a file" } else { "files" },
-                paths.join(", ")
-            ),
         };
         format!("Couldn't merge {task}: {reason}")
     }
@@ -658,25 +646,6 @@ pub fn land_local(
     let merged = merge_local(&git, &base, &head, landing)?;
     push_integration(&git, landing.base);
     Ok(LocalLanded::Merged { head: merged })
-}
-
-/// Refuses a landing whose branch really changes a path outside `scope`.
-///
-/// The hand-in's own `--changed` list is the worker's word; this reads the
-/// branch's diff against its merge base with `base`, so a file the worker left
-/// off the list is still caught at landing.
-///
-/// # Errors
-///
-/// [`LandError::OutOfScope`] naming the offending paths, or a git failure.
-pub fn check_scope(git: &Git, base: &str, branch: &str, scope: &[String]) -> Result<(), LandError> {
-    let changed = crate::changed::task_changes(git.dir(), base, branch)?;
-    let outside = crate::changed::outside_scope(&changed, scope);
-    if outside.is_empty() {
-        Ok(())
-    } else {
-        Err(LandError::OutOfScope { paths: outside })
-    }
 }
 
 /// Pushes the integration branch to the repository's remote, when it has one.

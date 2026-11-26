@@ -1,6 +1,6 @@
-//! A task's scope implies its own crates' tests and the synced copies of shared
-//! desktop files, so a hand-in that changes them is not refused; declared paths
-//! still decide whether two tasks may run together.
+//! A task's declared scope is a hint: a hand-in that changes its own crate's
+//! tests, the synced copies of a shared desktop file or another crate entirely
+//! is not refused, and tasks with overlapping paths start together.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -147,7 +147,7 @@ impl Fixture {
 }
 
 #[test]
-fn a_crate_scope_covers_its_own_tests_but_not_another_crates() {
+fn a_hand_in_in_another_crate_is_not_refused() {
     let fixture = Fixture::new();
     assert!(
         fixture
@@ -155,10 +155,8 @@ fn a_crate_scope_covers_its_own_tests_but_not_another_crates() {
             .status
             .success()
     );
-    let wrong = fixture.hand_in("T1", "crates/shprd/tests/x.rs");
-    assert!(!wrong.status.success(), "{wrong:?}");
-    let right = fixture.hand_in("T1", "crates/shprd-core/tests/x.rs");
-    assert!(right.status.success(), "{right:?}");
+    let elsewhere = fixture.hand_in("T1", "crates/shprd/tests/x.rs");
+    assert!(elsewhere.status.success(), "{elsewhere:?}");
 }
 
 #[test]
