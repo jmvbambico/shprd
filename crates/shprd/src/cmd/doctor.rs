@@ -275,7 +275,9 @@ fn host(report: &mut Report, facts: &Facts) {
     // The host the verbs would drive, and why: the same resolution the run does
     // (M10.9), so a person asking "which multiplexer is shprd using?" gets the
     // answer the next spawn will act on rather than a second opinion.
-    let resolution = crate::host::resolve();
+    // Through the sticky select, like every other caller, so doctor reports the
+    // host a spawn would drive rather than a second probe.
+    let (resolution, _host) = crate::host::select();
     let level = if resolution.fell_back {
         Level::Warn
     } else {
