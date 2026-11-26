@@ -72,8 +72,10 @@ pub fn fingerprint(output: &str) -> Fingerprint {
     let mut errors = None;
     let mut files = BTreeSet::new();
     for line in output.lines() {
+        // The largest count wins: a later "3 errors fixed" must not hide the
+        // real summary.
         if let Some(count) = error_count(line) {
-            errors = Some(count);
+            errors = Some(errors.map_or(count, |seen: u32| seen.max(count)));
         }
         if let Some(file) = file_of(line) {
             files.insert(file);
@@ -256,6 +258,12 @@ mod tests {
     fn an_unreadable_failure_is_a_regression() {
         let base = entry(62, &[]);
         assert_eq!(judge(&base, "npm run lint", "boom"), Verdict::Regression);
+    }
+
+    #[test]
+    fn a_later_lower_count_does_not_hide_the_real_one() {
+        let fp = fingerprint("70 errors\n3 errors fixed");
+        assert_eq!(fp.errors, Some(70));
     }
 
     #[test]

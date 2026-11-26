@@ -84,7 +84,9 @@ pub fn record_baselines(ctx: &Ctx, base: &str) -> Result<usize, anyhow::Error> {
     let Ok(sha) = git.rev_parse(base) else {
         return Ok(0);
     };
-    let checkout = root.join(".shprd").join("baseline-checkout");
+    let checkout = root
+        .join(".shprd")
+        .join(format!("baseline-checkout-{}", std::process::id()));
     if checkout.exists() {
         let _ = std::process::Command::new("git")
             .arg("-C")
@@ -102,6 +104,7 @@ pub fn record_baselines(ctx: &Ctx, base: &str) -> Result<usize, anyhow::Error> {
         .arg(&sha)
         .output()?;
     if !added.status.success() {
+        let _ = std::fs::remove_dir_all(&checkout);
         return Err(anyhow!(
             "checking out the base {sha} for its gate baseline: {}",
             String::from_utf8_lossy(&added.stderr).trim()

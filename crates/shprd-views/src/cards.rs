@@ -281,6 +281,24 @@ fn is_ready_to_land(body: &str) -> bool {
     body.contains(" is ready to land")
 }
 
+/// A line naming each failing check of the task's latest attempt that failed no
+/// worse on the base, so the card says it is pre-existing and not the worker's.
+fn pre_existing_note(task: &shprd_core::state::Task) -> String {
+    let Some(report) = task.latest_attempt().and_then(|a| a.report.as_ref()) else {
+        return String::new();
+    };
+    report
+        .checks
+        .iter()
+        .filter_map(|check| {
+            check
+                .pre_existing
+                .as_ref()
+                .map(|label| format!("\n`{}` fails: {label}", check.gate))
+        })
+        .collect()
+}
+
 /// Whether `body` says a review's first turn never arrived.
 fn is_review_not_delivered(body: &str) -> bool {
     body.starts_with("review kickoff not delivered")
@@ -372,7 +390,10 @@ fn task_card(task: &shprd_core::state::Task, escalation: &Escalation, now_ms: u6
     }
     let decision = |text: String, ids: &[&str]| build(escalation, text, CardKind::Decision, ids);
     if is_ready_to_land(body) {
-        return decision(plain_body(body), &[action::REVIEW]);
+        return decision(
+            format!("{}{}", plain_body(body), pre_existing_note(task)),
+            &[action::REVIEW],
+        );
     }
     if body == BRIEF_LOST {
         return decision(plain_body(body), &[action::RESEND_BRIEF, action::DROP]);
@@ -911,6 +932,30 @@ mod tests {
             .tasks
             .insert(String::from("T1"), task(status, vec![attempt(1)]));
         state
+    }
+
+    #[test]
+    fn a_ready_to_land_card_says_a_failing_check_is_pre_existing() {
+        use shprd_core::event::{CheckReport, ReportStatus};
+        use shprd_core::state::Report;
+        let mut state = run_with(TaskStatus::Reported);
+        let t = state.tasks.get_mut("T1").unwrap();
+        let mut check = CheckReport::passed("lint", "npm run lint");
+        check.exit_code = Some(1);
+        check.pre_existing = Some("pre-existing on base (abc, 62 errors on base; exit 1)".into());
+        t.attempts[0].report = Some(Report {
+            status: ReportStatus::Completed,
+            summary: String::new(),
+            tests: Vec::new(),
+            checks: vec![check],
+            changed_paths: Vec::new(),
+            commit: None,
+            skills_used: Vec::new(),
+            proofs: Vec::new(),
+        });
+        let esc = raised(5, "T1 is ready to land: Review and Accept it", "wait");
+        let card = card(&state, &esc).unwrap();
+        assert!(card.body.contains("`lint` fails: pre-existing on base"));
     }
 
     fn ids(card: &super::Card) -> Vec<&str> {

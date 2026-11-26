@@ -61,6 +61,9 @@ pub fn sync_verb(ctx: &Ctx, home: Option<&Path>) -> Result<(), CliError> {
     let branch = worktree.branch.clone();
     match sync::sync_base(&worktree, &base) {
         Ok(SyncOutcome::UpToDate { head }) => {
+            if let Err(err) = crate::cmd::run::record_baselines(ctx, &base) {
+                eprintln!("warning: no gate baseline recorded: {err:#}");
+            }
             if !ctx.json {
                 println!("{branch} is up to date with {base} at {}", short(&head));
             }
@@ -72,7 +75,7 @@ pub fn sync_verb(ctx: &Ctx, home: Option<&Path>) -> Result<(), CliError> {
                 int_sha: int_sha.clone(),
             })?;
             crate::cmd::emit(ctx, &event)?;
-            // The base moved, so its gates may have: re-baseline them.
+            // Every sync re-baselines: the base's gates may have moved with it.
             if let Err(err) = crate::cmd::run::record_baselines(ctx, &base) {
                 eprintln!("warning: no gate baseline recorded: {err:#}");
             }
