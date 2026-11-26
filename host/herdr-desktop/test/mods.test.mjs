@@ -1429,7 +1429,7 @@ test("a task with an open review-out ask is never old: it badges, stays on top, 
     options: ["retry with another round", "take it as it is", "drop it"],
   };
   const board = {
-    tasks: [aged("OUT", "needs_you", 20), aged("OLD", "queued", 20)],
+    tasks: [aged("OUT", "needs_you", 20), aged("OLD", "needs_you", 20)],
     asks: [ask],
     needs: [
       { seq: 1, task: "OUT", body: ask.text, default_action: "x", kind: "decision", actions: ["review", "drop"] },
