@@ -860,6 +860,22 @@ fn tick_task(
         return Ok(());
     }
     let process_exited = process_exited && !starting_up;
+    // A worker that handed in `completed` and then ended is finished, not dead:
+    // its exit is the normal one, so nothing is handed off and no stop is told.
+    if process_exited && handed_in_completed(events, &task.id, attempt.n) {
+        let message = finished_exit_message(mux, pane.as_ref());
+        // Recorded once: the next tick finds the line and stays quiet.
+        if !exit_recorded_for(events, &task.id) {
+            env.ctx.commit(EventKind::TaskStatus {
+                task: task.id.clone(),
+                message: message.clone(),
+                progress: None,
+            })?;
+            lines.push(format!("worker of {} finished: {message}", task.id));
+        }
+        watcher.watches.remove(&key);
+        return Ok(());
+    }
     let record_error = record_error(
         program,
         &env.transcript_roots,
@@ -1123,6 +1139,45 @@ fn reported_or_gated_ms(events: &[Event], task: &str, attempt: u32, now_ms: u64)
             _ => false,
         };
         (mine && event.at_ms <= now_ms).then_some(event.at_ms)
+    })
+}
+
+/// Whether the attempt has handed in as `completed`: a worker that then ends
+/// has finished.
+fn handed_in_completed(events: &[Event], task: &str, attempt: u32) -> bool {
+    events.iter().any(|event| {
+        matches!(
+            &event.kind,
+            EventKind::Reported { task: id, attempt: n, status: ReportStatus::Completed, .. }
+                if id == task && *n == attempt
+        )
+    })
+}
+
+/// The prefix of the status line that records a finished worker's exit.
+const FINISHED_EXIT_PREFIX: &str = "worker finished after a completed hand-in";
+
+/// The line recorded when a worker that handed in `completed` has ended: the
+/// exit code when the host knows it, and that the watch did not ask for it.
+fn finished_exit_message(mux: &dyn Host, pane: Option<&PaneId>) -> String {
+    let code = pane
+        .and_then(|pane| mux.exit_of(pane).ok().flatten())
+        .and_then(|outcome| outcome.exit_code)
+        .map_or_else(
+            || String::from("no exit code"),
+            |code| format!("exit {code}"),
+        );
+    format!("{FINISHED_EXIT_PREFIX}; {code}; the watch did not ask it to quit")
+}
+
+/// Whether a finished worker's exit is already on the log for `task`.
+fn exit_recorded_for(events: &[Event], task: &str) -> bool {
+    events.iter().any(|event| {
+        matches!(
+            &event.kind,
+            EventKind::TaskStatus { task: id, message, .. }
+                if id == task && message.starts_with(FINISHED_EXIT_PREFIX)
+        )
     })
 }
 
@@ -4110,5 +4165,72 @@ project_dirs = []
         assert!(said.contains("Raise ZeroDivisionError"), "{said}");
         assert!(said.contains("never say it did not ask"), "{said}");
         assert_eq!(ask_history(&events, "T2"), "");
+    }
+    /// Item 13: a worker that handed in `completed` and then exited has
+    /// finished; only a worker that never handed in (or handed in another
+    /// attempt) counts as one that died.
+    #[test]
+    fn a_completed_hand_in_makes_the_exit_a_finish() {
+        let report = |attempt: u32, status: ReportStatus| Event {
+            seq: 1,
+            at_ms: 1_700_000_000_000,
+            actor: Actor::Engine,
+            kind: EventKind::Reported {
+                task: "T1".to_string(),
+                attempt,
+                status,
+                summary: String::new(),
+                tests: Vec::new(),
+                checks: Vec::new(),
+                changed_paths: Vec::new(),
+                commit: None,
+                skills_used: Vec::new(),
+                proofs: Vec::new(),
+            },
+        };
+        assert!(!handed_in_completed(&[], "T1", 1));
+        assert!(handed_in_completed(
+            &[report(1, ReportStatus::Completed)],
+            "T1",
+            1
+        ));
+        assert!(!handed_in_completed(
+            &[report(1, ReportStatus::Failed)],
+            "T1",
+            1
+        ));
+        assert!(!handed_in_completed(
+            &[report(1, ReportStatus::Completed)],
+            "T1",
+            2
+        ));
+        assert!(!handed_in_completed(
+            &[report(1, ReportStatus::Completed)],
+            "T2",
+            1
+        ));
+    }
+
+    /// Item 13: the finished worker's exit is a recorded line, written once.
+    #[test]
+    fn a_finished_workers_exit_is_recorded_once() {
+        let status = |task: &str, message: String| Event {
+            seq: 2,
+            at_ms: 1_700_000_000_000,
+            actor: Actor::Engine,
+            kind: EventKind::TaskStatus {
+                task: task.to_string(),
+                message,
+                progress: None,
+            },
+        };
+        assert!(!exit_recorded_for(&[], "T1"));
+        let line = format!("{FINISHED_EXIT_PREFIX}; exit 0; the watch did not ask it to quit");
+        assert!(exit_recorded_for(&[status("T1", line.clone())], "T1"));
+        assert!(!exit_recorded_for(&[status("T2", line)], "T1"));
+        assert!(!exit_recorded_for(
+            &[status("T1", "reading code".to_string())],
+            "T1"
+        ));
     }
 }
