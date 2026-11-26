@@ -372,6 +372,7 @@ impl Transcript {
                 window = window.saturating_mul(2);
                 continue;
             }
+            dedupe_delivered_at(&mut lines);
             let dropped = lines.len().saturating_sub(MAX_MESSAGES);
             let kept = lines.split_off(dropped);
             let older = match kept.first() {
@@ -440,16 +441,33 @@ impl Transcript {
                 path: path.to_path_buf(),
                 source,
             })?;
-        let mut buffer = vec![0u8; MAX_BYTES];
-        let read = file
-            .read(&mut buffer)
-            .map_err(|source| TranscriptError::Read {
-                path: path.to_path_buf(),
-                source,
-            })?;
-        buffer.truncate(read);
-        let at_eof = start + read as u64 >= len;
-        let (body, _) = whole_lines(&buffer, at_eof);
+        let mut size = MAX_BYTES;
+        // A record longer than one read (a program's request dump can run to
+        // megabytes) holds no whole line in the buffer: read wider until a line
+        // fits, or the cursor would never pass it and nothing after it shows.
+        let (buffer, used) = loop {
+            file.seek(SeekFrom::Start(start))
+                .map_err(|source| TranscriptError::Read {
+                    path: path.to_path_buf(),
+                    source,
+                })?;
+            let mut buffer = Vec::with_capacity(size.min(len as usize));
+            let read = (&mut file)
+                .take(size as u64)
+                .read_to_end(&mut buffer)
+                .map_err(|source| TranscriptError::Read {
+                    path: path.to_path_buf(),
+                    source,
+                })?;
+            let at_eof = start + read as u64 >= len;
+            let (body, _) = whole_lines(&buffer, at_eof);
+            if !body.is_empty() || at_eof {
+                let used = body.len();
+                break (buffer, used);
+            }
+            size = size.saturating_mul(2);
+        };
+        let body = &buffer[..used];
         let mut messages = Vec::new();
         let mut position = start as usize;
         for line in body.split_inclusive(|byte| *byte == b'\n') {
@@ -465,6 +483,7 @@ impl Transcript {
             }
         }
         let more = position < len as usize;
+        dedupe_delivered(&mut messages);
         Ok(Page {
             messages,
             cursor: self.cursor(position),
@@ -522,6 +541,50 @@ impl Transcript {
             older: None,
         })
     }
+}
+
+/// How close, in ms, two identical user messages must be to be one message
+/// recorded twice (a queued command and the `user` record of the same text).
+const DELIVERY_WINDOW_MS: i64 = 30_000;
+
+/// Whether `next` is `earlier` recorded a second time: the same words from the
+/// person, stamped within [`DELIVERY_WINDOW_MS`] of each other.
+fn same_delivery(earlier: &Message, next: &Message) -> bool {
+    earlier.role == Role::User
+        && next.role == Role::User
+        && earlier.text == next.text
+        && matches!((earlier.at_ms, next.at_ms),
+            (Some(a), Some(b)) if (b - a).abs() <= DELIVERY_WINDOW_MS)
+}
+
+/// Drops a user message that repeats an earlier one recorded moments before.
+fn dedupe_delivered(messages: &mut Vec<Message>) {
+    let mut kept: Vec<Message> = Vec::with_capacity(messages.len());
+    for message in messages.drain(..) {
+        if !kept
+            .iter()
+            .rev()
+            .any(|earlier| same_delivery(earlier, &message))
+        {
+            kept.push(message);
+        }
+    }
+    *messages = kept;
+}
+
+/// [`dedupe_delivered`] for messages that carry their file position.
+fn dedupe_delivered_at(lines: &mut Vec<(usize, Message)>) {
+    let mut kept: Vec<(usize, Message)> = Vec::with_capacity(lines.len());
+    for (at, message) in lines.drain(..) {
+        if !kept
+            .iter()
+            .rev()
+            .any(|(_, earlier)| same_delivery(earlier, &message))
+        {
+            kept.push((at, message));
+        }
+    }
+    *lines = kept;
 }
 
 /// The whole lines of `buffer`, and how many bytes they take.
@@ -731,11 +794,28 @@ fn claude_message(value: &Value) -> Option<Message> {
         return None;
     }
     let kind = value.get("type")?.as_str()?;
-    let content = value.get("message")?.get("content")?;
     let at_ms = value
         .get("timestamp")
         .and_then(|at| at.as_str())
         .and_then(iso_ms);
+    // A message typed while the agent was mid-turn is not a `user` record: the
+    // CLI queues it and records its delivery as a `queued_command` attachment.
+    // (The `queue-operation` lines around it are bookkeeping, not read.)
+    if kind == "attachment" {
+        let attachment = value.get("attachment")?;
+        if attachment.get("type")?.as_str()? != "queued_command" {
+            return None;
+        }
+        let prompt = attachment.get("prompt")?.as_str()?;
+        let message = Message {
+            role: Role::User,
+            text: claude_person(prompt.trim())?,
+            tools: Vec::new(),
+            at_ms,
+        };
+        return (!message.is_empty()).then_some(message);
+    }
+    let content = value.get("message")?.get("content")?;
     let (role, text, tools) = match kind {
         // A user line is not always the person's: Claude Code writes a slash
         // command, a system reminder and a local command's output there too, so
