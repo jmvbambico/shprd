@@ -330,17 +330,27 @@ pub fn resolve() -> Resolution {
 /// next call resolves afresh — that is the "connection lost, and comes back"
 /// case. A resolution that found no running host is never kept.
 pub fn select() -> (Resolution, Box<dyn Host>) {
-    let kept = sticky().clone();
+    select_in(&STICKY, resolve, open)
+}
+
+/// [`select`] over a slot, a resolver and an opener, so the keeping can be
+/// tested without a machine: `resolve` is called only when the slot is empty.
+fn select_in(
+    slot: &Mutex<Option<Resolution>>,
+    resolve: impl FnOnce() -> Resolution,
+    open: impl FnOnce(&mut Resolution) -> Box<dyn Host>,
+) -> (Resolution, Box<dyn Host>) {
+    let kept = kept_slot(slot).clone();
     let mut resolution = kept.clone().unwrap_or_else(resolve);
     if kept.is_none() && !resolution.running {
         eprintln!("warning: {}", resolution.why);
     }
     let host = open(&mut resolution);
-    let mut slot = sticky();
+    let mut held = kept_slot(slot);
     if resolution.running && !resolution.fell_back {
-        *slot = Some(resolution.clone());
+        *held = Some(resolution.clone());
     } else if kept.is_some() {
-        *slot = None;
+        *held = None;
     }
     (resolution, host)
 }
@@ -349,10 +359,8 @@ pub fn select() -> (Resolution, Box<dyn Host>) {
 static STICKY: Mutex<Option<Resolution>> = Mutex::new(None);
 
 /// The kept resolution's slot, usable even if a holder panicked.
-fn sticky() -> std::sync::MutexGuard<'static, Option<Resolution>> {
-    STICKY
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+fn kept_slot(slot: &Mutex<Option<Resolution>>) -> std::sync::MutexGuard<'_, Option<Resolution>> {
+    slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// Open the host `resolution` names.
@@ -425,10 +433,10 @@ fn probe(setting: HostChoice) -> Probe {
     if ask_core {
         let endpoint = endpoint();
         // A core that does not answer in time is asked once more with a longer
-        // wait, but only when a window is attached (or the desktop was named):
-        // there is then a desktop to be found, and a busy machine is the likely
-        // reason it was late.
-        match ask_core_with_retry(attached, |timeout| {
+        // wait: a busy machine answers late, and "late" must not read as "not
+        // there". This branch only runs when a window is attached or the desktop
+        // was named, so no ordinary resolve pays for the longer wait.
+        match ask_core_with_retry(|timeout| {
             HcHost::core_version(&endpoint, timeout).map_err(|error| error.to_string())
         }) {
             Ok(version) => probe.core = Some(version),
@@ -442,20 +450,12 @@ fn probe(setting: HostChoice) -> Probe {
 }
 
 /// Ask for the core's version, and once more with a longer wait when the first
-/// try fails and `retry` is set. `ask` takes the timeout it may use; the retry
-/// is the whole reason this is a function: a probe that fails under load must
-/// not decide the host. `retry` is false when no window is attached: there is
-/// then no desktop to wait for, and a long wait would only slow every resolve.
+/// try fails. `ask` takes the timeout it may use; the retry is the whole reason
+/// this is a function: a probe that fails under load must not decide the host.
 fn ask_core_with_retry(
-    retry: bool,
     mut ask: impl FnMut(Duration) -> Result<String, String>,
 ) -> Result<String, String> {
-    let first = ask(PROBE_TIMEOUT);
-    if retry {
-        first.or_else(|_| ask(PROBE_RETRY_TIMEOUT))
-    } else {
-        first
-    }
+    ask(PROBE_TIMEOUT).or_else(|_| ask(PROBE_RETRY_TIMEOUT))
 }
 
 /// Whether something listens on the socket: a leftover socket file from a herdr
@@ -464,8 +464,11 @@ fn socket_answers(socket: &Path) -> bool {
     std::os::unix::net::UnixStream::connect(socket).is_ok()
 }
 
-/// Where the herdr TUI's server socket is: `$HERDR_SOCKET_PATH`, else
-/// `~/.config/herdr/herdr.sock`. `None` when neither can be named.
+/// Where the `herdr` command this adapter runs will look for its server:
+/// `$HERDR_SOCKET_PATH`, else `~/.config/herdr/herdr.sock`. It is the same
+/// place the herdr adapter's own calls reach (it passes the variable through
+/// unchanged), so "is it running" is asked of the server a call would use, not of
+/// a guess. `None` when neither can be named.
 fn herdr_socket() -> Option<PathBuf> {
     if let Some(path) = env_value("HERDR_SOCKET_PATH") {
         return Some(PathBuf::from(path));
@@ -531,8 +534,9 @@ pub fn window() -> Window {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    use super::{HostKind, Probe, choose};
+    use super::{Host, HostKind, Probe, Resolution, choose};
     use shprd_core::settings::HostChoice;
+    use std::sync::Mutex;
 
     /// A machine with nothing on it.
     fn nothing() -> Probe {
@@ -613,7 +617,7 @@ mod tests {
     #[test]
     fn a_desktop_probe_that_times_out_once_still_uses_the_desktop() {
         let mut asked = Vec::new();
-        let answer = super::ask_core_with_retry(true, |timeout| {
+        let answer = super::ask_core_with_retry(|timeout| {
             asked.push(timeout);
             if asked.len() == 1 {
                 Err("timed out".to_string())
@@ -629,19 +633,88 @@ mod tests {
         assert_eq!(choose(HostChoice::Auto, probe).kind, HostKind::HerdrDesktop);
         // A core that never answers is asked twice, then reported.
         let mut calls = 0;
-        let failed = super::ask_core_with_retry(true, |_| {
+        let failed = super::ask_core_with_retry(|_| {
             calls += 1;
             Err("no".to_string())
         });
         assert!(failed.is_err());
         assert_eq!(calls, 2);
-        // With no window attached there is nothing to wait for: one try.
-        let mut calls = 0;
-        let _ = super::ask_core_with_retry(false, |_| {
-            calls += 1;
-            Err("no".to_string())
-        });
-        assert_eq!(calls, 1);
+    }
+
+    /// A host that does nothing: the tests below care about the keeping.
+    fn inert(_: &mut Resolution) -> Box<dyn Host> {
+        Box::new(shprd_mux_herdr::HerdrMux::with_bin("/usr/bin/true"))
+    }
+
+    #[test]
+    fn a_service_that_found_the_desktop_resolves_once() {
+        let slot = Mutex::new(None);
+        let mut resolved = 0;
+        for _ in 0..3 {
+            let (resolution, _) = super::select_in(
+                &slot,
+                || {
+                    resolved += 1;
+                    choose(HostChoice::Auto, desktop())
+                },
+                inert,
+            );
+            assert_eq!(resolution.kind, HostKind::HerdrDesktop);
+        }
+        assert_eq!(
+            resolved, 1,
+            "later reviews and spawns reuse the first answer"
+        );
+    }
+
+    #[test]
+    fn a_host_that_stops_opening_is_resolved_afresh() {
+        let slot = Mutex::new(None);
+        let _ = super::select_in(&slot, || choose(HostChoice::Auto, desktop()), inert);
+        // The desktop is lost: opening falls back, so the kept answer is dropped.
+        let _ = super::select_in(
+            &slot,
+            || unreachable!("the kept answer is used first"),
+            |resolution| {
+                resolution.fell_back = true;
+                inert(resolution)
+            },
+        );
+        assert!(slot.lock().unwrap().is_none());
+        let mut resolved = 0;
+        let _ = super::select_in(
+            &slot,
+            || {
+                resolved += 1;
+                choose(HostChoice::Auto, desktop())
+            },
+            inert,
+        );
+        assert_eq!(resolved, 1, "it comes back and is kept again");
+        assert!(slot.lock().unwrap().is_some());
+    }
+
+    #[test]
+    fn a_resolution_with_no_running_host_is_never_kept() {
+        let slot = Mutex::new(None);
+        let mut probe = nothing();
+        probe.herdr_running = false;
+        let mut resolved = 0;
+        for _ in 0..2 {
+            let _ = super::select_in(
+                &slot,
+                || {
+                    resolved += 1;
+                    choose(HostChoice::Auto, probe.clone())
+                },
+                inert,
+            );
+        }
+        assert_eq!(
+            resolved, 2,
+            "nothing runs, so each call asks the machine again"
+        );
+        assert!(slot.lock().unwrap().is_none());
     }
 
     #[test]
