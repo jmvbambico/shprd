@@ -311,10 +311,12 @@ pub(crate) fn page(
     };
     watch_transcript(state, &transcript);
     // A question the terminal waits on is the card at the bottom of the chat,
-    // whatever page of the conversation this is.
+    // whatever page of the conversation this is. A record that cannot be read for a
+    // moment (an agent restarting) leaves the card out; it does not fail the page.
     answer.question = transcript
         .pending_question()
-        .map_err(|err| ApiReject::internal(err.to_string()))?
+        .ok()
+        .flatten()
         .as_ref()
         .map(question_dto);
     // No cursor of this session (a first read, a panel that reloaded, an agent
