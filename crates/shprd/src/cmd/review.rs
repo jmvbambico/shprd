@@ -1065,13 +1065,17 @@ pub fn choose_reviewer(
             chosen.note = Some(format!(
                 "note: the fallback reviewer `{fallback}` reviews, because {why}"
             ));
-            if !spent.is_empty() {
-                chosen.card_note = Some(format!(
-                    "{}; {} reviews instead",
-                    spent.join("; "),
-                    reviewer_label(&chosen.agent, chosen.model.as_deref())
-                ));
+            // A fallback always says why: the main reviewer's own trouble, then
+            // any line that was out of quota on the way.
+            let mut reasons = spent.clone();
+            if main_dry.is_none() {
+                reasons.insert(0, why.clone());
             }
+            chosen.card_note = Some(format!(
+                "{}; {} reviews instead",
+                reasons.join("; "),
+                reviewer_label(&chosen.agent, chosen.model.as_deref())
+            ));
             return Ok(chosen);
         }
     }
@@ -4136,6 +4140,45 @@ project_dirs = []
     }
 
     #[test]
+    fn the_legacy_roster_reviewer_reviews_and_the_agents_line_is_only_a_fallback() {
+        let mut loaded = Loaded::default();
+        loaded.file = File::parse(
+            "[roles.reviewer]\nperm = \"read-only\"\nagents = [\"pi|Command Code/z-ai/glm-5.3-flash|||read-only\"]\n",
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+        loaded.file.legacy =
+            toml::from_str::<ConfigLayer>("[roster]\nreviewer = \"codex/gpt-6-luna\"\n")
+                .unwrap_or_else(|err| panic!("{err}"))
+                .settings_projection();
+        let role = ReviewerRole::resolved(
+            &loaded
+                .resolve(None)
+                .role(REVIEWER_ROLE)
+                .unwrap_or_else(|| panic!("no role")),
+        );
+        let programs = family_programs();
+        let chosen = choose_reviewer(&role, "claude", Some("sonnet"), &programs, false)
+            .unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(chosen.agent, "codex");
+        assert!(chosen.card_note.is_none());
+        // Whenever a fallback reviews, the card says why.
+        let mut role = role;
+        role.agent = Some(Sourced::new("nosuch".to_owned(), Source::Legacy));
+        role.model = None;
+        let programs_all = family_programs();
+        if let Ok(chosen) = choose_reviewer(&role, "claude", Some("sonnet"), &programs_all, false) {
+            assert!(
+                chosen
+                    .card_note
+                    .as_deref()
+                    .is_some_and(|n| n.contains("reviews instead")),
+                "a fallback records why: {:?}",
+                chosen.card_note
+            );
+        }
+    }
+
+    #[test]
     fn reviewer_lines_are_tried_in_order() {
         // The new shape: `agents` holds the lines after the first.
         let role = settings_reviewer(
@@ -4174,41 +4217,33 @@ project_dirs = []
     }
 
     #[test]
-    fn a_reviewer_list_under_agents_alone_never_reviews_on_an_old_roster_program() {
+    fn the_old_roster_reviewer_is_the_main_one_and_the_agents_list_only_falls_back() {
         let role = glm_only_reviewer();
-        assert_eq!(
-            role.agent(),
-            Some("pi"),
-            "the settings list, not the old key"
-        );
-        assert_eq!(role.model(), Some("Command Code/z-ai/glm-5.3-flash"));
-        assert!(role.fallbacks.is_empty(), "{:?}", role.fallbacks);
+        assert_eq!(role.agent(), Some("codex"), "the resolved main reviewer");
+        assert_eq!(role.fallbacks.len(), 1, "{:?}", role.fallbacks);
+        assert_eq!(role.fallbacks[0].agent, "pi");
         let programs = family_programs();
-        let chosen = choose_reviewer(
-            &role,
-            "pi",
-            Some("deepseek/deepseek-v4.1-flash"),
-            &programs,
-            false,
-        )
-        .unwrap_or_else(|err| panic!("{err}"));
-        assert_eq!(chosen.agent, "pi");
-        assert_eq!(
-            chosen.model.as_deref(),
-            Some("Command Code/z-ai/glm-5.3-flash")
-        );
-        // Not even when everything else is out: codex is not in the list.
+        let chosen = choose_reviewer(&role, "claude", Some("sonnet"), &programs, false)
+            .unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(chosen.agent, "codex");
+        assert!(chosen.card_note.is_none(), "the main reviewer needs no why");
+        // Out of quota: the fallback reviews and the card says why.
         let mut spent = role.clone();
         spent.dry = vec![DryProgram {
-            agent: "pi".into(),
+            agent: "codex".into(),
             reason: "out of quota: usage limit".into(),
             until_ms: None,
         }];
-        let err = choose_reviewer(&spent, "claude", None, &programs, false)
-            .err()
-            .map(|err| err.to_string())
-            .unwrap_or_default();
-        assert!(err.contains(NO_REVIEWER_LEFT), "{err}");
+        let chosen = choose_reviewer(&spent, "claude", Some("sonnet"), &programs, false)
+            .unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(chosen.agent, "pi");
+        assert!(
+            chosen.card_note.as_deref().is_some_and(
+                |n| n.contains("codex is out of quota") && n.contains("reviews instead")
+            ),
+            "{:?}",
+            chosen.card_note
+        );
     }
 
     #[test]

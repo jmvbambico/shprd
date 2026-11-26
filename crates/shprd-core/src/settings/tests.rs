@@ -654,6 +654,53 @@ fn the_old_roster_reviewer_is_the_lower_layer_of_the_reviewer_role() {
 }
 
 #[test]
+fn the_legacy_reviewer_stays_first_and_the_agents_lines_are_fallbacks() {
+    let home = home();
+    let path = user_config(home.path());
+    std::fs::create_dir_all(path.parent().expect("the config dir")).expect("the dir");
+    std::fs::write(&path, "[roster]\nreviewer = \"codex/gpt-6-luna\"\n").expect("old config");
+    std::fs::write(
+        user_file(home.path()),
+        "[roles.reviewer]\nperm = \"read-only\"\nagents = [\"pi|Command Code/z-ai/glm-5.3-flash|||read-only\"]\n",
+    )
+    .expect("settings");
+    let loaded = Loaded::read(home.path(), None).expect("both load");
+    let resolved = loaded.resolve(None);
+    let lines = resolved.role("reviewer").expect("reviewer").lines();
+    assert_eq!(
+        lines[0].agent, "codex",
+        "the resolved main reviewer is first"
+    );
+    assert_eq!(lines[0].model.as_deref(), Some("gpt-6-luna"));
+    assert_eq!(lines[1].agent, "pi", "the agents line is only a fallback");
+}
+
+#[test]
+fn setting_a_key_to_what_the_old_config_resolves_stores_it_in_the_new_layer() {
+    let home = home();
+    let path = user_config(home.path());
+    std::fs::create_dir_all(path.parent().expect("the config dir")).expect("the dir");
+    std::fs::write(&path, "[roster]\nreviewer = \"codex/gpt-6-luna\"\n").expect("old config");
+    let loaded = Loaded::read(home.path(), None).expect("loads");
+    let key = Key::parse("roles.reviewer.agent").expect("key");
+    let written = loaded
+        .write(
+            home.path(),
+            &Scope::You,
+            &key,
+            Some(Value::Text("codex".into())),
+            None,
+        )
+        .expect("written");
+    assert_eq!(written.outcome, WriteOutcome::Stored);
+    let loaded = Loaded::read(home.path(), None).expect("reloads");
+    assert_eq!(
+        source_of(&loaded.resolve(None), "roles.reviewer.agent"),
+        Some(Source::You)
+    );
+}
+
+#[test]
 fn keys_parse_from_their_names_and_their_old_names() {
     let cases = [
         ("tasks.merge", "tasks.merge"),
