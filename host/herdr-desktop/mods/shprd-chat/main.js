@@ -243,7 +243,8 @@ export default class Chat extends View {
    * One command by name: `focus` (the keyboard goes to the box), `type:<words>` (as typing),
    * `enter` (what the Enter key calls), `send` (what the send button calls), `attach:<path>`,
    * `menu` (the model menu), `pick:<agent>:<model>[:<effort>]` (what the menu's answer does),
-   * `stop`, `mic`.
+   * `choose:<n>` and `reply:<words>` (press the waiting terminal question's n-th button, or answer it
+   * with words, as the card's own button and Send do), `stop`, `mic`.
    */
   command(command, cx) {
     const [name, ...rest] = command.split(":");
@@ -258,7 +259,9 @@ export default class Chat extends View {
       const [agent, model, effort] = arg.split(":");
       this.picked = { value: { agent, model, effort: effort || null, fast: false, perm: null }, stamp: 0 };
       this.applyPick();
-    } else if (name === "stop") this.stop();
+    } else if (name === "choose") this.pressShown(Number(arg));
+    else if (name === "reply") this.pressShown(null, arg);
+    else if (name === "stop") this.stop();
     else if (name === "mic") this.toggleDictation();
     cx?.notify?.();
   }
@@ -1122,6 +1125,7 @@ export default class Chat extends View {
     const every = this.held().size === 0 ? live : [...cardsOf(board, this.asks), ...(asked ? [asked] : [])].filter((card) => this.held().has(card.id) || live.some((have) => have.id === card.id));
     for (const id of [...this.held().keys()]) if (!every.some((card) => card.id === id)) this.held().delete(id);
     const list = this.space === null ? [] : forSpace(every, this.space);
+    this.shown = list;
     const rows = timeline(withEchoes(this.chat, this.myEchoes()), list);
     this.reveal(rows, list);
     const said =
@@ -1165,6 +1169,14 @@ export default class Chat extends View {
       )
       .when(this.working(), (el) => el.child(this.workingLine(t)))
       .child(this.composer(t, colors));
+  }
+
+  /** The waiting terminal question's card, pressed the way its button or Send presses it (live checks). */
+  pressShown(n, words = null) {
+    const card = (this.shown ?? []).find((c) => c.from === "terminal");
+    if (!card) return;
+    if (words !== null) this.respond(card, words);
+    else if (card.buttons[n - 1]) this.choose(card, card.buttons[n - 1]);
   }
 
   /** A request from the pane's Needs you pill to show this chat's card: the next reveal lands on it. */
