@@ -201,13 +201,12 @@ test("SHPR-83: Accept pressed in the card a Review opened is not ignored (the Re
   assert.equal(opt.begin({ kind: "task.accept", tasks: ["A"], board: raw, folder: FOLDER }), null, "a second Accept is a double press");
 });
 
-test("SHPR-83: a queued task held back for a shared file says so on the row and in the Graph", () => {
+test("a queued task with no dependency reads as queued in the Graph, whatever paths it shares", () => {
   const t3 = task("T3", "working", "working", { title: "mul and div" });
-  const t4 = task("T4", "queued", "to_do", { title: "mod and pow", last_status: { message: "Waiting: tcalc/ops.py is in use by T3" } });
-  assert.equal(secondLine(t4), "waits for T3: both change tcalc/ops.py");
+  const t4 = task("T4", "queued", "to_do", { title: "mod and pow" });
   const rows = graphRows({ tasks: [t3, t4], run: { id: "r1" } }).filter((r) => r.kind === "task");
-  assert.equal(rows.find((r) => r.id === "T4").word, "waits T3");
-  assert.equal(rows.find((r) => r.id === "T4").waits, true);
+  assert.equal(rows.find((r) => r.id === "T4").word, "queued");
+  assert.equal(rows.find((r) => r.id === "T4").waits, false);
 });
 
 test("SHPR-83: a hand-in whose review kickoff was not delivered has a Retry review button, not Review or Accept", async () => {

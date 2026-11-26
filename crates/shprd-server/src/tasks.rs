@@ -237,6 +237,14 @@ pub(crate) fn changes_in(
         base,
         branch,
         merge_base,
+        protected: shprd_core::gate::protected_undeclared(
+            &files
+                .iter()
+                .map(|file| file.path.clone())
+                .collect::<Vec<_>>(),
+            &task.scope,
+            &shprd_core::ask::high_risk_globs_in(repo),
+        ),
         files,
     })
 }

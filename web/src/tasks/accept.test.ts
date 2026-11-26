@@ -48,6 +48,7 @@ describe("changes", () => {
     ],
     added: 21,
     deleted: 4,
+    protected: [],
   };
 
   it("counts with colourable parts, and says nothing for no files", () => {

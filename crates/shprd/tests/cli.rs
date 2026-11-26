@@ -381,15 +381,36 @@ fn a_proof_inside_the_worktree_is_recorded() {
 }
 
 #[test]
-fn overlapping_scope_is_refused() {
+fn overlapping_scopes_start_side_by_side_and_add_warns() {
     let dir = repo();
     let root = dir.path();
     start(root);
     add_task(root, "T1", "crates/shprd");
-    add_task(root, "T2", "crates/shprd/src");
+    let added = run(
+        root,
+        &[
+            "agent",
+            "task",
+            "add",
+            "--id",
+            "T2",
+            "--title",
+            "a task",
+            "--scope",
+            "crates/shprd/src",
+            "--acceptance",
+            "it works",
+        ],
+    );
+    assert!(added.status.success(), "{added:?}");
+    let stderr = String::from_utf8_lossy(&added.stderr);
+    let warning: Vec<&str> = stderr
+        .lines()
+        .filter(|line| line.contains("shares paths with T1"))
+        .collect();
+    assert_eq!(warning.len(), 1, "one warning line: {stderr}");
     spawn(root, "T1");
-
-    let stderr = refused(
+    ok(
         root,
         &[
             "agent",
@@ -407,19 +428,46 @@ fn overlapping_scope_is_refused() {
             "feature/y",
         ],
     );
-    assert!(stderr.contains("T2"), "refusal named no task: {stderr}");
-    assert_eq!(status_of(&state(root), "T2"), "queued");
+    assert_eq!(status_of(&state(root), "T2"), "working");
 }
 
 #[test]
-fn changed_path_outside_scope_is_refused() {
+fn a_task_may_be_added_without_paths_and_widen_is_gone() {
+    let dir = repo();
+    let root = dir.path();
+    start(root);
+    ok(
+        root,
+        &[
+            "agent",
+            "task",
+            "add",
+            "--id",
+            "T1",
+            "--title",
+            "a task",
+            "--acceptance",
+            "it works",
+        ],
+    );
+    assert_eq!(status_of(&state(root), "T1"), "queued");
+    let widen = run(
+        root,
+        &[
+            "agent", "task", "widen", "--task", "T1", "--scope", "x", "--reason", "y",
+        ],
+    );
+    assert!(!widen.status.success(), "the widen verb is gone: {widen:?}");
+}
+
+#[test]
+fn a_changed_path_outside_the_declared_scope_is_recorded() {
     let dir = repo();
     let root = dir.path();
     start(root);
     add_task(root, "T1", "crates/shprd");
     spawn(root, "T1");
-
-    let stderr = refused(
+    ok(
         root,
         &[
             "agent",
@@ -438,8 +486,11 @@ fn changed_path_outside_scope_is_refused() {
             "docs/plan.md",
         ],
     );
-    assert!(stderr.contains("docs/plan.md"), "refusal was {:?}", stderr);
-    assert_eq!(status_of(&state(root), "T1"), "working");
+    assert_eq!(status_of(&state(root), "T1"), "reported");
+    assert!(
+        !read_log(root).contains("\"ask_raised\""),
+        "no card for a path outside the declared scope"
+    );
 }
 
 /// The run log's text.
@@ -451,51 +502,95 @@ fn read_log(root: &Path) -> String {
 }
 
 #[test]
-fn a_refused_hand_in_leaves_a_card_naming_the_reason() {
+fn a_hand_in_that_commits_shprd_state_is_refused_without_a_card() {
     let dir = repo();
     let root = dir.path();
     start(root);
     add_task(root, "T1", "crates/shprd");
     spawn(root, "T1");
-    let report = [
-        "agent",
-        "report",
-        "--check",
-        "tests|cargo test|0",
-        "--task",
-        "T1",
-        "--attempt",
-        "1",
-        "--status",
-        "completed",
-        "--summary",
-        "did it",
-        "--changed",
-        "tests/test_ops.py",
-    ];
-    refused(root, &report);
-    let log = read_log(root);
-    let raised: Vec<&str> = log
-        .lines()
-        .filter(|line| line.contains("\"ask_raised\""))
-        .collect();
-    assert_eq!(raised.len(), 1, "one card: {log}");
-    assert!(raised[0].contains("hand-in-refused-1-1"), "{}", raised[0]);
-    assert!(
-        raised[0].contains("tests/test_ops.py"),
-        "names the path: {}",
-        raised[0]
+    let stderr = refused(
+        root,
+        &[
+            "agent",
+            "report",
+            "--check",
+            "tests|cargo test|0",
+            "--task",
+            "T1",
+            "--attempt",
+            "1",
+            "--status",
+            "completed",
+            "--summary",
+            "did it",
+            "--changed",
+            ".shprd/events.jsonl",
+        ],
     );
     assert!(
-        raised[0].contains("widen the scope to tests/test_ops.py"),
-        "offers the widening: {}",
-        raised[0]
+        stderr.contains(".shprd/events.jsonl") && stderr.contains("hand in again"),
+        "a plain refusal naming the path: {stderr}"
     );
-    assert!(raised[0].contains("send it back"), "{}", raised[0]);
-    // The worker retries the same hand-in: still one open card.
-    refused(root, &report);
-    let log = read_log(root);
-    assert_eq!(log.matches("\"ask_raised\"").count(), 1, "{log}");
+    assert_eq!(status_of(&state(root), "T1"), "working");
+    assert!(!read_log(root).contains("\"ask_raised\""), "no card");
+}
+
+/// Runs git in `dir`, asserting it succeeded.
+fn git(dir: &Path, args: &[&str]) {
+    let out = match Command::new("git").args(args).current_dir(dir).output() {
+        Ok(out) => out,
+        Err(err) => panic!("git {args:?}: {err}"),
+    };
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn a_branch_that_commits_an_env_file_is_refused_even_when_unlisted() {
+    let dir = repo();
+    let root = dir.path();
+    git(root, &["init", "-q", "-b", "main"]);
+    git(root, &["config", "user.name", "tests"]);
+    git(root, &["config", "user.email", "tests@example.invalid"]);
+    git(root, &["config", "commit.gpgsign", "false"]);
+    std::fs::write(root.join("seed.txt"), "seed\n").unwrap_or_else(|err| panic!("{err}"));
+    git(root, &["add", "seed.txt"]);
+    git(root, &["commit", "-q", "-m", "seed"]);
+    git(root, &["branch", "integration/m1"]);
+    git(root, &["checkout", "-q", "-b", "feature/x"]);
+    std::fs::write(root.join(".env"), "TOKEN=x\n").unwrap_or_else(|err| panic!("{err}"));
+    git(root, &["add", "-f", ".env"]);
+    git(root, &["commit", "-q", "-m", "oops"]);
+    git(root, &["checkout", "-q", "main"]);
+    start(root);
+    add_task(root, "T1", "crates/shprd");
+    spawn(root, "T1");
+    // The worker lists only an innocent path; the branch's real diff is read.
+    let stderr = refused(
+        root,
+        &[
+            "agent",
+            "report",
+            "--check",
+            "tests|cargo test|0",
+            "--task",
+            "T1",
+            "--attempt",
+            "1",
+            "--status",
+            "completed",
+            "--summary",
+            "did it",
+            "--changed",
+            "crates/shprd/src/lib.rs",
+        ],
+    );
+    assert!(stderr.contains("\".env\""), "names the file: {stderr}");
+    assert_eq!(status_of(&state(root), "T1"), "working");
+    assert!(!read_log(root).contains("\"ask_raised\""), "no card");
 }
 
 #[test]

@@ -139,6 +139,15 @@ const WORKER_M11_LONG: &str = include_str!("../../../data/templates/history/work
 const WORKER_M11_LONG_DIGEST: &str =
     "d9a7bb2a42b8245b45d85b172eb659138329186079b7d4bd2303a202e48df9fa";
 
+/// The worker wording that told it to stay within the task's scope. Declared
+/// paths are a hint now, and obeying them as a limit left work unwired.
+#[cfg(test)]
+const WORKER_M11_SCOPE: &str = include_str!("../../../data/templates/history/worker-m11-scope.md");
+
+/// The SHA-256 of [`WORKER_M11_SCOPE`].
+const WORKER_M11_SCOPE_DIGEST: &str =
+    "d0d28c2a06ec40f4a62ac5ca0ce6bd59b8ebbca5851aa174ba8c678e781b28ca";
+
 /// The worker's retired defaults.
 const WORKER_OLD: &[&str] = &[
     WORKER_FIRST_DIGEST,
@@ -148,6 +157,7 @@ const WORKER_OLD: &[&str] = &[
     WORKER_M10_PROOF_DIGEST,
     WORKER_PRE_IDENTITY_DIGEST,
     WORKER_M11_LONG_DIGEST,
+    WORKER_M11_SCOPE_DIGEST,
 ];
 
 /// The backup wording M9.5 shipped, retired for the same reason as the worker's:
@@ -261,6 +271,16 @@ const ASSISTANT_M11_LONG: &str =
 const ASSISTANT_M11_LONG_DIGEST: &str =
     "391d4cc326bf5fd542a2486474a1496d9da08bb2f77294fd4ca7d0a0740a0e5f";
 
+/// The coordinator wording that offered the scope-widen verb and required a
+/// scope on every task. Declared paths are an optional hint now.
+#[cfg(test)]
+const ASSISTANT_M11_SCOPE: &str =
+    include_str!("../../../data/templates/history/assistant-m11-scope.md");
+
+/// The SHA-256 of [`ASSISTANT_M11_SCOPE`].
+const ASSISTANT_M11_SCOPE_DIGEST: &str =
+    "e482982fc547944b949a371eb414a6e762aa976996db107ebbcf28f21ece1c23";
+
 /// The coordinator's retired defaults.
 const ASSISTANT_OLD: &[&str] = &[
     ASSISTANT_M9_ASKS_DIGEST,
@@ -271,6 +291,7 @@ const ASSISTANT_OLD: &[&str] = &[
     ASSISTANT_M11_ACCEPT_DIGEST,
     ASSISTANT_PRE_SHPR83_DIGEST,
     ASSISTANT_M11_LONG_DIGEST,
+    ASSISTANT_M11_SCOPE_DIGEST,
 ];
 
 /// The reviewer wording M9.6 shipped, which did not name the asks the packet
@@ -304,11 +325,22 @@ const REVIEWER_M11_LONG: &str =
 const REVIEWER_M11_LONG_DIGEST: &str =
     "c187a5267112fc4148487499f64ef7ac444e10bce3a0a2a901bd38daf2ef0488";
 
+/// The reviewer wording that judged the diff against the scope as a limit.
+/// It judges whether each change serves the task now.
+#[cfg(test)]
+const REVIEWER_M11_SCOPE: &str =
+    include_str!("../../../data/templates/history/reviewer-m11-scope.md");
+
+/// The SHA-256 of [`REVIEWER_M11_SCOPE`].
+const REVIEWER_M11_SCOPE_DIGEST: &str =
+    "859869ecc557b7a1570bb847b00609aa546b44171a1c88e0a45e04ac91febd7f";
+
 /// The reviewer's retired defaults.
 const REVIEWER_OLD: &[&str] = &[
     REVIEWER_M9_ASKS_DIGEST,
     REVIEWER_PRE_IDENTITY_DIGEST,
     REVIEWER_M11_LONG_DIGEST,
+    REVIEWER_M11_SCOPE_DIGEST,
 ];
 
 /// The prompts this build ships, in the order `shprd prompts list` prints them.

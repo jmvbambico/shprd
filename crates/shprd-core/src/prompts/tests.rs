@@ -765,7 +765,6 @@ fn the_condensed_coordinator_replaces_the_long_one() {
     assert!(!body.contains("Shepherdr"), "{body}");
     assert!(!body.contains("shepherdr"), "{body}");
     for needed in [
-        "shprd agent task widen",
         "shprd settings set",
         "Accept it in the Tasks pane",
         "never approve, push, merge",
@@ -795,7 +794,8 @@ fn the_condensed_worker_replaces_the_long_one() {
         "pass every gate you ran as `--check",
         "`.shprd/proof/`",
         "`--proof <path>`",
-        "within the task's scope",
+        "not a limit",
+        "wire it end to end",
         "Reviewing is the engine's job",
         "shprd agent report",
     ] {
@@ -836,6 +836,44 @@ fn the_condensed_reviewer_replaces_the_long_one() {
     std::fs::write(path_of(temp.path(), "reviewer"), REVIEWER_M11_LONG).expect("old install");
     let installed = ensure(temp.path(), "reviewer").expect("the upgrade runs");
     assert_eq!(installed.change, Change::Upgraded, "{installed:?}");
+}
+
+/// The scope-limit wordings are retired and upgrade: the worker is told the
+/// declared paths are a hint and to wire the change end to end, and the reviewer
+/// judges whether each change serves the task.
+#[test]
+fn the_scope_limit_wordings_upgrade_to_the_hint() {
+    for (id, old, old_digest) in [
+        ("worker", WORKER_M11_SCOPE, WORKER_M11_SCOPE_DIGEST),
+        ("reviewer", REVIEWER_M11_SCOPE, REVIEWER_M11_SCOPE_DIGEST),
+    ] {
+        let shipped = shipped_prompt(id).expect("shipped");
+        assert_eq!(digest(old.as_bytes()), old_digest, "{id}");
+        assert!(shipped.old.contains(&old_digest), "{id}");
+        let body = strip_leading_comment(shipped.text);
+        assert!(!body.contains("stay within"), "{id}: {body}");
+        assert!(!body.contains("and the scope:"), "{id}: {body}");
+        let temp = dir();
+        std::fs::write(path_of(temp.path(), id), old).expect("old install");
+        let installed = ensure(temp.path(), id).expect("the upgrade runs");
+        assert_eq!(installed.change, Change::Upgraded, "{id}: {installed:?}");
+    }
+    let assistant = strip_leading_comment(shipped_prompt("assistant").expect("shipped").text);
+    assert!(!assistant.contains("task widen"), "{assistant}");
+    assert!(assistant.contains("`--scope` is optional"), "{assistant}");
+    assert_eq!(
+        digest(ASSISTANT_M11_SCOPE.as_bytes()),
+        ASSISTANT_M11_SCOPE_DIGEST
+    );
+    let temp = dir();
+    std::fs::write(path_of(temp.path(), "assistant"), ASSISTANT_M11_SCOPE).expect("old install");
+    let installed = ensure(temp.path(), "assistant").expect("the upgrade runs");
+    assert_eq!(installed.change, Change::Upgraded, "{installed:?}");
+    let reviewer = strip_leading_comment(shipped_prompt("reviewer").expect("shipped").text);
+    assert!(
+        reviewer.contains("whether each change serves the task"),
+        "{reviewer}"
+    );
 }
 
 /// Every shipped body (credit comment stripped) names no other product.
