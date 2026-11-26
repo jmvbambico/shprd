@@ -7,7 +7,7 @@ use shprd_core::event::{CheckReport, EventKind, Finding, output_tail, status_lin
 
 use crate::cli::{
     AgentCommand, EscalateArgs, GateArgs, GateOutcome, HandoffArgs, OverrideArgs, PromptArgs,
-    ReportArgs, SpawnArgs, TaskAddArgs, TaskCommand, TaskStatusArgs, TaskWidenArgs,
+    ReportArgs, SpawnArgs, TaskAddArgs, TaskCommand, TaskStatusArgs,
 };
 use crate::cmd::{emit, handoff, spawn};
 use crate::ctx::{CliError, Ctx};
@@ -25,7 +25,6 @@ pub fn dispatch(
         AgentCommand::Task { cmd } => match cmd {
             TaskCommand::Add(args) => task_add(ctx, &args),
             TaskCommand::Report(args) => report(ctx, &args),
-            TaskCommand::Widen(args) => task_widen(ctx, &args),
         },
         AgentCommand::Spawn(args) => spawn_cmd(ctx, &args, home),
         AgentCommand::Prompt(args) => prompt_cmd(ctx, &args),
@@ -56,6 +55,9 @@ fn task_add(ctx: &Ctx, args: &TaskAddArgs) -> Result<(), CliError> {
         }
     }
     for line in scope_warnings(&ctx.root, &args.scope) {
+        eprintln!("{line}");
+    }
+    if let Some(line) = overlap_warning(&ctx.state()?, &args.id, &args.scope, &args.deps) {
         eprintln!("{line}");
     }
     let kind = EventKind::TaskAdded {
@@ -89,6 +91,45 @@ fn scope_warnings(root: &Path, scope: &[String]) -> Vec<String> {
             })
         })
         .collect()
+}
+
+/// One line when the new task `id` declares paths an unfinished task also
+/// declares and depends on none of them, or `None`.
+///
+/// Declared paths are a hint, not a lock, so such tasks run side by side and a
+/// real clash is caught when the second one lands. The line is a warning, never
+/// a refusal: the coordinator adds a dependency when the two will rewrite the
+/// same code.
+fn overlap_warning(
+    state: &shprd_core::state::RunState,
+    id: &str,
+    scope: &[String],
+    deps: &[String],
+) -> Option<String> {
+    use shprd_core::state::TaskStatus;
+    let mine: Vec<String> = scope
+        .iter()
+        .filter_map(|path| shprd_core::scope::normalize(path).ok())
+        .collect();
+    let shared: Vec<&str> = state
+        .tasks
+        .iter()
+        .filter(|(other, task)| {
+            other.as_str() != id
+                && !deps.contains(other)
+                && !matches!(task.status, TaskStatus::Integrated | TaskStatus::Dropped)
+                && shprd_core::scope::overlaps(&mine, &task.scope)
+        })
+        .map(|(other, _)| other.as_str())
+        .collect();
+    (!shared.is_empty()).then(|| {
+        format!(
+            "warning: {id} shares paths with {} and has no dependency on {}: they will run \
+             side by side, and a clash is sent back when the second one lands",
+            shared.join(", "),
+            if shared.len() == 1 { "it" } else { "them" }
+        )
+    })
 }
 
 /// Spawns an agent for a task attempt, or records one a human set up by hand.
@@ -200,104 +241,6 @@ pub(crate) fn sync_dagr(ctx: &Ctx) {
     }
 }
 
-/// Raises the card that proposes a wider scope for a task.
-///
-/// It writes no scope: the card's `widen` answer, given by the person, does.
-fn task_widen(ctx: &Ctx, args: &TaskWidenArgs) -> Result<(), CliError> {
-    let state = ctx.state()?;
-    if !state.tasks.contains_key(&args.task) {
-        return Err(CliError::Invalid(anyhow!(
-            "no task {:?} in this run: name one `shprd status` lists",
-            args.task
-        )));
-    }
-    let mut paths = Vec::new();
-    for path in &args.scope {
-        let path = shprd_core::scope::normalize(path)
-            .map_err(|err| CliError::Invalid(anyhow!("scope path {path:?}: {err}")))?;
-        if !paths.contains(&path) {
-            paths.push(path);
-        }
-    }
-    if args.reason.trim().is_empty() {
-        return Err(CliError::Invalid(anyhow!(
-            "`--reason` is empty: tell the person why the task needs the paths"
-        )));
-    }
-    // An open scope card that already offers these paths is the one question:
-    // say which, and raise nothing.
-    let task = &state.tasks[&args.task];
-    if let Some(open) = state.asks.values().find(|ask| {
-        ask.task == args.task
-            && ask.answer.is_none()
-            && shprd_core::ask::scope_key_of(&ask.task, &ask.id).is_some()
-            && {
-                let offered = shprd_core::ask::offered_paths(&ask.options);
-                paths.iter().all(|path| offered.contains(path))
-            }
-    }) {
-        println!(
-            "ask {} already covers {} ({}): nothing new was raised",
-            open.id,
-            paths.join(", "),
-            shprd_core::ask::scope_key(&args.task)
-        );
-        return Ok(());
-    }
-    if paths
-        .iter()
-        .all(|path| shprd_core::scope::within(path, &task.scope))
-    {
-        println!(
-            "{} is already in {}'s scope: nothing was raised",
-            paths.join(", "),
-            args.task
-        );
-        return Ok(());
-    }
-    let earlier = state
-        .asks
-        .values()
-        .filter(|ask| {
-            ask.task == args.task && ask.id.starts_with(shprd_core::ask::SCOPE_WIDEN_ASK_PREFIX)
-        })
-        .count();
-    let id = shprd_core::ask::scope_widen_ask(earlier + 1);
-    let globs = shprd_core::ask::high_risk_globs_in(&ctx.root);
-    let text = shprd_core::ask::scope_widen_body_for(&args.task, &paths, &args.reason, &globs);
-    let options = shprd_core::ask::scope_widen_options_for(&paths, &globs);
-    let now_ms = shprd_core::log::Clock::now_ms(&shprd_core::log::SystemClock);
-    let ask = shprd_core::ask::Ask::new(
-        id.clone(),
-        args.task.clone(),
-        shprd_core::ask::AskKind::Question,
-        text.clone(),
-        now_ms,
-    )
-    .with_options(options.clone());
-    let queue = shprd_core::ask::AskQueue::for_repo(&ctx.root);
-    queue
-        .raise(&ask)
-        .map_err(|err| CliError::other(anyhow!(err).context("writing the ask")))?;
-    let raised = EventKind::AskRaised {
-        task: args.task.clone(),
-        ask: id.clone(),
-        ask_kind: shprd_core::ask::AskKind::Question,
-        text,
-        options,
-        created_at_ms: now_ms,
-        expires_at_ms: None,
-    };
-    let event = match ctx.commit(raised) {
-        Ok(event) => event,
-        Err(err) => {
-            let _ = queue.remove(&args.task, &id);
-            return Err(err);
-        }
-    };
-    emit(ctx, &event)
-}
-
 /// How many sends a note gets before the person is told it never arrived.
 const NOTE_SEND_CAP: u32 = 5;
 
@@ -306,7 +249,7 @@ const NOTE_SEND_CAP: u32 = 5;
 pub(crate) enum NoteSend {
     /// The worker's terminal took the note.
     Sent,
-    /// The task has no live worker: its next brief lists the paths itself.
+    /// The task has no live worker: its next brief says what the note said.
     NoWorker,
     /// A live worker's terminal refused the write; worth trying again.
     Failed,
@@ -315,7 +258,7 @@ pub(crate) enum NoteSend {
 /// Types every queued worker note into its task's live worker.
 ///
 /// A note is skipped only when the task has no live worker: the next attempt's
-/// brief is built from the widened scope and lists the paths itself. A failed
+/// brief is built from the log, which holds what the note said. A failed
 /// write to a live worker leaves the note pending for the next pass, up to
 /// [`NOTE_SEND_CAP`] tries, after which the person is told in plain words. A
 /// note is settled as sent only when it was delivered, so nothing is typed twice.
@@ -348,7 +291,7 @@ pub(crate) fn deliver_worker_notes(ctx: &Ctx) {
     for task in told {
         let status = EventKind::TaskStatus {
             task,
-            message: status_line("could not tell the worker its scope was widened"),
+            message: status_line("could not deliver a note to the worker"),
             progress: None,
         };
         let _ = ctx.commit(status);
@@ -550,6 +493,9 @@ fn report(ctx: &Ctx, args: &ReportArgs) -> Result<(), CliError> {
         .collect::<Result<Vec<CheckReport>, CliError>>()?;
     let checks = excuse_pre_existing(&shprd_core::baseline::Baselines::load(&ctx.root), checks);
     let proofs = proof_paths(ctx, args)?;
+    if matches!(args.status, crate::cli::StatusArg::Completed) {
+        refuse_forbidden_commits(ctx, args)?;
+    }
     let kind = EventKind::Reported {
         task: args.task.clone(),
         attempt: args.attempt,
@@ -562,153 +508,48 @@ fn report(ctx: &Ctx, args: &ReportArgs) -> Result<(), CliError> {
         skills_used: args.skills_used.clone(),
         proofs,
     };
-    let event = match ctx.commit(kind) {
-        Ok(event) => event,
-        Err(CliError::Refused(refused)) => {
-            // A refused hand-in records nothing, so the board would read
-            // `Working` for ever with the worker idle. A card says why instead.
-            raise_refused_hand_in(ctx, args, &refused);
-            // The refusal names the event it was judged against and when, so a
-            // worker can tell a stale refusal from a new one (a later
-            // `scope_widened` means: run the report again).
-            let seq = ctx.state().map(|state| state.last_seq).unwrap_or_default();
-            let now = shprd_core::log::Clock::now_ms(&shprd_core::log::SystemClock);
-            eprintln!("{}", refusal_note(seq, now));
-            return Err(CliError::Refused(refused));
-        }
-        Err(other) => return Err(other),
-    };
+    let event = ctx.commit(kind)?;
     emit(ctx, &event)
 }
 
-/// Marks a failing check that failed no worse on the base as pre-existing.
+/// Refuses a completed hand-in whose branch commits a path no task may commit
+/// (see [`shprd_core::scope::forbidden`]), back to the worker, with no card.
 ///
-/// Only a regression should refuse a hand-in, so such a check is recorded as
-/// passing, with its output tail starting `pre-existing on base …` (and the
-/// base's commit and error count), which the card and the PR body show. A check
-/// with no baseline, or worse than it, is left as it ran.
-fn excuse_pre_existing(
-    baselines: &shprd_core::baseline::Baselines,
-    checks: Vec<CheckReport>,
-) -> Vec<CheckReport> {
-    use shprd_core::baseline::{Verdict, judge, labelled_tail};
-    checks
-        .into_iter()
-        .map(|mut check| {
-            if check.exit_code != Some(0)
-                && judge(baselines, &check.command, &check.output_tail) == Verdict::PreExisting
-                && let Some(base) = baselines.find(&check.command)
-            {
-                check.output_tail = output_tail(&labelled_tail(base, &check.output_tail));
-                check.exit_code = Some(0);
-            }
-            check
-        })
-        .collect()
-}
-
-/// The line printed with a refusal: the event seq and time it was judged at.
-fn refusal_note(seq: u64, now_ms: u64) -> String {
-    let secs = now_ms / 1000;
-    let (h, m, sec) = (secs / 3600 % 24, secs / 60 % 60, secs % 60);
-    format!(
-        "[refused at event seq {seq}, {h:02}:{m:02}:{sec:02} UTC: a scope_widened event with a \
-         higher seq means this refusal is stale, so run the report again]"
-    )
-}
-
-/// Puts a card in front of the person for a hand-in the engine refused.
-///
-/// Only a path outside the scope gets one, because only a person can settle it
-/// (by widening the scope); a hand-in without passing checks is the worker's to
-/// fix and records nothing. It is best effort: the worker still gets the refusal as its exit
-/// status, and a card that could not be written must not hide it.
-fn raise_refused_hand_in(ctx: &Ctx, args: &ReportArgs, refused: &shprd_core::rules::RuleError) {
-    use shprd_core::rules::RuleError;
-    if !matches!(refused, RuleError::PathOutOfScope { .. }) {
-        return;
-    }
-    let Ok(state) = ctx.state() else { return };
-    let Some(task) = state.tasks.get(&args.task) else {
-        return;
+/// The rule on the event judges the worker's `--changed` list; this reads the
+/// branch's real diff against the run's integration branch, so a file the
+/// worker left off the list is caught too. Best effort: a branch git cannot
+/// read here (no worktree, no run yet) leaves the judging to the rule.
+fn refuse_forbidden_commits(ctx: &Ctx, args: &ReportArgs) -> Result<(), CliError> {
+    let Ok(state) = ctx.state() else {
+        return Ok(());
     };
-    let prefix = format!(
-        "{}{}-",
-        shprd_core::gate::HAND_IN_REFUSED_ASK_PREFIX,
-        args.attempt
-    );
-    let earlier = state
-        .asks
-        .values()
-        .filter(|ask| ask.task == args.task && ask.id.starts_with(&prefix))
-        .count();
-    // One open card per attempt: a worker that retries the same hand-in does
-    // not stack them.
-    if state
-        .asks
-        .values()
-        .any(|ask| ask.task == args.task && ask.id.starts_with(&prefix) && ask.answer.is_none())
-    {
-        return;
-    }
-    let outside: Vec<String> = args
-        .changed
-        .iter()
-        .filter_map(|path| shprd_core::scope::normalize(path).ok())
-        .filter(|path| !shprd_core::scope::within(path, &task.scope))
-        .collect();
-    // The coordinator's widen card may already ask for these paths: one scope
-    // question, one card.
-    if state.asks.values().any(|ask| {
-        ask.task == args.task && ask.answer.is_none() && {
-            let offered = shprd_core::ask::offered_paths(&ask.options);
-            !outside.is_empty()
-                && shprd_core::ask::scope_key_of(&ask.task, &ask.id).is_some()
-                && outside.iter().all(|path| offered.contains(path))
+    let Some(run) = state.run.as_ref() else {
+        return Ok(());
+    };
+    let Some(attempt) = state
+        .tasks
+        .get(&args.task)
+        .and_then(|task| task.attempts.iter().find(|found| found.n == args.attempt))
+    else {
+        return Ok(());
+    };
+    let Ok(changed) =
+        shprd_git::changed::task_changes(&ctx.root, &run.integration_branch, &attempt.branch)
+    else {
+        return Ok(());
+    };
+    for path in changed {
+        if let Some(why) = shprd_core::scope::forbidden(&path) {
+            return Err(CliError::Refused(
+                shprd_core::rules::RuleError::ForbiddenPath {
+                    task: args.task.clone(),
+                    path,
+                    why,
+                },
+            ));
         }
-    }) {
-        return;
     }
-    let id = shprd_core::gate::hand_in_refused_ask(args.attempt, earlier + 1);
-    let globs = shprd_core::ask::high_risk_globs_in(&ctx.root);
-    let note = shprd_core::gate::widen_note(&shprd_core::gate::widen_offer(&outside, &globs));
-    let text = shprd_core::gate::hand_in_refused_body(
-        &args.task,
-        args.attempt,
-        &format!("{refused}{note}"),
-    );
-    let options = shprd_core::gate::hand_in_refused_options_for(&outside, &globs);
-    let now_ms = shprd_core::log::Clock::now_ms(&shprd_core::log::SystemClock);
-    let ask = shprd_core::ask::Ask::new(
-        id.clone(),
-        args.task.clone(),
-        shprd_core::ask::AskKind::Question,
-        text.clone(),
-        now_ms,
-    )
-    .with_options(options.clone());
-    let queue = shprd_core::ask::AskQueue::for_repo(&ctx.root);
-    if queue.raise(&ask).is_err() {
-        return;
-    }
-    let raised = ctx.commit(EventKind::AskRaised {
-        task: args.task.clone(),
-        ask: id.clone(),
-        ask_kind: shprd_core::ask::AskKind::Question,
-        text,
-        options,
-        created_at_ms: now_ms,
-        expires_at_ms: None,
-    });
-    if raised.is_err() {
-        let _ = queue.remove(&args.task, &id);
-        return;
-    }
-    let _ = ctx.commit(EventKind::TaskStatus {
-        task: args.task.clone(),
-        message: status_line("hand-in refused: waiting for a decision"),
-        progress: None,
-    });
+    Ok(())
 }
 
 /// The proofs a hand-in records, refused when one is outside the worktree.
@@ -949,7 +790,52 @@ fn override_rule(ctx: &Ctx, args: &OverrideArgs) -> Result<(), CliError> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    use super::{NoteSend, deliver_notes_with, parse_check, refusal_note, scope_warnings};
+    use super::{NoteSend, deliver_notes_with, overlap_warning, parse_check, scope_warnings};
+
+    #[test]
+    fn overlapping_paths_without_a_dependency_warn_once() {
+        use shprd_core::event::{Actor, Event, EventKind};
+        use shprd_core::state::RunState;
+        let added = |seq: u64, id: &str, scope: &str| Event {
+            seq,
+            at_ms: seq,
+            actor: Actor::Human,
+            kind: EventKind::TaskAdded {
+                task: id.to_string(),
+                title: id.to_string(),
+                scope: vec![scope.to_string()],
+                acceptance: vec!["works".to_string()],
+                tags: Vec::new(),
+                skills: Vec::new(),
+                deps: Vec::new(),
+            },
+        };
+        let started = Event {
+            seq: 1,
+            at_ms: 1,
+            actor: Actor::Human,
+            kind: EventKind::RunStarted {
+                run_id: "r".to_string(),
+                repo: "/repo".to_string(),
+                base_branch: "main".to_string(),
+                integration_branch: "integration/m1".to_string(),
+            },
+        };
+        let state = RunState::fold(&[started, added(2, "a", "crates/core"), added(3, "b", "docs")])
+            .unwrap();
+        let scope = vec!["crates/core/src/x.rs".to_string()];
+        let line = overlap_warning(&state, "c", &scope, &[]).unwrap();
+        assert!(line.contains("c shares paths with a"), "{line}");
+        assert!(!line.contains('\n'), "one line: {line}");
+        assert_eq!(
+            overlap_warning(&state, "c", &scope, &["a".to_string()]),
+            None
+        );
+        assert_eq!(
+            overlap_warning(&state, "c", &["web".to_string()], &[]),
+            None
+        );
+    }
 
     #[test]
     fn a_scope_that_matches_nothing_warns_with_the_nearest_path() {
@@ -965,15 +851,6 @@ mod tests {
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(warnings[0].contains("icons.tsx"), "{warnings:?}");
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn a_refusal_carries_its_seq_and_time() {
-        let text = refusal_note(99, 3_723_000);
-        assert!(
-            text.contains("seq 99") && text.contains("01:02:03 UTC"),
-            "{text}"
-        );
     }
 
     #[test]

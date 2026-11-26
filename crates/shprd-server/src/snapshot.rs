@@ -113,13 +113,9 @@ fn open_asks(state: &RunState, now_ms: u64) -> Vec<AskDto> {
                 .get(&ask.task)
                 .is_none_or(|task| card_is_current(task, &ask.text))
         })
-        // One scope question, one card: once a widening is answered, a card
-        // that offers only paths already in scope is moot.
-        .filter(|ask| {
-            state.tasks.get(&ask.task).is_none_or(|task| {
-                !shprd_core::ask::is_moot_scope_card(&ask.task, &ask.id, &ask.options, &task.scope)
-            })
-        })
+        // A scope card an older build raised is moot: declared paths are a
+        // hint now, so no client draws one.
+        .filter(|ask| !shprd_core::ask::is_scope_card(&ask.id))
         .collect();
     asks.sort_by(|left, right| {
         left.created_at_ms

@@ -103,7 +103,7 @@ describe("TaskThread", () => {
   it("an escalation names the verb to run and offers no button for it", async () => {
     open([task("T1", "needs_you")], {
       state: snapshot([task("T1", "needs_you")], {
-        needs: [{ task: "T1", body: "The review spent: run `shprd retry T1`", default_action: "wait", seq: 4 }],
+        needs: [{ task: "T1", body: "The review spent: run `shprd retry T1`", default_action: "wait", seq: 4, kind: "decision", actions: [], key: "" }],
       }),
     });
     await waitFor(() => expect(screen.getByText("shprd retry T1")).toBeDefined());

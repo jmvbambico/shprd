@@ -266,3 +266,17 @@ fn refresh_base_is_silent_when_the_remote_is_unreachable() {
         Err(err) => panic!("base_moved: {err}"),
     }
 }
+
+#[test]
+fn a_new_worktree_base_is_the_synced_tip_when_the_remote_is_ahead() {
+    let fixture = Fixture::new();
+    let git = Git::new(&fixture.repo.path);
+    assert_eq!(sync::freshest_base(&git, "main"), "main", "nothing moved");
+    let moved = fixture.move_origin_main("src/landed.txt", "landed\n", "merged on the forge");
+    // The user's checkout has not seen that landing.
+    git_in(&fixture.repo.path, &["reset", "--hard", "HEAD~1"]);
+    assert_eq!(sync::freshest_base(&git, "main"), moved);
+    // A local base with work of its own is never replaced.
+    commit_in(&fixture.repo.path, "src/own.txt", "own\n", "local work");
+    assert_eq!(sync::freshest_base(&git, "main"), "main");
+}

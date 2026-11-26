@@ -42,10 +42,6 @@ export function cut(text, max = LINE_MAX) {
  */
 export function secondLine(task) {
   const derived = task?.derived ?? {};
-  // A queued task the engine holds back because another task has the same file says so
-  // in plain words ("waits for T3: both change tcalc/ops.py"), not as a path in use.
-  const held = heldBy(task);
-  if (held && !task?.pending?.label) return cut(`waits for ${held.task}: both change ${held.path}`, WAITING_MAX);
   // A task whose action the service has not answered yet says what it is doing
   // ("Merging…", "Stopping…"): the optimistic layer's label (SHPR-81).
   if (task?.pending?.label) return task.pending.label;
@@ -64,18 +60,6 @@ export function secondLine(task) {
   // the room it was written with (120) so the path and task id are not cut.
   if (line) return cut(line, line.startsWith("Waiting: ") ? WAITING_MAX : LINE_MAX);
   return cut(task?.title ?? "");
-}
-
-/**
- * The task (and the file) that holds a queued task back, from the engine's own line
- * "Waiting: <path> is in use by <task>", or null. The tasks have no dependency on each
- * other; they only change the same file, so the later one starts when the first lands.
- */
-export function heldBy(task) {
-  const word = task?.derived?.status;
-  if (task?.status !== "queued" || (word !== "to_do" && word !== "queued" && word !== "scheduled")) return null;
-  const m = /^Waiting: (.+) is in use by (\S+)$/.exec(String(task?.last_status?.message ?? "").trim());
-  return m ? { path: m[1], task: m[2] } : null;
 }
 
 /** The second line of a done task: its report's summary, else "Done". */
@@ -592,10 +576,10 @@ export function paneState({ cached = false, count = null } = {}) {
 /**
  * The tasks a panel can offer to start, and the ones it must leave alone.
  *
- * It is the add-task form's reading of the board: what the service would accept
- * as a scope (`a path, or a folder`) is not decided here — the rules are — but a
- * title and one acceptance line are what the form asks for, and a form that sent
- * an empty one would be refused for it. `id` also says why a form cannot be
+ * It is the add-task form's reading of the board: the paths are optional (a hint
+ * for the worker of where to start, never a limit), but a title and one
+ * acceptance line are what the form asks for, and a form that sent an empty one
+ * would be refused for it. `id` also says why a form cannot be
  * submitted yet, in words, or is empty when it can.
  */
 export function newTask(body, known = null) {
@@ -612,13 +596,11 @@ export function newTask(body, known = null) {
   const unknown = known === null ? [] : deps.filter((id) => !known.includes(id));
   const why = title === ""
     ? "A task needs a title"
-    : scope.length === 0
-      ? "Name the folder or path it may change"
-      : acceptance.length === 0
-        ? "Say what must be true when it is done"
-        : unknown.length > 0
-          ? `No task named ${unknown.join(", ")} to wait for`
-          : "";
+    : acceptance.length === 0
+      ? "Say what must be true when it is done"
+      : unknown.length > 0
+        ? `No task named ${unknown.join(", ")} to wait for`
+        : "";
   return { title, scope, acceptance, deps, why, ready: why === "" };
 }
 

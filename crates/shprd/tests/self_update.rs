@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 const FAKE_SERVICE: &str = r#"
-import json, os, sys, uuid
+import json, os, socketserver, sys, uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 state, version = sys.argv[1], sys.argv[2]
@@ -48,7 +48,16 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
-server = HTTPServer(("127.0.0.1", 0), Handler)
+class Server(HTTPServer):
+    # HTTPServer.server_bind looks the host's full name up (socket.getfqdn),
+    # which can stall for many seconds on a CI Mac; a loopback test server
+    # needs no name.
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name = "127.0.0.1"
+        self.server_port = self.server_address[1]
+
+server = Server(("127.0.0.1", 0), Handler)
 record = {"port": server.server_address[1], "id": ident, "pid": os.getpid(), "version": version, "root": ""}
 tmp = os.path.join(state, "service.json.tmp")
 with open(tmp, "w") as out:
@@ -120,6 +129,14 @@ fn write_script(path: &Path, text: &str) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
+/// Appends one line to the supervisor's error file, best effort.
+fn note(path: &Path, line: &str) {
+    use std::io::Write;
+    if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(file, "{line}");
+    }
+}
+
 /// Starts `<install> serve` whenever none is running, as the layout's footer does.
 struct Supervisor {
     stop: Arc<AtomicBool>,
@@ -127,26 +144,44 @@ struct Supervisor {
 }
 
 impl Supervisor {
-    fn start(install: PathBuf, env: Vec<(String, String)>) -> Self {
+    fn start(install: PathBuf, env: Vec<(String, String)>, errors: PathBuf) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
         let handle = std::thread::spawn(move || {
             let mut children: Vec<Child> = Vec::new();
             while !flag.load(Ordering::SeqCst) {
                 // Reaping is what lets the helper see the old service as gone.
-                children.retain_mut(|child| matches!(child.try_wait(), Ok(None)));
+                children.retain_mut(|child| match child.try_wait() {
+                    Ok(None) => true,
+                    Ok(Some(status)) => {
+                        note(&errors, &format!("serve {} exited: {status}", child.id()));
+                        false
+                    }
+                    Err(err) => {
+                        note(&errors, &format!("serve {} unreadable: {err}", child.id()));
+                        false
+                    }
+                });
                 if children.is_empty() {
                     let mut command = Command::new(&install);
+                    // The fake service's own errors are kept, so a test that
+                    // never sees it answer can say why.
+                    let stderr = fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&errors)
+                        .map_or_else(|_| Stdio::null(), Stdio::from);
                     command
                         .arg("serve")
                         .stdin(Stdio::null())
                         .stdout(Stdio::null())
-                        .stderr(Stdio::null());
+                        .stderr(stderr);
                     for (key, value) in &env {
                         command.env(key, value);
                     }
-                    if let Ok(child) = command.spawn() {
-                        children.push(child);
+                    match command.spawn() {
+                        Ok(child) => children.push(child),
+                        Err(err) => note(&errors, &format!("serve did not start: {err}")),
                     }
                     std::thread::sleep(Duration::from_millis(300));
                 }
@@ -236,7 +271,7 @@ impl World {
             ),
             ("FAKE_STATE".to_string(), state.display().to_string()),
         ];
-        let supervisor = Supervisor::start(install.clone(), env);
+        let supervisor = Supervisor::start(install.clone(), env, root.join("serve.err"));
         let world = Self {
             _tmp: tmp,
             root,
@@ -280,9 +315,59 @@ impl World {
             std::thread::sleep(Duration::from_millis(200));
         }
         panic!(
-            "the service never reported {version}; it reports {:?}",
-            self.service_version()
+            "the service never reported {version}; it reports {:?}\n{}",
+            self.service_version(),
+            self.diagnosis()
         );
+    }
+
+    /// What a test that never saw the service answer can say about why: the
+    /// service record, the fake service's errors and curl's own answer.
+    fn diagnosis(&self) -> String {
+        let record = fs::read_to_string(self.state.join("service.json"))
+            .unwrap_or_else(|err| format!("<no service.json: {err}>"));
+        let errors = fs::read_to_string(self.root.join("serve.err")).unwrap_or_default();
+        let tail: String = errors
+            .lines()
+            .rev()
+            .take(20)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join("\n");
+        let port = serde_json::from_str::<serde_json::Value>(&record)
+            .ok()
+            .and_then(|value| value.get("port").and_then(serde_json::Value::as_u64));
+        let curl = port.map_or_else(String::new, |port| {
+            Command::new("curl")
+                .args([
+                    "-sS",
+                    "--max-time",
+                    "2",
+                    &format!("http://127.0.0.1:{port}/api/health"),
+                ])
+                .output()
+                .map_or_else(
+                    |err| format!("<curl did not run: {err}>"),
+                    |out| {
+                        format!(
+                            "status {:?}, stdout {:?}, stderr {:?}",
+                            out.status.code(),
+                            String::from_utf8_lossy(&out.stdout),
+                            String::from_utf8_lossy(&out.stderr)
+                        )
+                    },
+                )
+        });
+        let python = Command::new("python3")
+            .args(["-c", "import sys; print(sys.executable, sys.version)"])
+            .output()
+            .map_or_else(
+                |err| format!("<python3 did not run: {err}>"),
+                |out| String::from_utf8_lossy(&out.stdout).trim().to_string(),
+            );
+        format!("service.json: {record}\ncurl: {curl}\npython3: {python}\nserve errors:\n{tail}")
     }
 
     fn pid(&self) -> u64 {
@@ -399,7 +484,7 @@ fn a_code_landing_builds_once_outside_the_repo_and_restarts_once() {
     let world = World::new("crates/x.rs", "v2");
     let before = world.pid();
     let out = world.helper("ok", "v2");
-    assert!(out.status.success(), "{out:?}");
+    assert!(out.status.success(), "{out:?}\n{}", world.diagnosis());
     let builds = world.log_lines("build");
     assert_eq!(builds.len(), 1, "{builds:?}");
     assert!(
