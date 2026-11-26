@@ -60,7 +60,7 @@ A prompt can't force a model to use a skill. shprd enforces it where code can:
 
 | Skill | Why |
 |---|---|
-| subagent-driven-development | spawns hidden sub-agents outside shprd's scopes and fallback |
+| subagent-driven-development | spawns hidden sub-agents outside shprd's control and fallback |
 | executing-plans | assumes one agent runs the whole plan inline |
 | using-git-worktrees | shprd owns worktrees |
 | finishing-a-development-branch | shprd owns merge, PR and cleanup |
