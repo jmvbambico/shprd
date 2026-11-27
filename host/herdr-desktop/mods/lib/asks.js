@@ -125,6 +125,10 @@ export const ACTION_LABEL = {
   ask_assistant: "Ask the assistant",
   reply: "Reply",
   dismiss: "Dismiss",
+  reopen: "Reopen",
+  override: "Override",
+  sync: "Sync",
+  readmit: "Readmit",
 };
 
 /** What a button says while its press is in flight, by action id. */
@@ -137,6 +141,10 @@ export const ACTION_BUSY = {
   ask_assistant: "Asking\u2026",
   reply: "Replying\u2026",
   dismiss: "Dismissing\u2026",
+  reopen: "Reopening\u2026",
+  override: "Overriding\u2026",
+  sync: "Syncing\u2026",
+  readmit: "Readmitting\u2026",
 };
 
 /** The busy word of a button that answers an ask. */
@@ -156,9 +164,25 @@ export function askKey(ask) {
   return `ask:${ask?.task ?? ""}:${String(ask?.id ?? "")}`;
 }
 
+/** The id every coordinator proposal (`shprd agent propose`) begins with. */
+export const PROPOSE_PREFIX = "propose-";
+
+/**
+ * The word a proposal card's button wears: `confirm <verb> …` is Confirm and
+ * `leave it` is Decline. The answer sent stays the choice as written. Any other
+ * ask keeps its choice as the label.
+ */
+export function proposalLabel(ask, option) {
+  const text = choiceLabel(option);
+  if (!String(ask?.id ?? "").startsWith(PROPOSE_PREFIX)) return text;
+  if (/^confirm(\s|$)/i.test(text)) return "Confirm";
+  if (/^leave it$/i.test(text)) return "Decline";
+  return text;
+}
+
 /** One button that answers one ask with one of its choices. */
 function answerButton(ask, option) {
-  const label = choiceLabel(option);
+  const label = proposalLabel(ask, option);
   return {
     id: `answer:${ask.id}:${option}`,
     label,
@@ -182,6 +206,14 @@ function payloadOf(id, need) {
       return need.task ? { kind: "task.resend_brief", task: need.task } : null;
     case "drop":
       return need.task ? { kind: "task.drop", task: need.task, reason: "dropped from its card" } : null;
+    case "reopen":
+      return need.task ? { kind: "task.reopen", task: need.task } : null;
+    case "override":
+      return need.task ? { kind: "task.override", task: need.task, reason: "overridden from its card" } : null;
+    case "sync":
+      return { kind: "run.sync" };
+    case "readmit":
+      return need.agent ? { kind: "agent.readmit", agent: need.agent, reason: "readmitted from its card" } : null;
     case "dismiss":
       return { kind: "need.dismiss", seq: need.seq };
     default:
@@ -208,7 +240,7 @@ function actionButton(id, need) {
 
 /** One card from one open ask. */
 function fromAsk(ask) {
-  const options = (ask.options ?? []).map((option) => ({ label: choiceLabel(option), answer: option }));
+  const options = (ask.options ?? []).map((option) => ({ label: proposalLabel(ask, option), answer: option }));
   return {
     id: `ask:${ask.task}:${ask.id}`,
     key: askKey(ask),
@@ -354,6 +386,33 @@ function fromNeed(need) {
   };
 }
 
+/** A task's escalation card also offers Readmit for each agent of the task that the run marks dry. */
+function withReadmits(card, state) {
+  if (card.notice || !card.task) return card;
+  const task = (state?.tasks ?? []).find((t) => t?.id === card.task);
+  const dry = new Set((state?.agents ?? []).filter((a) => a?.dry).map((a) => a.id));
+  const seen = new Set();
+  const buttons = [...card.buttons];
+  for (const attempt of task?.attempts ?? []) {
+    const id = attempt?.agent;
+    if (!id || seen.has(id) || !dry.has(id)) continue;
+    seen.add(id);
+    buttons.push({
+      id: `action:readmit-${id}:${card.seq}`,
+      label: `Readmit ${id}`,
+      busy: ACTION_BUSY.readmit,
+      chose: `Readmit ${id}`,
+      kind: "action",
+      action: "readmit",
+      task: card.task,
+      seq: card.seq,
+      payload: payloadOf("readmit", { agent: id }),
+      confirm: false,
+    });
+  }
+  return { ...card, buttons };
+}
+
 /**
  * Whether an escalation names an ask that is still open.
  *
@@ -409,7 +468,7 @@ export function cards(state, asks) {
   const needs = (state?.needs ?? [])
     .filter((need) => need.for_you !== false)
     .filter((need) => !namesOpenAsk(need.body, ids))
-    .map(fromNeed);
+    .map((need) => withReadmits(fromNeed(need), state));
   const out = [];
   for (const card of [...open, ...needs]) {
     const at = out.findIndex((have) => have.key === card.key);

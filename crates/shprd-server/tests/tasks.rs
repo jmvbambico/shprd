@@ -1409,3 +1409,27 @@ async fn a_disclosed_decision_is_listed_for_the_card_and_answered_once_as_an_eve
         .await;
     assert_eq!(unknown.status, StatusCode::CONFLICT, "{:?}", unknown.body);
 }
+
+#[tokio::test]
+async fn override_readmit_and_sync_actions_run_the_rules_and_say_why_they_refuse() {
+    // The board's Override, Readmit and Sync buttons: each is the verb's own rules.
+    let fixture = with_a_working_task();
+    // No failed gate on T1, or no reason: the override is refused with words.
+    let reply = fixture
+        .act(json!({"kind": "task.override", "task": "T1", "reason": ""}))
+        .await;
+    assert_eq!(reply.status, StatusCode::CONFLICT, "{:?}", reply.body);
+    // An agent nothing marked dry cannot be readmitted.
+    let reply = fixture
+        .act(json!({"kind": "agent.readmit", "agent": "pi", "reason": "quota is back"}))
+        .await;
+    assert_eq!(reply.status, StatusCode::CONFLICT, "{:?}", reply.body);
+    // A service without a binary cannot sync, and says so.
+    let reply = fixture.act(json!({"kind": "run.sync"})).await;
+    assert_eq!(reply.status, StatusCode::CONFLICT, "{:?}", reply.body);
+    assert!(
+        reply.json().to_string().contains("sync"),
+        "the reason names the verb: {:?}",
+        reply.body
+    );
+}

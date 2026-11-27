@@ -98,4 +98,20 @@ task: string, } | { "kind": "task.review_again",
 /**
  * The task whose review should start again.
  */
-task: string, };
+task: string, } | { "kind": "task.override", 
+/**
+ * The task whose failed gate is overridden.
+ */
+task: string, 
+/**
+ * Why the person lets it land.
+ */
+reason: string, } | { "kind": "agent.readmit", 
+/**
+ * The agent (a program, or `program/model`).
+ */
+agent: string, 
+/**
+ * Why it can be used again.
+ */
+reason: string, } | { "kind": "run.sync", };

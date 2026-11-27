@@ -575,7 +575,59 @@ const CARD_ACTS = {
   retry_review: { id: "retry_review", label: "Retry review", action: "task.review_again" },
   resend_brief: { id: "resend_brief", label: "Resend brief", action: "task.resend_brief" },
   drop: { id: "drop", label: "Drop", action: null },
+  reopen: { id: "reopen", label: "Reopen", action: "task.reopen" },
+  override: { id: "override", label: "Override", action: "task.override" },
+  sync: { id: "sync", label: "Sync", action: "run.sync" },
+  readmit: { id: "readmit", label: "Readmit", action: "agent.readmit" },
 };
+
+/** The reason a Readmit pressed on the board records. */
+export const READMIT_REASON = "readmitted from the board";
+
+/**
+ * The body the service takes for one extra act: Override carries its reason,
+ * Sync names nothing, Readmit names its agent and a reason, the rest name the task.
+ */
+export function actionBody(act, task) {
+  switch (act.action) {
+    case "task.override":
+      return { kind: act.action, task: task.id, reason: OVERRIDE_REASON };
+    case "run.sync":
+      return { kind: act.action };
+    case "agent.readmit":
+      return { kind: act.action, agent: act.agent, reason: READMIT_REASON };
+    default:
+      return { kind: act.action, task: task.id };
+  }
+}
+
+/** The reason an Override pressed on the board records: the person's own word. */
+export const OVERRIDE_REASON = "overridden from the board";
+
+/**
+ * The extra acts a task offers where the service would accept them: Reopen for
+ * a handed-in task, Override for one whose failed gate blocks landing, Sync for
+ * one behind its base, Readmit for each dry agent the task ran on. Only the ones
+ * that apply.
+ */
+export function extraActions(task, state = null) {
+  const extra = [];
+  const status = task?.status;
+  if (status === "reported" || status === "passed") extra.push({ ...CARD_ACTS.reopen });
+  const blocked = String(task?.accept_blocked ?? "");
+  if (!task?.accepted_failure && /gate/i.test(blocked)) extra.push({ ...CARD_ACTS.override });
+  if (/behind|out of date|sync/i.test(String(task?.derived?.reason ?? ""))) extra.push({ ...CARD_ACTS.sync });
+  // Readmit: one per agent of this task's attempts that the run marks dry.
+  const dry = new Set((state?.agents ?? []).filter((agent) => agent?.dry).map((agent) => agent.id));
+  const seen = new Set();
+  for (const attempt of task?.attempts ?? []) {
+    const id = attempt?.agent;
+    if (!id || seen.has(id) || !dry.has(id)) continue;
+    seen.add(id);
+    extra.push({ ...CARD_ACTS.readmit, id: `readmit-${id}`, label: `Readmit ${id}`, agent: id });
+  }
+  return extra;
+}
 
 /** A needs-you row's acts from its newest decision card, or null to use the default. */
 function cardActions(task, state) {

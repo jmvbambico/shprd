@@ -325,6 +325,58 @@ test("stripItems has one item per task with Open or the single button", () => {
   assert.equal(items[1].button.answer, "go");
 });
 
+import { proposalLabel } from "../mods/lib/asks.js";
+import { extraActions, actionBody } from "../mods/lib/board.js";
+
+test("a coordinator proposal's choices read Confirm and Decline, and answer as written", () => {
+  const ask = { id: "propose-drop-1", task: "T1", options: ["confirm drop", "leave it"], kind: "question", text: "x\nreason: y" };
+  assert.equal(proposalLabel(ask, "confirm drop"), "Confirm");
+  assert.equal(proposalLabel(ask, "leave it"), "Decline");
+  const card = cards({ asks: [ask], needs: [] }, { asks: [ask] }).find((c) => c.ask === "propose-drop-1");
+  assert.deepEqual(card?.buttons.map((b) => [b.label, b.answer]), [["Confirm", "confirm drop"], ["Decline", "leave it"]]);
+  // Any other ask keeps its words.
+  assert.equal(proposalLabel({ id: "q1" }, "leave it"), "leave it");
+});
+
+test("the board offers Reopen, Override and Sync only where they apply", () => {
+  const handedIn = { id: "T1", status: "reported", derived: { status: "ready" } };
+  assert.ok(extraActions(handedIn).some((a) => a.id === "reopen" && a.action === "task.reopen"));
+  const gated = { id: "T2", status: "failed", accept_blocked: "gate lint failed", derived: { status: "needs_you" } };
+  assert.ok(extraActions(gated).some((a) => a.id === "override" && a.action === "task.override"));
+  assert.ok(!extraActions({ ...gated, accepted_failure: true }).some((a) => a.id === "override"));
+  assert.deepEqual(extraActions({ id: "T3", status: "working", derived: { status: "working" } }), []);
+  assert.ok(extraActions({ id: "T4", status: "queued", derived: { reason: "behind main: sync" } }).some((a) => a.action === "run.sync"));
+});
+
+test("every applicable extra act shows together, and Readmit names a dry agent", () => {
+  const task = {
+    id: "T1",
+    status: "reported",
+    derived: { status: "ready", reason: "behind main: sync" },
+    attempts: [{ agent: "codex" }, { agent: "pi" }, { agent: "codex" }],
+  };
+  const state = { agents: [{ id: "codex", dry: true }, { id: "pi", dry: false }] };
+  const acts = extraActions(task, state);
+  assert.deepEqual(acts.map((a) => a.id), ["reopen", "sync", "readmit-codex"]);
+  assert.deepEqual(actionBody(acts[2], task), { kind: "agent.readmit", agent: "codex", reason: "readmitted from the board" });
+  assert.deepEqual(actionBody(acts[1], task), { kind: "run.sync" });
+  assert.deepEqual(actionBody(acts[0], task), { kind: "task.reopen", task: "T1" });
+  assert.ok(!extraActions(task, { agents: [] }).some((a) => a.action === "agent.readmit"));
+});
+
+test("a task's decision card offers Readmit for each dry agent, sending its agent and a reason", () => {
+  const state = {
+    agents: [{ id: "codex", dry: true }, { id: "pi", dry: false }],
+    tasks: [{ id: "T1", attempts: [{ agent: "codex" }, { agent: "pi" }] }],
+    needs: [{ seq: 5, task: "T1", kind: "escalation", body: "stuck", actions: ["drop"] }],
+  };
+  const card = cards(state, { asks: [] }).find((c) => c.task === "T1");
+  const read = card.buttons.filter((b) => b.action === "readmit");
+  assert.equal(read.length, 1);
+  assert.equal(read[0].label, "Readmit codex");
+  assert.deepEqual(read[0].payload, { kind: "agent.readmit", agent: "codex", reason: "readmitted from its card" });
+});
+
 test("an operational run-wide card the coordinator settles is drawn nowhere a person decides", () => {
   const state = {
     needs: [

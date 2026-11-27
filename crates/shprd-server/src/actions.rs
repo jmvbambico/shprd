@@ -123,6 +123,31 @@ pub(crate) fn run(ctx: &Context<'_>, action: Action) -> Result<ActionReply, ApiR
         Action::TaskResendBrief { task } => resend_brief(ctx, &task),
         Action::TaskReviewAgain { task } => review_again(ctx, &task),
         Action::NeedDismiss { seq } => commit(ctx, EventKind::NeedDismissed { need: seq }),
+        Action::TaskOverride { task, reason } => {
+            let kind = EventKind::Override {
+                task,
+                rule: shprd_core::rules::INTEGRATE_AFTER_FAILED_GATE.to_string(),
+                reason,
+            };
+            commit(ctx, kind)
+        }
+        Action::AgentReadmit { agent, reason } => {
+            let kind = EventKind::Available { agent, reason };
+            commit(ctx, kind)
+        }
+        Action::RunSync {} => {
+            run_a_verb(ctx, "sync")?;
+            // The verb wrote its own event from its own process.
+            let (state, _) = ledger::load(ctx.repo).map_err(read_error)?;
+            ctx.hub.publish(state.last_seq);
+            Ok(ActionReply {
+                ok: true,
+                seq: state.last_seq,
+                task: None,
+                dropped: Vec::new(),
+                skipped: Vec::new(),
+            })
+        }
     }
 }
 
