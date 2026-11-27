@@ -76,13 +76,13 @@ pub fn snapshot(state: &RunState, now_ms: u64) -> SnapshotDto {
 }
 
 /// The integration pull request, once there is one to review: every task has
-/// landed or been dropped, at least one landed, and the run has not finished.
+/// landed or been dropped and at least one landed (a finished run keeps it).
 ///
 /// It is the one thing the person is expected to look at besides a protected-path
 /// accept, so a board draws it under "For you".
 fn integration_pr(state: &RunState) -> Option<IntegrationPrDto> {
     use shprd_core::state::TaskStatus;
-    let run = state.run.as_ref().filter(|_| !state.finished)?;
+    let run = state.run.as_ref()?;
     let landed = state
         .tasks
         .values()
@@ -1057,6 +1057,9 @@ mod tests {
             reason: "no".to_string(),
         }]);
         assert_eq!(snapshot(&dropped, NOW).integration_pr, None);
+        // A finished run keeps the card until the pull request is merged.
+        landed.finished = true;
+        assert!(snapshot(&landed, NOW).integration_pr.is_some());
     }
 
     #[test]

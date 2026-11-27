@@ -13,7 +13,7 @@
 // - Commit: `a3f327a` (tag `v3.1.34`)
 // - License: MIT — Copyright (c) 2026 Elias Stravik
 
-import type { AttemptDto, DerivedStatusDto, NeedKindDto, ReviewDto, SnapshotDto, TaskDto } from "../gen";
+import type { AttemptDto, DerivedStatusDto, IntegrationPrDto, NeedKindDto, ReviewDto, SnapshotDto, TaskDto } from "../gen";
 
 /** The tone a status is drawn in. */
 export type Tone = "dim" | "amber" | "red" | "green";
@@ -224,6 +224,8 @@ export interface Group {
   cut: number;
   more: boolean;
   flat?: boolean;
+  /** The integration pull request, drawn as the last row of "For you". */
+  integration?: IntegrationPrDto;
 }
 
 /** What the list takes besides the board. */
@@ -279,8 +281,14 @@ export function listView(
     ...live.filter((t) => word(t) === "needs_you" && mine(t)),
     ...live.filter((t) => word(t) === "ready"),
   ];
-  if (you.length > 0) {
-    groups.push(make("you", "For you", you));
+  const pr = !searching ? (state?.integration_pr ?? null) : null;
+  if (you.length > 0 || pr) {
+    const group = make("you", "For you", you);
+    if (pr) {
+      group.integration = pr;
+      group.count += 1;
+    }
+    groups.push(group);
   }
   // What the coordinator settles itself stays visible, under its own heading.
   const theirs = live.filter((t) => word(t) === "needs_you" && !mine(t));

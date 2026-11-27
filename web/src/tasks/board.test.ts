@@ -195,4 +195,14 @@ describe("what is the person's (For you)", () => {
     });
     expect(counts(state).needs).toBe(1);
   });
+
+  it("draws the integration pull request in For you, and counts it once", () => {
+    const state = snapshot([task("T1", "done")], {
+      integration_pr: { base: "main", branch: "integration/m11", landed: 1 },
+    });
+    const you = listView(state, {}).groups.find((g) => g.key === "you");
+    expect(you?.integration?.branch).toBe("integration/m11");
+    expect(you?.count).toBe(1);
+    expect(counts(state).needs).toBe(1);
+  });
 });
