@@ -35,7 +35,7 @@ import { closeOverlay, exec, knownAgents, nextCommand, openOverlay, props, setSh
 import { RepoCache, SEND_PROBLEM, activeFolder, attach, downNotice, press, reason, singleFlight } from "./lib/client.js";
 import * as files from "./attach.js";
 import { Dictation, available as dictationAvailable } from "./dictate.js";
-import { iconFile, openThread, popupAt, press as clickPress } from "./lib/panel.js";
+import { iconFile, openThread, popupAt, press as clickPress, showCard } from "./lib/panel.js";
 import {
   MENU_W,
   PICK_KEY,
@@ -48,9 +48,12 @@ import {
   selectionWrites,
 } from "./lib/settings.js";
 import { answeredAsks, errorLine, noticeLine, overlay, probe, read as readOps } from "./lib/optimistic.js";
-import { answerBody, cards as cardsOf, footer, forSpace, questionCard } from "./lib/asks.js";
+import { answerBody, cards as cardsOf, footer, forSpace, questionCard, stripItems } from "./lib/asks.js";
 import {
   COORDINATOR,
+  SEND_REFUSED,
+  TERMINAL_KEY,
+  sendWords,
   GUTTER,
   bubbleSpan,
   WORDS,
@@ -866,7 +869,7 @@ export default class Chat extends View {
         this.refresh();
         return;
       }
-      const said = reason(err);
+      const said = sendWords(reason(err));
       // Only the conversation the send came from shows the refusal; the sidebar's
       // foot says the sentence for the folder.
       if (slot === this.slot) this.refusal = said;
@@ -1156,6 +1159,9 @@ export default class Chat extends View {
           cx?.notify?.();
         }
       })
+      .when(this.space === COORDINATOR && Boolean(this.strip(t, colors, board, open)), (el) =>
+        el.child(this.strip(t, colors, board, open)),
+      )
       .child(
         v_flex()
           .id("chat-rows")
@@ -1173,7 +1179,18 @@ export default class Chat extends View {
         el.child(this.column(div().pb(4).text_size(TEXT.label).text_color(t.muted).child(this.notice))),
       )
       .when(said !== null && rows.length > 0, (el) =>
-        el.child(this.column(div().pb(4).text_size(TEXT.label).text_color(t.muted).child(said))),
+        el.child(
+          this.column(
+            h_flex()
+              .pb(4)
+              .gap(8)
+              .items_center()
+              .text_size(TEXT.label)
+              .text_color(t.muted)
+              .child(div().flex_1().min_w(0).child(said))
+              .when(said === SEND_REFUSED, (row) => row.child(this.button(t, "Show terminal", () => this.showTerminal(), false))),
+          ),
+        ),
       )
       .when((this.fileError ?? null) !== null, (el) =>
         el.child(this.column(div().pb(4).text_size(TEXT.label).text_color(colors.red).child(this.fileError))),
@@ -1197,6 +1214,51 @@ export default class Chat extends View {
     // Still pending after the grace: the keys did not take, so the card comes back.
     this.answeredQ = null;
     return false;
+  }
+
+  /** Shows the agent's terminal: the thread's Terminal view, or this pane's terminal. */
+  showTerminal() {
+    if (this.thread) {
+      openThread({ task: this.space, title: "" }, "terminal");
+      return;
+    }
+    setShared(TERMINAL_KEY, { space: this.space ?? COORDINATOR, at: Date.now() });
+  }
+
+  /** The needs-you strip of the coordinator's chat: one line per task that waits on the person. */
+  strip(t, colors, board, open) {
+    if (this.space !== COORDINATOR) return null;
+    const titles = new Map((board?.tasks ?? []).map((task) => [task.id, task.title ?? ""]));
+    const items = stripItems(cardsOf(board, open), titles);
+    if (items.length === 0) return null;
+    return v_flex()
+      .id("chat-strip")
+      .flex_none()
+      .gap(4)
+      .px(GUTTER)
+      .py(6)
+      .border_b(1)
+      .border_color(t.border)
+      .children(
+        items.map((item) =>
+          h_flex()
+            .id(`chat-strip-${item.id}`)
+            .gap(8)
+            .items_center()
+            .text_size(TEXT.label)
+            .child(div().flex_none().w(8).h(8).rounded(4).bg(colors.red))
+            .child(div().flex_none().font_medium().text_color(t.foreground).child(item.task))
+            .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(item.text || item.title))
+            .child(
+              this.button(
+                t,
+                item.label,
+                () => (item.button ? this.choose(item.card, item.button) : showCard(item.card, item.title)),
+                this.answering !== null,
+              ),
+            ),
+        ),
+      );
   }
 
   /** A request from the pane's Needs you pill to show this chat's card: the next reveal lands on it. */
@@ -1276,7 +1338,8 @@ export default class Chat extends View {
       .gap(6)
       .items_center()
       .child(div().text_size(TEXT.body).font_medium().text_color(t.foreground).child(WORDS.emptyTitle))
-      .child(div().text_size(TEXT.label).text_color(t.muted).child(said ?? emptyWords(this.space)));
+      .child(div().text_size(TEXT.label).text_color(t.muted).child(said ?? emptyWords(this.space)))
+      .when(said === SEND_REFUSED, (el) => el.child(this.button(t, "Show terminal", () => this.showTerminal(), false)));
   }
 
   /** One row of the timeline. */

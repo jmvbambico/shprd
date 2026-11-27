@@ -618,3 +618,14 @@ export function paneChat({ pane, terminals = [], spaces = [] } = {}) {
 export function endAgent(program) {
   return { ask: `End ${program}?`, cancel: "Cancel", verb: "End agent" };
 }
+
+/** What a person reads when the host would not take a send: plain words, not the host's. */
+export const SEND_REFUSED = "The agent's terminal didn't take that message. Open the terminal to see what it is waiting on.";
+
+/** The shared key a chat writes to ask its pane to show the agent's terminal (`{space, at}`). */
+export const TERMINAL_KEY = "shprd.pane.terminal";
+
+/** The sentence a refused send shows: the host's own wording ("this host refused the send: …") becomes [`SEND_REFUSED`]. */
+export function sendWords(text) {
+  return /host refused the send/i.test(String(text ?? "")) ? SEND_REFUSED : text;
+}
