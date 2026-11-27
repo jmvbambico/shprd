@@ -863,7 +863,8 @@ fn tick_task(
     // A worker that handed in `completed` and then ended is finished, not dead:
     // its exit is the normal one, so nothing is handed off and no stop is told.
     if process_exited && handed_in_completed(events, &task.id, attempt.n) {
-        let message = finished_exit_message(mux, pane.as_ref());
+        let asked = shprd_asked_to_quit(events, &task.id, attempt.n);
+        let message = finished_exit_message(mux, pane.as_ref(), asked);
         // Recorded once: the next tick finds the line and stays quiet.
         if !exit_recorded_for(events, &task.id) {
             env.ctx.commit(EventKind::TaskStatus {
@@ -1158,8 +1159,8 @@ fn handed_in_completed(events: &[Event], task: &str, attempt: u32) -> bool {
 const FINISHED_EXIT_PREFIX: &str = "worker finished after a completed hand-in";
 
 /// The line recorded when a worker that handed in `completed` has ended: the
-/// exit code when the host knows it, and that the watch did not ask for it.
-fn finished_exit_message(mux: &dyn Host, pane: Option<&PaneId>) -> String {
+/// exit code when the host knows it, and whether shprd asked it to quit.
+fn finished_exit_message(mux: &dyn Host, pane: Option<&PaneId>, asked: bool) -> String {
     let code = pane
         .and_then(|pane| mux.exit_of(pane).ok().flatten())
         .and_then(|outcome| outcome.exit_code)
@@ -1167,7 +1168,30 @@ fn finished_exit_message(mux: &dyn Host, pane: Option<&PaneId>) -> String {
             || String::from("no exit code"),
             |code| format!("exit {code}"),
         );
-    format!("{FINISHED_EXIT_PREFIX}; {code}; the watch did not ask it to quit")
+    format!(
+        "{FINISHED_EXIT_PREFIX}; {code}; {}",
+        quit_request_note(asked)
+    )
+}
+
+/// The recorded fact of whether shprd asked the worker to quit.
+fn quit_request_note(asked: bool) -> &'static str {
+    if asked {
+        "shprd asked it to quit"
+    } else {
+        "shprd did not ask it to quit"
+    }
+}
+
+/// Whether shprd stopped this attempt's agent itself (the `task.stop` verb,
+/// recorded as `TaskStopped`), as opposed to the worker ending on its own.
+fn shprd_asked_to_quit(events: &[Event], task: &str, attempt: u32) -> bool {
+    events.iter().any(|event| {
+        matches!(
+            &event.kind,
+            EventKind::TaskStopped { task: id, attempt: n } if id == task && *n == attempt
+        )
+    })
 }
 
 /// Whether a finished worker's exit is already on the log for `task`.
@@ -4225,12 +4249,36 @@ project_dirs = []
             },
         };
         assert!(!exit_recorded_for(&[], "T1"));
-        let line = format!("{FINISHED_EXIT_PREFIX}; exit 0; the watch did not ask it to quit");
+        let line = format!(
+            "{FINISHED_EXIT_PREFIX}; exit 0; {}",
+            quit_request_note(false)
+        );
         assert!(exit_recorded_for(&[status("T1", line.clone())], "T1"));
         assert!(!exit_recorded_for(&[status("T2", line)], "T1"));
         assert!(!exit_recorded_for(
             &[status("T1", "reading code".to_string())],
             "T1"
         ));
+    }
+
+    /// The finished-exit line says whether shprd asked the worker to quit.
+    #[test]
+    fn the_finished_exit_line_records_whether_shprd_asked() {
+        let stopped = |task: &str, attempt: u32| Event {
+            seq: 3,
+            at_ms: 1_700_000_000_000,
+            actor: Actor::Engine,
+            kind: EventKind::TaskStopped {
+                task: task.to_string(),
+                attempt,
+            },
+        };
+        assert!(!shprd_asked_to_quit(&[], "T1", 1));
+        assert!(shprd_asked_to_quit(&[stopped("T1", 1)], "T1", 1));
+        assert!(!shprd_asked_to_quit(&[stopped("T1", 1)], "T1", 2));
+        assert!(!shprd_asked_to_quit(&[stopped("T2", 1)], "T1", 1));
+        assert!(quit_request_note(true).contains("asked it to quit"));
+        assert!(quit_request_note(false).contains("did not ask"));
+        assert_ne!(quit_request_note(true), quit_request_note(false));
     }
 }

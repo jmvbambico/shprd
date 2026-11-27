@@ -23,7 +23,6 @@ use shprd_server::Coordinator;
 
 /// How many stop alarms in `repo`'s news memory were later contradicted by the
 /// task itself (the figure `shprd doctor` reports); zero when there is no memory.
-#[allow(dead_code)] // `shprd doctor` reads it; doctor.rs is outside this task's scope
 pub fn stops_contradicted(repo: &Path) -> u32 {
     std::fs::read_to_string(shprd_server::news::memory_path(repo))
         .ok()

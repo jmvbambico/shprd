@@ -152,7 +152,34 @@ fn build(home_flag: Option<&Path>, no_quota: bool) -> Report {
     }
     skills_section(&mut report, &facts, &specs, &clean, &detections);
     launch_env_section(&mut report, &facts, &clean);
+    news_section(&mut report, &facts);
     report
+}
+
+/// The news section: how many stop alarms the task later contradicted, a
+/// measure of how trustworthy "Agent stopped" has been.
+fn news_section(report: &mut Report, facts: &Facts) {
+    let section = report.section("News");
+    let Some(repo) = facts.repo.as_deref() else {
+        section.add(Level::Warn, "not inside a repository, so no news memory");
+        return;
+    };
+    let count = crate::cmd::live_news::stops_contradicted(repo);
+    let (level, text) = contradicted_stops_line(count);
+    section.add(level, text);
+}
+
+/// The doctor line for the contradicted-stop count: a warning when a stop alarm
+/// has been wrong, since that is a false "Agent stopped" the person saw.
+fn contradicted_stops_line(count: u32) -> (Level, String) {
+    if count == 0 {
+        (Level::Ok, String::from("0 stop alarms contradicted"))
+    } else {
+        (
+            Level::Warn,
+            format!("{count} stop alarm(s) contradicted by the task itself"),
+        )
+    }
 }
 
 /// What `run start` warns about: the programs that fail to start, and whether
@@ -1877,5 +1904,14 @@ mod tests {
         let (text, failed) = forge_text(&gh);
         assert!(!failed, "{text}");
         assert!(text.contains("has write access"), "{text}");
+    }
+
+    /// The contradicted-stop count shows on the page, warning when non-zero.
+    #[test]
+    fn the_contradicted_stop_count_is_shown() {
+        assert_eq!(contradicted_stops_line(0).0, Level::Ok);
+        let (level, text) = contradicted_stops_line(3);
+        assert_eq!(level, Level::Warn);
+        assert!(text.contains('3'));
     }
 }

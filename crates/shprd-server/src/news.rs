@@ -232,8 +232,7 @@ pub fn readings(
     snapshot
 }
 
-/// The reason the watch records when a worker's process is gone.
-const EXIT_REASON: &str = "agent process exited";
+use shprd_watch::machine::EXIT_REASON;
 
 /// Whether the newest thing the log says about `task` is its worker's process
 /// exit: a stop the watch saw, not one the news only inferred from a terminal
@@ -848,6 +847,13 @@ mod tests {
         }
     }
 
+    /// The reason the news recognises is the one constant the watch records, so
+    /// the two cannot drift apart.
+    #[test]
+    fn the_news_and_the_watch_share_one_exit_reason() {
+        assert_eq!(EXIT_REASON, shprd_watch::machine::EXIT_REASON);
+    }
+
     /// A recorded process exit is a confirmed stop; a later status line from
     /// the same task is proof of life that takes the confirmation back.
     #[test]
@@ -857,7 +863,7 @@ mod tests {
             from_agent: String::from("claude"),
             to_agent: String::from("claude"),
             checkpoint: String::new(),
-            reason: Some(String::from("agent process exited")),
+            reason: Some(String::from(EXIT_REASON)),
         };
         let line = EventKind::TaskStatus {
             task: String::from("A"),
