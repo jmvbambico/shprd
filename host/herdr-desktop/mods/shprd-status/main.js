@@ -140,8 +140,17 @@ export default class Status extends View {
   }
 
   /** Opens the oldest waiting item at its card. */
-  goToNeed() {
-    const card = oldestCard(this.state);
+  async goToNeed() {
+    // The asks come from their own endpoint, not the board: read them now so an
+    // ask that is the oldest waiting item is not skipped. A failed read falls
+    // back to what the board alone lists.
+    let asks = null;
+    try {
+      asks = (await this.client?.asks()) ?? null;
+    } catch {
+      asks = null;
+    }
+    const card = oldestCard(this.state, asks);
     if (card) {
       const title = (this.state?.tasks ?? []).find((task) => task.id === card.task)?.title ?? "";
       showCard(card, title, spaceIndex(spaces()).coordinator);

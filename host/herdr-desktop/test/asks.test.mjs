@@ -312,6 +312,11 @@ test("oldestCard is the first waiting item, a notice only when nothing else wait
   assert.equal(oldestCard({ asks: [], needs: [{ seq: 1, task: null, body: "plain decision", kind: "decision" }] }).task, null);
 });
 
+test("oldestCard reads the open asks list it is given, not only the board's", () => {
+  const board = { asks: [], needs: [{ seq: 2, task: "T9", body: "later", kind: "decision" }] };
+  assert.equal(oldestCard(board, { asks: [ASK("a1", "T1")] }).task, "T1");
+});
+
 test("stripItems has one item per task with Open or the single button", () => {
   assert.deepEqual(stripItems([]), []);
   const list = cards({ needs: [] }, { asks: [ASK("a1", "T1"), ASK("a2", "T1"), ASK("a3", "T2", ["go"]), ASK("a4", null)] });
