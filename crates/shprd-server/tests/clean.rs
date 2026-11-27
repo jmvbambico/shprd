@@ -273,6 +273,32 @@ impl Fixture {
         self.worker().tick().expect("the pass runs");
     }
 
+    /// Runs passes until `done` holds. A pass that finds the run's lock still
+    /// held skips its cleanup and tries again on the next pass (a git child that
+    /// another test thread forked can keep a just-released lock for a moment
+    /// under load), so a test waits for the effect rather than counting passes.
+    fn passes_until(&self, what: &str, done: impl Fn(&Fixture) -> bool) {
+        for _ in 0..200 {
+            self.pass();
+            if done(self) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        panic!("never reached: {what}");
+    }
+
+    /// The most passes in a row any failing step has now failed.
+    fn failed_passes(&self) -> u32 {
+        let dir = shprd_server::state_dir(&shprd_server::state_home(&self.home, None));
+        shprd_server::clean::CleanFailures::read(&dir, &self.repo)
+            .failures
+            .iter()
+            .map(|failure| failure.passes)
+            .max()
+            .unwrap_or(0)
+    }
+
     fn branch_exists(&self, branch: &str) -> bool {
         let out = Command::new("git")
             .current_dir(&self.repo)
@@ -320,15 +346,7 @@ fn a_landed_task_is_cleaned_once_its_windows_have_closed() {
     // Gone: the next pass removes the worktree (dirty, with its build output),
     // archives and deletes the branch.
     fixture.windows.live.lock().unwrap().clear();
-    fixture.pass();
-    assert!(
-        !path.exists(),
-        "the worktree is gone: {:?}",
-        shprd_server::clean::CleanFailures::read(
-            &shprd_server::state_dir(&shprd_server::state_home(&fixture.home, None)),
-            &fixture.repo
-        )
-    );
+    fixture.passes_until("the worktree is removed", |_| !path.exists());
     assert!(!fixture.branch_exists(&branch), "the branch is deleted");
     assert!(
         fixture.archive_refs().contains("refs/shprd/archive/r1/T1"),
@@ -357,8 +375,7 @@ fn a_dropped_task_is_cleaned_too() {
     let fixture = Fixture::new();
     let (path, branch) = fixture.task("T1");
     fixture.drop_task("T1");
-    fixture.pass();
-    assert!(!path.exists());
+    fixture.passes_until("the worktree is removed", |_| !path.exists());
     assert!(!fixture.branch_exists(&branch));
 }
 
@@ -396,20 +413,11 @@ fn a_failed_removal_is_retried_and_then_carded_once() {
     // A folder nothing can be deleted from: git and the filesystem both refuse.
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o555)).expect("chmod");
 
-    fixture.pass();
-    fixture.pass();
+    fixture.passes_until("two failures", |f| f.failed_passes() >= 2);
     assert!(fixture.cards().is_empty(), "two failures are only retried");
-    fixture.pass();
+    fixture.passes_until("three failures", |f| f.failed_passes() >= 3);
     let cards = fixture.cards();
-    assert_eq!(
-        cards.len(),
-        1,
-        "the third failure is one card: {cards:?} {:?}",
-        shprd_server::clean::CleanFailures::read(
-            &shprd_server::state_dir(&shprd_server::state_home(&fixture.home, None)),
-            &fixture.repo
-        )
-    );
+    assert_eq!(cards.len(), 1, "the third failure is one card: {cards:?}");
     assert!(
         cards[0].contains(&path.display().to_string()),
         "the card names the path: {}",
@@ -424,14 +432,13 @@ fn a_failed_removal_is_retried_and_then_carded_once() {
             .iter()
             .all(|escalation| escalation.task.is_none())
     );
-    fixture.pass();
+    fixture.passes_until("a fourth failure", |f| f.failed_passes() >= 4);
     assert_eq!(fixture.cards().len(), 1, "it is not raised again");
     assert!(path.exists(), "still there, and still tried");
 
     // Once the path is free the retry succeeds.
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-    fixture.pass();
-    assert!(!path.exists(), "the retry removed it");
+    fixture.passes_until("the retry removes it", |_| !path.exists());
 }
 
 #[test]
