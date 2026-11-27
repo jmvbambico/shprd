@@ -24,7 +24,9 @@ import { keys, run, spaces, theme, window } from "herdr";
 
 import { adoptCache, attach, downNotice, forgetAll, reason, remember, singleFlight, syncRepo, watchSwitch } from "./lib/client.js";
 import { counts, lastFailure, runShort, since } from "./lib/board.js";
-import { badge, countBadge, icon } from "./lib/panel.js";
+import { oldestCard } from "./lib/asks.js";
+import { spaceIndex } from "./lib/spaces.js";
+import { badge, countBadge, icon, showCard } from "./lib/panel.js";
 import { RADIUS, TEXT, tone } from "./lib/tokens.js";
 import { followChanges } from "./lib/watch.js";
 
@@ -137,6 +139,19 @@ export default class Status extends View {
     return key ? `${key}  Commands` : "Commands";
   }
 
+  /** Opens the oldest waiting item at its card. */
+  goToNeed() {
+    const card = oldestCard(this.state);
+    if (card) {
+      const title = (this.state?.tasks ?? []).find((task) => task.id === card.task)?.title ?? "";
+      showCard(card, title, spaceIndex(spaces()).coordinator);
+      return;
+    }
+    // A needs-you task whose card the service does not list yet: its thread.
+    const task = (this.state?.tasks ?? []).find((entry) => entry?.derived?.status === "needs_you");
+    if (task) showCard({ task: task.id }, task.title ?? "");
+  }
+
   /** An icon and its words, as Shepherdr's bar writes a machine and a branch. */
   label(t, name, text, color) {
     return h_flex()
@@ -180,9 +195,18 @@ export default class Status extends View {
       .when(live && need > 0, (el) =>
         el.child(
           h_flex()
+            .id("status-needs")
             .flex_none()
             .gap(6)
             .items_center()
+            .px(6)
+            .h(20)
+            .rounded(RADIUS.control)
+            .cursor_pointer()
+            .hover((style) => style.bg(t.hover).text_color(t.foreground))
+            // Takes you to the oldest waiting item: its task's chat, or the
+            // coordinator's for a decision of the whole run.
+            .on_click(() => this.goToNeed())
             .child(badge(t, countBadge(need), colors.red, colors.on))
             .child(div().child("Needs you")),
         ),

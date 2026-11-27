@@ -300,3 +300,22 @@ test("asks the service gives one key are one card, and a choice reads as written
   const apart = cards({ needs: [] }, { asks: asks.asks.map(({ key, ...rest }) => rest) });
   assert.equal(apart.length, 2);
 });
+
+import { STRIP_OPEN, oldestCard, stripItems } from "../mods/lib/asks.js";
+
+const ASK = (id, task, options = ["yes", "no"]) => ({ id, task, text: `q ${id}`, options, kind: "question", created_at_ms: 1 });
+
+test("oldestCard is the first waiting item, a notice only when nothing else waits", () => {
+  assert.equal(oldestCard({ asks: [], needs: [] }), null);
+  const state = { asks: [ASK("a1", "T1"), ASK("a2", null)], needs: [] };
+  assert.equal(oldestCard(state).task, "T1");
+  assert.equal(oldestCard({ asks: [], needs: [{ seq: 1, task: null, body: "plain decision", kind: "decision" }] }).task, null);
+});
+
+test("stripItems has one item per task with Open or the single button", () => {
+  assert.deepEqual(stripItems([]), []);
+  const list = cards({ needs: [] }, { asks: [ASK("a1", "T1"), ASK("a2", "T1"), ASK("a3", "T2", ["go"]), ASK("a4", null)] });
+  const items = stripItems(list, new Map([["T1", "one"]]));
+  assert.deepEqual(items.map((i) => [i.task, i.label]), [["T1", STRIP_OPEN], ["T2", "go"]]);
+  assert.equal(items[1].button.answer, "go");
+});

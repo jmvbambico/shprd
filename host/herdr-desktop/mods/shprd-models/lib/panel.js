@@ -477,6 +477,26 @@ export function openThread(p, view = "chat") {
   run("layout.show", { id: "panel" });
 }
 
+/** The shared key the chat reads to scroll to a waiting card (`{space, at}`). */
+export const FOCUS_KEY = "shprd.chat.focus";
+
+/**
+ * Takes the person to a waiting card: a task's card opens that task's thread on
+ * Chat, a run-wide one (no task) shows the coordinator's space; the chat there
+ * scrolls to the card and outlines it (`shprd.chat.focus`). `coordinator` is that
+ * space (`{id}`), which the caller finds with `spaceIndex`.
+ */
+export function showCard(card, title = "", coordinator = null) {
+  if (!card) return;
+  if (card.task) {
+    setShared(FOCUS_KEY, { space: card.task, at: Date.now() });
+    openThread({ task: card.task, title }, "chat");
+    return;
+  }
+  setShared(FOCUS_KEY, { space: "coordinator", at: Date.now() });
+  if (coordinator) run("space.select", { id: coordinator.id });
+}
+
 /**
  * Opens the New task form from anywhere, with no toast.
  *

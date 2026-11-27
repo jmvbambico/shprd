@@ -1017,3 +1017,10 @@ test("a question answered but still pending after the grace comes back", async (
     Date.now = realNow;
   }
 });
+
+import { SEND_REFUSED, sendWords } from "../mods/lib/chat.js";
+
+test("a host-refused send reads as plain words", () => {
+  assert.equal(sendWords("this host refused the send: not allowed"), SEND_REFUSED);
+  assert.equal(sendWords("the service did not answer"), "the service did not answer");
+});
