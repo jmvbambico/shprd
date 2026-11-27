@@ -29,7 +29,7 @@
 // every mod folder that imports it. Edit the source, never a copy.
 
 import { NEED, STATUS_ORDER, desktopWords, roleTitle, status as statusOf } from "./tokens.js";
-import { NO_TASKS, counts, isLive, progressOf, secondLine } from "./board.js";
+import { NO_TASKS, counts, isLive, newestDecision, progressOf, secondLine } from "./board.js";
 
 /** The id a coordinator row carries, so a click and a test name the same thing. */
 export const COORDINATOR_ID = "coordinator";
@@ -231,7 +231,7 @@ export function coordinatorRow(state, space = null) {
 export function needWords(task, state) {
   const need = task?.derived?.need;
   if (!need) return null;
-  const card = (state?.needs ?? []).find((entry) => entry?.task === task?.id);
+  const card = newestDecision(state, task?.id);
   if (card?.body) return desktopWords(card.body, task?.id);
   if (task?.derived?.reason) return desktopWords(task.derived.reason, task?.id);
   return NEED[need] ?? null;

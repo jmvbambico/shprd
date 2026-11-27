@@ -27,6 +27,7 @@
 // Shared: the source is `mods/lib/toasts.js`; `bin/sync-shared` copies it into
 // every mod folder that imports it. Edit the source, never a copy.
 
+import { newestDecision } from "./board.js";
 import { desktopWords, roleRename } from "./tokens.js";
 
 /** How many toasts are on screen at once (`core/toasts.js:11`). */
@@ -114,7 +115,7 @@ function landedBody(state, taskId) {
 
 /** The card a task's needs-you toast says, when the service has one. */
 function needBody(state, taskId) {
-  const card = (state?.needs ?? []).find((entry) => entry?.task === taskId);
+  const card = newestDecision(state, taskId);
   if (card?.body) return clip(desktopWords(card.body, taskId));
   const task = (state?.tasks ?? []).find((entry) => entry?.id === taskId);
   if (task?.derived?.reason) return clip(desktopWords(task.derived.reason, taskId));

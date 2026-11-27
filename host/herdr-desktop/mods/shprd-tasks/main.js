@@ -799,7 +799,7 @@ export default class Tasks extends View {
               : t.muted;
     // The same act pill as the list's row.
     const task = (this.state?.tasks ?? []).find((entry) => entry.id === row.id);
-    const acts = task ? rowActions(task) : [];
+    const acts = task ? rowActions(task, this.state) : [];
     return h_flex()
       .id(`graph-${row.id}`)
       .h(26)
@@ -1201,7 +1201,7 @@ export default class Tasks extends View {
   /** One task: a two-line row, its glyph at the left, the act at the end. */
   taskRow(t, colors, task) {
     const shape = look(task);
-    const acts = rowActions(task);
+    const acts = rowActions(task, this.state);
     const left = v_flex()
       .gap(2)
       .child(
@@ -1288,7 +1288,8 @@ export default class Tasks extends View {
       cx.stop_propagation();
       if (this.busy.has(task.id) || (task.pending && task.pending.kind !== "review")) return;
       // Review is the card, as a dialog: the panel underneath stays as it was.
-      if (act.action === null) {
+      if (act.id === "answer") this.open(task);
+      else if (act.action === null) {
         this.busy.set(task.id, { id: act.id, label: "Opening…" });
         // The row says "Reviewing…" in every pane until the card is closed.
         if (act.id === "review") startReview(task, this.client?.folder ?? null);
