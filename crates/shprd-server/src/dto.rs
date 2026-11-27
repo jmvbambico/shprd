@@ -301,6 +301,14 @@ pub struct TaskDto {
     /// offered although its status is still failed.
     #[serde(default)]
     pub accepted_failure: bool,
+    /// Why landing would refuse this task right now (`rules::ready_to_land`):
+    /// no passing review, a failing hand-in check, a failed gate. Absent when
+    /// the task would land, or has already landed or been dropped. The Accept
+    /// button is offered disabled with this reason rather than recording an
+    /// approval that landing then refuses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub accept_blocked: Option<String>,
     /// When the task was added, ms since the Unix epoch.
     ///
     /// A board shows the newest work first and folds a run's old leftovers out

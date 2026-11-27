@@ -1060,6 +1060,16 @@ test("a failed task a person accepted offers Accept", () => {
   assert.equal(verbs(accepted, "checks").accept, false);
 });
 
+test("Accept is offered disabled, with the reason, where landing would refuse", () => {
+  const why = "T2 was handed in but no review was requested";
+  const blocked = { ...boardTask("T2"), accept_blocked: why };
+  const offered = verbs(blocked, "ask");
+  assert.equal(offered.accept, true, "the button is still on the card");
+  assert.equal(offered.acceptBlocked, why);
+  assert.match(offered.note, /Can't accept yet: T2 was handed in/);
+  assert.equal(verbs(boardTask("T2"), "ask").acceptBlocked, null);
+});
+
 test("the card offers Accept only where a merge policy asks", () => {
   const ready = boardTask("T2");
   assert.equal(verbs(ready, "ask").accept, true);
@@ -1098,7 +1108,7 @@ test("the card offers Accept only where a merge policy asks", () => {
   });
   // A landed or dropped task is not a decision any more.
   for (const id of ["T1", "T4"]) {
-    assert.deepEqual(verbs(boardTask(id), "ask"), { accept: false, sendBack: false, drop: false, note: null });
+    assert.deepEqual(verbs(boardTask(id), "ask"), { accept: false, acceptBlocked: null, sendBack: false, drop: false, note: null });
   }
   assert.equal(whereNow(boardTask("T1")), "Landed: its work is in the base branch.");
   assert.equal(whereNow(boardTask("T4")), "Landed: its work is in the base branch.");

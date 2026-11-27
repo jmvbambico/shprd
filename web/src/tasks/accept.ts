@@ -232,6 +232,8 @@ export function reviewLine(task: TaskDto | null): { line: string; degraded: bool
 /** What the card's footer offers. */
 export interface Verbs {
   accept: boolean;
+  /** Why landing would refuse the task now; Accept is then shown disabled. */
+  acceptBlocked: string | null;
   sendBack: boolean;
   drop: boolean;
   note: string | null;
@@ -245,15 +247,19 @@ export function verbs(task: TaskDto | null, policy: string | null): Verbs {
   const status = task?.status;
   const live = status !== "integrated" && status !== "dropped";
   if (!task || !live) {
-    return { accept: false, sendBack: false, drop: false, note: null };
+    return { accept: false, acceptBlocked: null, sendBack: false, drop: false, note: null };
   }
   const reviewed = status === "passed" || task.derived.status === "ready";
+  const accept = reviewed && asksFirst(policy);
+  const acceptBlocked = accept ? (task.accept_blocked ?? null) : null;
   return {
-    accept: reviewed && asksFirst(policy),
+    accept,
+    acceptBlocked,
     sendBack: status === "failed",
     drop: live,
-    note:
-      reviewed && !asksFirst(policy)
+    note: acceptBlocked
+      ? `Can't accept yet: ${acceptBlocked}`
+      : reviewed && !asksFirst(policy)
         ? `tasks.merge is ${policy}: ${task.id} lands without an approval`
         : null,
   };

@@ -25,6 +25,15 @@ pub enum CardKind {
     Notice,
 }
 
+/// The part of a repeated-failure card's body that names the task, step and
+/// attempt (up to and including the attempt's closing parenthesis), which is
+/// what makes two such cards the same failure; what follows is the error.
+fn repeated_failure_family(body: &str) -> Option<&str> {
+    let at = body.find(" step has failed the same way ")?;
+    let close = body[at..].find("): ")? + at;
+    Some(&body[..close])
+}
+
 /// The ids a card's actions are drawn from, in the order a client offers them.
 pub mod action {
     /// Open the accept dialog for the task.
@@ -207,6 +216,19 @@ pub fn card_at(state: &RunState, escalation: &Escalation, now_ms: u64) -> Option
         && task
             .latest_attempt()
             .is_some_and(|latest| latest.n > attempt)
+    {
+        return None;
+    }
+    // One failure that repeats is one card: only the newest of a task's
+    // `failed the same way` cards for one step and attempt is drawn, so a run
+    // of identical failures reads as one card that updates in place rather than
+    // one new needs-you card per pass.
+    if let Some(family) = repeated_failure_family(&escalation.body)
+        && state.escalations.iter().any(|later| {
+            later.seq > escalation.seq
+                && later.task == escalation.task
+                && repeated_failure_family(&later.body) == Some(family)
+        })
     {
         return None;
     }
@@ -1205,5 +1227,38 @@ mod tests {
         // Ready to land is about the task's work, not an attempt, so it stays.
         let ready = raised(5, "T1 is ready to land: Review and Accept it", "wait");
         assert!(card_at(&state, &ready, 0).is_some());
+    }
+
+    #[test]
+    fn a_failure_that_repeats_is_one_card_that_updates_in_place() {
+        // The same step failing the same way raises a card each time the error
+        // text moves; the board draws only the newest, never one per pass.
+        let first = raised(
+            5,
+            "T1: its `land` step has failed the same way 3 passes in a row (attempt 1): no remote at 10:01",
+            "retry",
+        );
+        let second = raised(
+            9,
+            "T1: its `land` step has failed the same way 3 passes in a row (attempt 1): no remote at 10:02",
+            "retry",
+        );
+        let other_step = raised(
+            11,
+            "T1: its `start` step has failed the same way 3 passes in a row (attempt 1): x",
+            "retry",
+        );
+        let mut state = run_with(TaskStatus::Failed);
+        state.escalations = vec![first.clone(), second.clone(), other_step.clone()];
+        assert!(
+            card_at(&state, &first, 0).is_none(),
+            "the older repeat folds away"
+        );
+        let newest = card_at(&state, &second, 0).expect("the newest repeat is the card");
+        assert!(newest.body.contains("10:02"), "{}", newest.body);
+        assert!(
+            card_at(&state, &other_step, 0).is_some(),
+            "a different step is a card of its own"
+        );
     }
 }

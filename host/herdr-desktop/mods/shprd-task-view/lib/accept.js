@@ -313,7 +313,7 @@ export function reviewLine(task) {
 export function verbs(task, policy, changes = null) {
   const status = task?.status;
   const live = status !== "integrated" && status !== "dropped";
-  if (!live) return { accept: false, sendBack: false, drop: false, note: null };
+  if (!live) return { accept: false, acceptBlocked: null, sendBack: false, drop: false, note: null };
   // Accept is for work that has been decided: a review that passed, which is
   // what `passed` and the Ready word mean. A hand-in nobody has reviewed yet is
   // not a decision waiting for the person, and an approval there would be a
@@ -326,15 +326,21 @@ export function verbs(task, policy, changes = null) {
   // person's Accept whatever the merge policy (`protected` in its changes).
   const waits = asksFirst(policy) || protectedLine(changes) !== null;
   const accept = reviewed && waits;
-  const note = reviewed && !waits
-    ? `tasks.merge is ${policy}: ${task?.id ?? "it"} lands without an approval`
-    : null;
+  // Landing would refuse this task now (no review, a failing check, a failed
+  // gate): Accept stays on the card but disabled, with the reason, because an
+  // approval recorded here is one landing then refuses.
+  const blocked = accept && typeof task?.accept_blocked === "string" ? task.accept_blocked : null;
+  const note = blocked
+    ? `Can't accept yet: ${blocked}`
+    : reviewed && !waits
+      ? `tasks.merge is ${policy}: ${task?.id ?? "it"} lands without an approval`
+      : null;
   // A send-back is a spawn, and the rules refuse one while the task is not
   // failed: a "send back" on work in progress would spawn a second attempt at a
   // task that already has one.
   const sendBack = status === "failed";
   const drop = live;
-  return { accept, sendBack, drop, note };
+  return { accept, acceptBlocked: blocked, sendBack, drop, note };
 }
 
 /** Where a task the card can no longer accept is now, calmly. */

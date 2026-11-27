@@ -177,9 +177,21 @@ pub(crate) fn task_of(state: &RunState, task: &shprd_core::state::Task, now_ms: 
             .map(|word| word.trim().to_string())
             .filter(|word| !word.is_empty()),
         accepted_failure: shprd_core::rules::accepted_after_failure(task),
+        accept_blocked: accept_blocked(task),
         added_at_ms: task.added_at_ms,
         touched_at_ms: task.touched_at_ms,
     }
+}
+
+/// Why landing would refuse a live task now, in the rule's own words.
+fn accept_blocked(task: &shprd_core::state::Task) -> Option<String> {
+    use shprd_core::state::TaskStatus;
+    if matches!(task.status, TaskStatus::Integrated | TaskStatus::Dropped) {
+        return None;
+    }
+    shprd_core::rules::ready_to_land(task)
+        .err()
+        .map(|err| err.to_string())
 }
 
 /// One task's pull request, as its card draws it.
@@ -411,6 +423,62 @@ mod tests {
         assert!(after.tasks[0].accepted_failure);
         let task = run.tasks.get("T1").expect("T1");
         assert!(shprd_core::rules::accepted_after_failure(task));
+    }
+
+    #[test]
+    fn accept_is_blocked_with_the_reason_when_landing_would_refuse() {
+        // The T1 shape of jmanager run r1795398983: a hand-in no reviewer has
+        // looked at is not ready to land, so Accept is offered disabled with
+        // the rule's reason instead of recording an approval landing refuses.
+        let mut events = task_events();
+        for (seq, kind) in [
+            (
+                3,
+                EventKind::Spawned {
+                    task: "T1".to_string(),
+                    attempt: 1,
+                    agent: "claude".to_string(),
+                    model: None,
+                    worktree: "/wt".to_string(),
+                    branch: "b".to_string(),
+                },
+            ),
+            (
+                4,
+                EventKind::Reported {
+                    task: "T1".to_string(),
+                    attempt: 1,
+                    status: shprd_core::event::ReportStatus::Completed,
+                    summary: "done".to_string(),
+                    tests: Vec::new(),
+                    checks: vec![shprd_core::event::CheckReport::passed(
+                        "lint",
+                        "npm run lint",
+                    )],
+                    changed_paths: Vec::new(),
+                    commit: None,
+                    skills_used: Vec::new(),
+                    proofs: Vec::new(),
+                },
+            ),
+        ] {
+            events.push(Event {
+                seq,
+                at_ms: NOW,
+                actor: Actor::Engine,
+                kind,
+            });
+        }
+        let run = RunState::fold(&events).expect("folds");
+        let task = run.tasks.get("T1").expect("T1");
+        let expected = shprd_core::rules::ready_to_land(task)
+            .expect_err("no review was requested")
+            .to_string();
+        let board = snapshot(&run, NOW);
+        assert_eq!(
+            board.tasks[0].accept_blocked.as_deref(),
+            Some(expected.as_str())
+        );
     }
 
     #[test]
