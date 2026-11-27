@@ -356,8 +356,20 @@ const REVIEWER_M11_PRE_DECISIONS: &str =
 const REVIEWER_M11_PRE_DECISIONS_DIGEST: &str =
     "b6acca26b2baeaff73d81987fdad635f97b9244494fbd96c0620345be1e81dde";
 
+/// The reviewer wording before it said what a finding may and may not be about:
+/// worker-operation lines, a missing screenshot and unanswered asks were filed
+/// as blocking defects.
+#[cfg(test)]
+const REVIEWER_M11_PRE_BLOCKING: &str =
+    include_str!("../../../data/templates/history/reviewer-m11-pre-blocking.md");
+
+/// The SHA-256 of [`REVIEWER_M11_PRE_BLOCKING`].
+const REVIEWER_M11_PRE_BLOCKING_DIGEST: &str =
+    "f87b60fe4db2564b63bc4818a5fde968b8517feff25e0472ab3a1947da1ce424";
+
 /// The reviewer's retired defaults.
 const REVIEWER_OLD: &[&str] = &[
+    REVIEWER_M11_PRE_BLOCKING_DIGEST,
     REVIEWER_M11_PRE_DECISIONS_DIGEST,
     REVIEWER_M9_ASKS_DIGEST,
     REVIEWER_PRE_IDENTITY_DIGEST,
