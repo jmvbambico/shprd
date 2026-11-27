@@ -226,6 +226,32 @@ fn task_add(id: &str) -> Value {
 }
 
 #[tokio::test]
+async fn a_task_added_without_an_id_gets_the_next_short_one() {
+    let fixture = Fixture::new();
+    let add = |extra: Value| {
+        let mut body = json!({
+            "kind": "task.add", "title": "untitled", "acceptance": ["it works"],
+        });
+        if let (Some(body), Some(extra)) = (body.as_object_mut(), extra.as_object()) {
+            body.extend(extra.clone());
+        }
+        fixture.send(
+            Call::post("/api/action", body)
+                .with_token(&fixture.token)
+                .with_write_header(),
+        )
+    };
+    let first = add(json!({})).await;
+    assert_eq!(first.status, StatusCode::OK);
+    assert_eq!(first.json()["task"]["id"], json!("T1"));
+    // A given id is kept, and a long one never blocks the counter.
+    let given = add(json!({"task": "long-slug"})).await;
+    assert_eq!(given.json()["task"]["id"], json!("long-slug"));
+    let second = add(json!({})).await;
+    assert_eq!(second.json()["task"]["id"], json!("T2"));
+}
+
+#[tokio::test]
 async fn health_answers_the_handshake_without_a_token() {
     let fixture = Fixture::new();
     let reply = fixture.send(Call::get("/api/health")).await;

@@ -12,6 +12,35 @@ use crate::baseline::BaselineEntry;
 /// Identifies a task inside a run.
 pub type TaskId = String;
 
+/// The next free short task id, `T<n>`, for a log that holds `events`.
+///
+/// It is one more than the highest `T<n>` any `TaskAdded` event already names,
+/// and is bumped past any id in use, so a long id a person gave never blocks
+/// it. Ids that are not `T<digits>` are ignored when counting.
+pub fn next_task_id(events: &[Event]) -> TaskId {
+    let used: std::collections::HashSet<&str> = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::TaskAdded { task, .. } => Some(task.as_str()),
+            _ => None,
+        })
+        .collect();
+    let mut n = used
+        .iter()
+        .filter_map(|id| id.strip_prefix('T')?.parse::<u64>().ok())
+        .max()
+        .map_or(1, |highest| highest.saturating_add(1));
+    while used.contains(format!("T{n}").as_str()) {
+        n = n.saturating_add(1);
+    }
+    format!("T{n}")
+}
+
+/// How an attempt is named for a person: `<id>·a<n>`, e.g. `T3·a2`.
+pub fn attempt_label(task: &str, attempt: u32) -> String {
+    format!("{task}·a{attempt}")
+}
+
 /// Identifies an agent (a worker slot in the roster).
 pub type AgentId = String;
 
@@ -963,6 +992,38 @@ impl EventKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn added(seq: u64, id: &str) -> Event {
+        Event {
+            seq,
+            at_ms: seq,
+            actor: Actor::Human,
+            kind: EventKind::TaskAdded {
+                task: id.to_string(),
+                title: "t".to_string(),
+                scope: Vec::new(),
+                acceptance: vec!["ok".to_string()],
+                tags: Vec::new(),
+                skills: Vec::new(),
+                deps: Vec::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn the_next_task_id_is_one_past_the_highest_short_id() {
+        assert_eq!(next_task_id(&[]), "T1");
+        let log = [added(1, "T1"), added(2, "long-slug"), added(3, "T7")];
+        assert_eq!(next_task_id(&log), "T8");
+        // A long id never blocks, and an id in use is skipped.
+        assert_eq!(next_task_id(&[added(1, "M1.6")]), "T1");
+    }
+
+    #[test]
+    fn an_attempt_reads_as_the_task_id_and_a_number() {
+        assert_eq!(attempt_label("T3", 2), "T3·a2");
+        assert_eq!(attempt_label("long-slug", 1), "long-slug·a1");
+    }
 
     fn to_json<T: Serialize>(value: &T) -> String {
         match serde_json::to_string(value) {

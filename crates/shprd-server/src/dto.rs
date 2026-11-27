@@ -980,8 +980,11 @@ pub enum Action {
     /// one separator.
     #[serde(rename = "task.add")]
     TaskAdd {
-        /// Task id, e.g. `M1.6`.
-        task: String,
+        /// Task id, e.g. `M1.6`. Left out, the service assigns the next free
+        /// `T<n>` and the reply's `task` carries it.
+        #[serde(default)]
+        #[ts(optional)]
+        task: Option<String>,
         /// One-line title.
         title: String,
         /// Repo-relative path the task may change.
@@ -2059,7 +2062,7 @@ mod tests {
 
     fn task_add() -> Action {
         Action::TaskAdd {
-            task: "T1".to_string(),
+            task: Some("T1".to_string()),
             title: "t".to_string(),
             scope: vec!["crates/a".to_string()],
             acceptance: vec!["works".to_string()],

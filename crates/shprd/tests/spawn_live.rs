@@ -179,7 +179,7 @@ project_dirs = []
     let out = String::from_utf8_lossy(&spawned.stdout).to_string();
     let warning = String::from_utf8_lossy(&spawned.stderr).to_string();
     assert!(spawned.status.success(), "spawn failed: {warning}");
-    assert!(out.contains("ok spawned M4.4 attempt 1"), "{out}");
+    assert!(out.contains("ok spawned M4.4·a1"), "{out}");
     // The spec has no system-prompt flag, so the brief is typed in, and herdr
     // only prompts a pane it has detected as an agent. Nobody detected this
     // shell, so the spawn says so and stays successful.

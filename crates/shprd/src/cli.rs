@@ -1002,9 +1002,10 @@ pub struct TaskStatusArgs {
 /// Arguments for `agent task add`.
 #[derive(Debug, Args)]
 pub struct TaskAddArgs {
-    /// Task id, e.g. `M1.6`.
+    /// Task id, e.g. `M1.6`. Leave it out and shprd assigns the next free
+    /// `T<n>` and prints it.
     #[arg(long, value_name = "ID")]
-    pub id: String,
+    pub id: Option<String>,
     /// One-line title.
     #[arg(long, value_name = "TITLE")]
     pub title: String,
