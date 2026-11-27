@@ -221,6 +221,9 @@ fn land_task(
     // Held from here to the merge: a spawn replacing the attempt meanwhile
     // would delete the branch under the push.
     let _lock = run_lock::lock_run(&home, &repo_name, &run_id)?;
+    // A landing goes through the forge, so the local copy of its target is
+    // brought back to origin's before anything lands.
+    integrate::realign_with_remote(&ctx.root, &base);
     let body_file = write_task_body(&home, &run_id, task_id, &body)?;
     let landing = land::Landing {
         task: task_id,
@@ -997,9 +1000,11 @@ fn forge(dir: &Path, gh_user: &str) -> Result<Box<dyn Forge>, CliError> {
 /// Whether a landing must take the local path instead of a forge.
 ///
 /// A repository with no remote has nowhere to push and no pull request to open,
-/// so it lands locally. So does one with a remote but no usable forge: `gh` is
-/// missing or signed out, and a landing that would fail at the first forge call
-/// can still put the work on the run's integration branch. A scripted forge in a
+/// so it lands locally. So does one whose remote is not at GitHub and has no
+/// forge `gh` can drive. A GitHub remote never lands locally, even when `gh` is
+/// missing or signed out: the landing then fails at the forge, because a merge
+/// in shprd's own worktree would move the local integration ref apart from
+/// origin and never reach GitHub. A scripted forge in a
 /// debug build is always usable, so the tests that drive one never take this
 /// path by accident.
 pub(crate) fn local_landing(git: &Git) -> bool {
@@ -1008,7 +1013,7 @@ pub(crate) fn local_landing(git: &Git) -> bool {
     {
         return !shprd_git::worktree::has_remote(git);
     }
-    !land::uses_forge(git, |host| gh_ready(git.dir(), host))
+    !(land::forge_expected(git) || land::uses_forge(git, |host| gh_ready(git.dir(), host)))
 }
 
 /// Whether `gh` is installed and signed in, asked in the repository it would
@@ -1052,6 +1057,20 @@ mod tests {
     use super::*;
     use shprd_core::event::{Actor, Finding, ReportStatus, ReviewSource, Severity};
     use shprd_core::rules::INTEGRATE_AFTER_FAILED_GATE;
+
+    /// A landing in a repository whose remote is at GitHub goes through the
+    /// forge, whether or not `gh` is signed in: it never takes the local path
+    /// that merged an override landing in shprd's own worktree.
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn a_github_remote_never_lands_locally_even_without_gh() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let git = Git::new(dir.path());
+        git.run(&["init", "-b", "main"]).expect("init");
+        git.run(&["remote", "add", "origin", "https://github.com/acme/w.git"])
+            .expect("remote");
+        assert!(!local_landing(&git));
+    }
 
     /// An event with `kind` at position `seq`.
     fn ev(seq: u64, kind: EventKind) -> Event {

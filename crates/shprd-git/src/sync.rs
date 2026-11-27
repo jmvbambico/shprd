@@ -158,6 +158,11 @@ pub fn freshest_base(git: &Git, base: &str) -> String {
     if local == remote {
         return base.to_string();
     }
+    // With a forge, origin is the truth: a local ref that is ahead of or apart
+    // from it is a landing that never reached the forge, not a base to cut from.
+    if crate::land::forge_expected(git) {
+        return remote;
+    }
     match git.run(&["merge-base", "--is-ancestor", &local, &remote]) {
         Ok(_) => remote,
         Err(_) => base.to_string(),
@@ -194,6 +199,18 @@ pub fn attempt_base(git: &Git, base: &str, branch: &str, fetch: bool) -> Result<
         refresh_base(git, base);
     }
     let tracking = format!("refs/remotes/{}", remote_ref(base));
+    // With a forge, origin's copy of the base is the one a diff is taken
+    // against: a stale or diverged local ref must not decide what is "the
+    // task's own". A branch the remote already holds falls through to the
+    // ladder below, which knows how to find where a merged branch was cut.
+    if crate::land::forge_expected(git)
+        && git.rev_parse(&tracking).is_ok()
+        && !is_ancestor(git, branch, &tracking)?
+        && let Ok(out) = git.run(&["merge-base", &tracking, branch])
+        && let Some(mb) = out.lines().next().map(str::trim).filter(|m| !m.is_empty())
+    {
+        return Ok(mb.to_string());
+    }
     let mut found: Vec<(String, bool)> = Vec::new();
     let mut first_err = None;
     for candidate in [base, tracking.as_str()] {

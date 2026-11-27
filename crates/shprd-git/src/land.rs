@@ -709,6 +709,30 @@ fn push_integration(git: &Git, branch: &str) {
     let _ = git.run(&["push", &remote, &format!("HEAD:refs/heads/{branch}")]);
 }
 
+/// Whether the repository has a remote at a GitHub host, where a landing must
+/// go through the forge whether or not `gh` answers right now.
+///
+/// A landing that cannot reach the forge fails; it never falls back to merging
+/// in a local worktree, which moves the local integration ref apart from the
+/// remote's.
+pub fn forge_expected(git: &Git) -> bool {
+    // The configured URL, not `get-url`: a `url.<base>.insteadOf` rewrite is
+    // a transport detail, and the remote still names GitHub.
+    let Ok(names) = git.run(&["remote"]) else {
+        return false;
+    };
+    names
+        .lines()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .filter_map(|name| {
+            git.run(&["config", "--get", &format!("remote.{name}.url")])
+                .ok()
+        })
+        .filter_map(|url| crate::worktree::host_of_url(&url))
+        .any(|host| host.to_ascii_lowercase().contains("github"))
+}
+
 /// Whether landing in `git`'s repository goes through a forge's pull request.
 ///
 /// Only a remote at a host `authed` says a forge client can drive counts:
