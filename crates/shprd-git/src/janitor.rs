@@ -458,7 +458,11 @@ pub fn execute(repo: &Path, layout: &Layout, actions: &[Action]) -> Vec<Outcome>
                 }
             }
             Action::RemoveWorktree { path, .. } => {
-                worktree::remove_worktree_only(repo, layout, path, false)
+                // Forced: only a landed or dropped task's worktree is planned, so
+                // what is left in it (an untracked proof file, a build's output)
+                // is spent, and its commits are already under an archive ref. A
+                // dirty tree used to refuse here and leave the worktree for ever.
+                worktree::remove_worktree_only(repo, layout, path, true)
                     .map(|()| action.events())
                     .map_err(|err| err.to_string())
             }
