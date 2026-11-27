@@ -36,6 +36,11 @@ export function streamLines(text) {
   return lines.slice(-STREAM_LINES);
 }
 
+/** An attempt as the person reads it: `T3·a2` (`Attempt 2` for a task with no id). */
+export function attemptLabel(task, n) {
+  return task?.id ? `${task.id}·a${n}` : `Attempt ${n}`;
+}
+
 /**
  * The thread's artifacts, newest attempt first: for each attempt that handed in,
  * the summary the agent wrote, the checks it ran with their result, the files it
@@ -70,7 +75,7 @@ export function artifactSections(task) {
         tone: review.degraded ? "red" : "dim",
       });
     }
-    sections.push({ title: `Attempt ${attempt.n} · ${attempt.agent ?? ""}${report.status ? ` · ${report.status}` : ""}`, rows });
+    sections.push({ title: `${attemptLabel(task, attempt.n)} · ${attempt.agent ?? ""}${report.status ? ` · ${report.status}` : ""}`, rows });
   }
   return sections;
 }

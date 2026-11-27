@@ -57,11 +57,16 @@ fn task_add(ctx: &Ctx, args: &TaskAddArgs) -> Result<(), CliError> {
     for line in scope_warnings(&ctx.root, &args.scope) {
         eprintln!("{line}");
     }
-    if let Some(line) = overlap_warning(&ctx.state()?, &args.id, &args.scope, &args.deps) {
+    if let Some(line) = overlap_warning(
+        &ctx.state()?,
+        args.id.as_deref().unwrap_or("the new task"),
+        &args.scope,
+        &args.deps,
+    ) {
         eprintln!("{line}");
     }
     let kind = EventKind::TaskAdded {
-        task: args.id.clone(),
+        task: args.id.clone().unwrap_or_default(),
         title: args.title.clone(),
         scope: args.scope.clone(),
         acceptance: args.acceptance.clone(),
@@ -69,7 +74,15 @@ fn task_add(ctx: &Ctx, args: &TaskAddArgs) -> Result<(), CliError> {
         skills: args.skills.clone(),
         deps: args.deps.clone(),
     };
-    let event = ctx.commit(kind)?;
+    // Without --id the id is picked under the log's lock, so two adders at
+    // once never get the same one.
+    let event = ctx.commit_task_added(args.id.clone(), kind)?;
+    if !ctx.json
+        && let EventKind::TaskAdded { task, .. } = &event.kind
+    {
+        // The coordinator reads the assigned id off this line.
+        println!("task {task}");
+    }
     emit(ctx, &event)
 }
 
@@ -218,9 +231,8 @@ fn print_report(ctx: &Ctx, report: &spawn::SpawnReport) {
         println!("{line}");
     }
     println!(
-        "ok spawned {} attempt {} with {} in {} (tab {:?})",
-        report.task,
-        report.attempt,
+        "ok spawned {} with {} in {} (tab {:?})",
+        shprd_core::event::attempt_label(&report.task, report.attempt),
         report.agent,
         report.worktree.display(),
         report.tab
@@ -379,9 +391,8 @@ pub(crate) fn start_for_tick(ctx: &Ctx, home: &Path, task: &str) -> Result<Strin
         false => format!(" ({})", report.warnings.join("; ")),
     };
     Ok(format!(
-        "started {} attempt {} with {} in {} (tab {:?}){warnings}",
-        report.task,
-        report.attempt,
+        "started {} with {} in {} (tab {:?}){warnings}",
+        shprd_core::event::attempt_label(&report.task, report.attempt),
         report.agent,
         report.worktree.display(),
         report.tab
@@ -457,7 +468,8 @@ fn record_attempt_only(ctx: &Ctx, home: &Path, task: &str) -> Result<String, Str
     })
     .map_err(|err| err.to_string())?;
     Ok(format!(
-        "recorded {task} attempt {attempt} on {} in {}",
+        "recorded {} on {} in {}",
+        shprd_core::event::attempt_label(task, attempt),
         created.branch,
         created.path.display()
     ))

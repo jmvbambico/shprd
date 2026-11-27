@@ -182,7 +182,7 @@ function TaskBody({
               return (
                 <li key={entry.id} className="attempt">
                   <p className="attempt-head">
-                    <span className="attempt-id">a{entry.n}</span>
+                    <span className="attempt-id">{`${task.id}·a${entry.n}`}</span>
                     <span className="attempt-actor">
                       {entry.actor === "" ? "unknown agent" : entry.actor}
                       {entry.model === undefined ? "" : ` · ${entry.model}`}

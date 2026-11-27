@@ -17,7 +17,7 @@
 //!                                     // | escalate | nudge | backup | give_up
 //!       "task": "T1",
 //!       "ok": true,
-//!       "detail": "started T1 attempt 1 with claude in ...",
+//!       "detail": "started T1·a1 with claude in ...",
 //!       "seq": 42                     // the log line it appended, when it did
 //!     }
 //!   ]

@@ -17,6 +17,7 @@ test("a screen becomes lines: trailing blanks dropped, tabs widened, only the ta
 
 test("artifacts are the hand-ins and reviews, newest attempt first", () => {
   const task = {
+    id: "T3",
     attempts: [
       { n: 1, agent: "claude", report: { status: "failed", summary: "first", checks: [], tests: [], changed_paths: [] }, reviews: [] },
       {
@@ -41,7 +42,7 @@ test("artifacts are the hand-ins and reviews, newest attempt first", () => {
   const sections = artifactSections(task);
   assert.deepEqual(
     sections.map((section) => section.title),
-    ["Attempt 2 · claude · done", "Attempt 1 · claude · failed"],
+    ["T3·a2 · claude · done", "T3·a1 · claude · failed"],
     "an attempt that never handed in has no section",
   );
   const rows = Object.fromEntries(sections[0].rows.map((row) => [row.key, row]));

@@ -584,7 +584,7 @@ fn a_step_that_fails_the_same_way_three_passes_asks_a_person_once() {
         card.body
     );
     assert!(
-        card.body.contains("(attempt 0)"),
+        card.body.contains("(C2·a0)"),
         "the card is about the attempt the failure happened in, so a fix or a \
          new attempt retires it: {}",
         card.body

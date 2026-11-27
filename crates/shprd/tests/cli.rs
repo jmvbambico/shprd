@@ -2401,3 +2401,62 @@ fn a_proposal_raises_a_card_and_runs_nothing() {
     assert_eq!(message.status.code(), Some(2));
     assert_eq!(last_event(root), before);
 }
+
+/// Adds a task with no `--id` and returns the id shprd printed.
+fn add_without_id(root: &Path, title: &str) -> String {
+    let out = ok(
+        root,
+        &[
+            "agent",
+            "task",
+            "add",
+            "--title",
+            title,
+            "--acceptance",
+            "it works",
+        ],
+    );
+    out.lines()
+        .find_map(|line| line.strip_prefix("task ").map(str::to_string))
+        .unwrap_or_else(|| panic!("no `task <id>` line in {out:?}"))
+}
+
+#[test]
+fn a_task_without_an_id_gets_the_next_short_id_and_a_given_id_is_kept() {
+    let dir = repo();
+    let root = dir.path();
+    start(root);
+    assert_eq!(add_without_id(root, "first"), "T1");
+    add_task(root, "long-slug", "src");
+    assert_eq!(add_without_id(root, "second"), "T2");
+    add_task(root, "T9", "docs");
+    assert_eq!(add_without_id(root, "third"), "T10");
+    let state = state(root);
+    for id in ["T1", "T2", "long-slug", "T9", "T10"] {
+        assert_eq!(status_of(&state, id), "queued", "{id}");
+    }
+}
+
+#[test]
+fn two_adds_at_once_never_share_an_id() {
+    let dir = repo();
+    let root = dir.path();
+    start(root);
+    let handles: Vec<_> = (0..6)
+        .map(|n| {
+            let root = root.to_path_buf();
+            std::thread::spawn(move || add_without_id(&root, &format!("task {n}")))
+        })
+        .collect();
+    let mut ids: Vec<String> = handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap_or_else(|_| panic!("an add panicked")))
+        .collect();
+    ids.sort();
+    ids.dedup();
+    assert_eq!(ids.len(), 6, "every add got its own id: {ids:?}");
+    let state = state(root);
+    for id in &ids {
+        assert_eq!(status_of(&state, id), "queued", "{id}");
+    }
+}

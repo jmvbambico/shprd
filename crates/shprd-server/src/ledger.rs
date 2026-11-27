@@ -154,3 +154,32 @@ pub fn commit(repo: &Path, actor: &Actor, kind: EventKind) -> Result<Event, Comm
         })?;
     Ok(event)
 }
+
+/// Appends a `TaskAdded` event, giving it the next free `T<n>` id when `task`
+/// is `None`.
+///
+/// The id is chosen from the log under its lock, so two adders at once never
+/// get the same one. `kind` supplies the other fields; its own `task` is
+/// replaced by the assigned id. Anything that is not a `TaskAdded` is refused
+/// as a programming error by the caller, not here.
+pub fn commit_task_added(
+    repo: &Path,
+    actor: &Actor,
+    task: Option<String>,
+    kind: EventKind,
+) -> Result<Event, CommitError> {
+    let mut log = EventLog::open(&log_path(repo))?;
+    let check_actor = actor.clone();
+    log.append_built(actor.clone(), &SystemClock, move |events| {
+        let mut kind = kind;
+        if let EventKind::TaskAdded { task: slot, .. } = &mut kind {
+            *slot = task.unwrap_or_else(|| shprd_core::event::next_task_id(events));
+        }
+        RunState::fold(events)?.check_as(&check_actor, &kind, SystemClock.now_ms())?;
+        Ok(kind)
+    })
+    .map_err(|err| match err {
+        AppendError::Refused(refused) => CommitError::Refused(refused),
+        AppendError::Log(err) => CommitError::Log(err),
+    })
+}
