@@ -3067,6 +3067,14 @@ fn a_hand_in_that_clashes_goes_back_before_its_review_and_spends_no_round() {
         "the redo is told which tip to bring its work onto: {}",
         finding.detail
     );
+    // And the very next pass starts the new attempt, with no one pressing Retry.
+    let next = worker.tick().expect("the next pass ran");
+    assert!(
+        next.steps
+            .iter()
+            .any(|step| step.action == "send_back" && step.task == "A" && step.ok),
+        "A is redone by the next pass: {next:?}"
+    );
 }
 
 /// A forge that holds one open pull request per task, each at its branch tip.
