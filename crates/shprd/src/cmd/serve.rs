@@ -296,7 +296,8 @@ impl shprd_server::RepoFactory for Factory {
         let engine = engine_of(&tick.worker)
             .with_resend(resender(host.clone(), &home))
             .with_review_again(review_again(&home, tick.worker.actor.clone()))
-            .with_report_reader(report_reader(&home, tick.worker.actor.clone()));
+            .with_report_reader(report_reader(&home, tick.worker.actor.clone()))
+            .with_run_verb(run_verb());
         if let Ok(mut built) = self.built.lock() {
             built.insert(
                 root.to_path_buf(),
@@ -986,6 +987,34 @@ fn resender(host: Arc<dyn Host>, home: &Path) -> shprd_server::Resender {
     Arc::new(move |repo: &Path, task: &str| {
         let ctx = crate::ctx::Ctx::new(repo.to_path_buf(), Actor::Human, false, true);
         crate::cmd::spawn::resend_brief(&*host, &home, &ctx, task).map_err(|err| err.to_string())
+    })
+}
+
+/// The board's run verbs: `run close` and `sync`, run by this binary as the
+/// person who confirmed the card.
+///
+/// A proposal card's `confirm` is the person's own word, so what it runs is the
+/// same verb the CLI runs: this process, with `--as human`, the repository the
+/// card belongs to, and no `SHPRD_ACTOR` from the environment winning over it.
+fn run_verb() -> shprd_server::RunVerb {
+    Arc::new(|repo: &Path, verb: &str| {
+        let exe = std::env::current_exe()
+            .map_err(|err| format!("cannot find the shprd binary: {err}"))?;
+        let output = std::process::Command::new(exe)
+            .arg("--repo")
+            .arg(repo)
+            .args(["--as", "human", "--no-dagr"])
+            .args(verb.split(' '))
+            .env_remove("SHPRD_ACTOR")
+            .output()
+            .map_err(|err| format!("could not run `shprd {verb}`: {err}"))?;
+        if output.status.success() {
+            return Ok(());
+        }
+        Err(format!(
+            "shprd {verb} failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
     })
 }
 

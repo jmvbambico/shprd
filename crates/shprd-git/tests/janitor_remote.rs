@@ -316,3 +316,76 @@ fn main_is_never_planned() {
         "the branch runs are cut from is never deleted: {actions:?}"
     );
 }
+
+/// A run whose base and integration branch are one never opens a pull request.
+/// Its `_int` worktree is a recorded resource all the same: once the run ended
+/// the janitor lists it and removes it, and the integration branch stays.
+#[test]
+fn a_finished_run_with_no_pull_request_has_its_integration_worktree_removed() {
+    let repo = Repo::new();
+    let layout = repo.layout();
+    let path = layout.path(REPO_NAME, RUN, "_int");
+    if let Some(parent) = path.parent()
+        && let Err(err) = std::fs::create_dir_all(parent)
+    {
+        panic!("mkdir {}: {err}", parent.display());
+    }
+    // Held detached, as it is between lands.
+    repo.git(&[
+        "worktree",
+        "add",
+        "--detach",
+        &path.display().to_string(),
+        "main",
+    ]);
+    let kinds = vec![
+        EventKind::RunStarted {
+            run_id: RUN.to_string(),
+            repo: REPO_NAME.to_string(),
+            base_branch: "main".to_string(),
+            integration_branch: "main".to_string(),
+        },
+        EventKind::Resource {
+            action: ResourceAction::Created,
+            kind: ResourceKind::Worktree,
+            name: path.display().to_string(),
+            task: None,
+        },
+    ];
+    let mut events: Vec<Event> = kinds
+        .into_iter()
+        .enumerate()
+        .map(|(index, kind)| event(index as u64 + 1, 1_000, kind))
+        .collect();
+
+    // Still running: nothing to clean.
+    let live = janitor::plan(&fold(&events), &events, &layout, 2_000, DAYS);
+    assert!(
+        !live
+            .iter()
+            .any(|a| matches!(a, Action::RemoveWorktree { .. })),
+        "a run in flight keeps its worktree: {live:?}"
+    );
+
+    events.push(event(
+        3,
+        1_500,
+        EventKind::RunFinished {
+            abandoned: Vec::new(),
+        },
+    ));
+    let actions = janitor::plan(&fold(&events), &events, &layout, 2_000, DAYS);
+    assert!(
+        actions
+            .iter()
+            .any(|a| matches!(a, Action::RemoveWorktree { path: held, .. } if *held == path)),
+        "the finished run's integration worktree is listed: {actions:?}"
+    );
+    let outcomes = janitor::execute(&repo.path, &layout, &actions);
+    let failed: Vec<String> = outcomes
+        .iter()
+        .filter_map(|outcome| outcome.result.as_ref().err().cloned())
+        .collect();
+    assert!(failed.is_empty(), "{failed:?}");
+    assert!(!is_dir(&path), "the worktree is gone");
+}

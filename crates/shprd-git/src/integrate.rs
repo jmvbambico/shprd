@@ -5,6 +5,7 @@
 //! stops on a conflict rewrites the working tree, and shprd is not allowed to
 //! do that anywhere a human might be working.
 
+use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
@@ -224,13 +225,22 @@ pub fn open_integration_branch(
     let path_exists = path.exists();
     match (branch_exists, path_exists) {
         (true, true) => {
-            let checked_out = Git::new(&path).current_branch()?;
-            if checked_out.as_deref() != Some(branch) {
-                return Err(IntegrateError::BadState {
-                    path,
-                    branch: branch.to_string(),
-                    detail: format!("it is on {checked_out:?}"),
-                });
+            let at = Git::new(&path);
+            match at.current_branch()? {
+                Some(on) if on == branch => {}
+                // Between lands the worktree is detached so the person's own
+                // checkout may hold the branch; a landing takes it back, and git
+                // refuses (with its own reason) when the person holds it now.
+                None => {
+                    at.run(&["switch", branch])?;
+                }
+                Some(on) => {
+                    return Err(IntegrateError::BadState {
+                        path,
+                        branch: branch.to_string(),
+                        detail: format!("it is on {:?}", Some(on)),
+                    });
+                }
             }
             repair_state_excluded(&path)?;
             Ok(IntegrationWorktree {
@@ -267,6 +277,125 @@ pub fn open_integration_branch(
             branch: branch.to_string(),
             detail: "the path exists but its branch does not".to_string(),
         }),
+    }
+}
+
+/// Lets go of the integration branch: detaches the worktree's `HEAD` at the
+/// branch's tip.
+///
+/// Git lets one worktree hold a branch, so a worktree left on the integration
+/// branch keeps the person from `git switch`ing to it in their own checkout. A
+/// landing calls this when it is done, and [`open_integration_branch`] takes the
+/// branch back for the next one.
+///
+/// # Errors
+///
+/// Fails when git cannot detach the worktree.
+pub fn release_integration(int: &IntegrationWorktree) -> Result<(), IntegrateError> {
+    Git::new(&int.path).run(&["switch", "--detach"])?;
+    Ok(())
+}
+
+/// One run's exclusive integration lock, released when it is dropped.
+///
+/// Every verb that writes the integration worktree takes it — `integrate`
+/// cherry-picks onto the branch, `sync` merges the base into it, `gate` runs
+/// commands in it, `land` reads the head it pushes, `approve` reads the head it
+/// stamps — and so does the tick's idle sweep, because detaching `HEAD` under a
+/// landing is the same race as merging under one. The lock is an advisory lock
+/// on a file under `<home>/.shprd/locks`, so it is held by the process and not by
+/// a stale file: the OS drops it however the process ends.
+pub struct RunLock {
+    /// The open file the lock sits on. Closing it releases the lock.
+    _file: File,
+}
+
+impl RunLock {
+    /// A lock on a file this caller has already locked itself.
+    ///
+    /// For a lock whose name the binary owns rather than the library — the
+    /// start lock is the CLI's alone — so both still release by dropping the
+    /// file, rather than by two implementations of the same advisory lock.
+    #[must_use]
+    pub fn from_locked(file: File) -> Self {
+        Self { _file: file }
+    }
+}
+
+/// The file the lock of `run` in `repo_name` sits on.
+///
+/// The repository name and the run id are in the name, so two repositories, or
+/// two runs of one repository, never wait on each other.
+#[must_use]
+pub fn lock_path(home: &Path, repo_name: &str, run: &str) -> PathBuf {
+    home.join(".shprd")
+        .join("locks")
+        .join(format!("{repo_name}-{run}-int.lock"))
+}
+
+/// Takes the run's integration lock, blocking until it is free.
+///
+/// # Errors
+///
+/// Fails when the lock file cannot be opened or locked.
+pub fn lock_run(home: &Path, repo_name: &str, run: &str) -> std::io::Result<RunLock> {
+    let file = open_lock(lock_path(home, repo_name, run))?;
+    file.lock()?;
+    Ok(RunLock { _file: file })
+}
+
+/// Takes the run's integration lock, or answers `None` when something holds it.
+///
+/// For a caller that must not wait — the tick's idle sweep runs inside a pass,
+/// and a landing may hold the lock for as long as a gate takes. `None` means "a
+/// verb is working on this worktree right now", which is the one thing the
+/// sweep has to stay out of the way of.
+///
+/// # Errors
+///
+/// Fails when the lock file cannot be opened, or for any locking error other
+/// than the lock being held.
+pub fn try_lock_run(home: &Path, repo_name: &str, run: &str) -> std::io::Result<Option<RunLock>> {
+    let file = open_lock(lock_path(home, repo_name, run))?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(RunLock { _file: file })),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(err)) => Err(err),
+    }
+}
+
+/// Opens (making its folder and the file itself) the lock `path` names.
+fn open_lock(path: PathBuf) -> std::io::Result<File> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+}
+
+/// Detaches the integration worktree at `path` when it still sits on a branch.
+///
+/// For the tick's idle sweep: a base sync (or any other command) re-takes the
+/// branch, and nothing else lets it go until the next landing. Does nothing
+/// when the path is not a worktree, is already detached, or has uncommitted
+/// work (a command may be mid-merge there). Returns true when it detached.
+///
+/// The caller must hold the run's integration lock ([`try_lock_run`]) across
+/// this call: a clean worktree on the branch is also what a landing that has not
+/// merged yet looks like, and detaching `HEAD` under it would land the merge on
+/// a detached head while the branch never moves.
+pub fn release_if_held(path: &Path) -> bool {
+    if !path.join(".git").exists() {
+        return false;
+    }
+    let git = Git::new(path);
+    match (git.current_branch(), git.is_clean()) {
+        (Ok(Some(_)), Ok(true)) => git.run(&["switch", "--detach"]).is_ok(),
+        _ => false,
     }
 }
 
