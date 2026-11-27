@@ -1745,7 +1745,7 @@ fn refuse_clashing_hand_in(
         files,
         pr: None,
     };
-    crate::cmd::land::record_conflict(&env.spawn.ctx, task, &task.id, &clashing, &err)?;
+    crate::cmd::land::record_conflict(env.spawn.ctx, task, &task.id, &clashing, &err)?;
     Err(CliError::Invalid(anyhow!(
         "{} No review was started.",
         crate::cmd::land::conflict_message(&task.id, &err)
