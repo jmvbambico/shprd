@@ -798,6 +798,13 @@ pub enum ProposedVerb {
     Override,
     /// `shprd readmit`: an agent is usable again.
     Readmit,
+    /// `shprd run close`: the run's work is all landed or dropped, so the run
+    /// ends and a new one can start. It throws nothing away.
+    ///
+    /// The card hangs on the task the agent is working on, because a card is
+    /// drawn in one task's timeline; the verb it confirms is the run's, so
+    /// `shprd run close` is what runs, not a task's own.
+    Close,
 }
 
 /// Arguments for `agent propose`.

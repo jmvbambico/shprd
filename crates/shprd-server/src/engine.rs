@@ -38,7 +38,19 @@ pub struct Engine {
     /// Closes a task's reviewer and starts a new review, when the caller has
     /// a host.
     review_again: Option<Resender>,
+    /// Runs one of the run's own verbs as the person, when the caller has a
+    /// binary to run it with.
+    ///
+    /// `sync` and `run close` are the run's rather than a task's, so they are not
+    /// an event this service can append: the binary's own verb asks the rules,
+    /// writes the event and does the filesystem work. It is one closure for both
+    /// so a service and a caller can never wire one and forget the other.
+    run_verb: Option<RunVerb>,
 }
+
+/// Runs one of the run's verbs as the person (`run close`, `sync`), by naming it;
+/// answers what it said, or why it refused.
+pub type RunVerb = std::sync::Arc<dyn Fn(&Path, &str) -> Result<(), String> + Send + Sync>;
 
 impl Engine {
     /// An engine whose only verb is a spawn.
@@ -51,7 +63,30 @@ impl Engine {
             stop: None,
             resend: None,
             review_again: None,
+            run_verb: None,
         }
+    }
+
+    /// The same engine, also able to run the run's own verbs.
+    pub fn with_run_verb(mut self, run_verb: RunVerb) -> Self {
+        self.run_verb = Some(run_verb);
+        self
+    }
+
+    /// Whether this engine can run the run's own verbs (`run close`, `sync`).
+    pub fn can_run_verb(&self) -> bool {
+        self.run_verb.is_some()
+    }
+
+    /// Runs `verb` (`run close`, `sync`) as the person in `repo`.
+    ///
+    /// A failure is the verb's own words, which is what a person reads on the
+    /// card that asked for it.
+    pub fn run_verb(&self, repo: &Path, verb: &str) -> Result<(), String> {
+        let run = self.run_verb.as_ref().ok_or_else(|| {
+            format!("this service was started without a binary, so it cannot run `shprd {verb}`")
+        })?;
+        run(repo, verb)
     }
 
     /// The same engine, also able to close a task's space.
@@ -122,6 +157,7 @@ impl std::fmt::Debug for Engine {
             .field("stop", &self.stop.is_some())
             .field("resend", &self.resend.is_some())
             .field("review_again", &self.review_again.is_some())
+            .field("run_verb", &self.run_verb.is_some())
             .finish_non_exhaustive()
     }
 }
