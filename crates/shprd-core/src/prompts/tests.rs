@@ -937,3 +937,22 @@ fn the_reviewer_keeps_disclosed_decisions_apart_from_findings() {
     let installed = ensure(temp.path(), "reviewer").expect("the upgrade runs");
     assert_eq!(installed.change, Change::Upgraded, "{installed:?}");
 }
+
+/// The reviewer blocks only on a defect in the diff or an unmet criterion of
+/// the task, and the retired wording upgrades.
+#[test]
+fn the_reviewer_blocks_only_on_code_defects_and_the_tasks_criteria() {
+    let shipped = shipped_prompt("reviewer").expect("shipped");
+    assert_eq!(
+        digest(REVIEWER_M11_PRE_BLOCKING.as_bytes()),
+        REVIEWER_M11_PRE_BLOCKING_DIGEST
+    );
+    assert!(shipped.old.contains(&REVIEWER_M11_PRE_BLOCKING_DIGEST));
+    let body = strip_leading_comment(shipped.text);
+    assert!(body.contains("how the worker operates"), "{body}");
+    assert!(body.contains("merge base with origin"), "{body}");
+    let temp = dir();
+    std::fs::write(path_of(temp.path(), "reviewer"), REVIEWER_M11_PRE_BLOCKING).expect("old");
+    let installed = ensure(temp.path(), "reviewer").expect("the upgrade runs");
+    assert_eq!(installed.change, Change::Upgraded, "{installed:?}");
+}
