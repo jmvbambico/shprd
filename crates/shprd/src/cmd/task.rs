@@ -37,8 +37,8 @@ pub fn reopen(ctx: &Ctx, args: &TaskReopenArgs) -> Result<(), CliError> {
     crate::cmd::emit(ctx, &event)?;
     if !ctx.json {
         println!(
-            "reopened {} (attempt {attempt}): it is Working again",
-            args.task
+            "reopened {}: it is Working again",
+            shprd_core::event::attempt_label(&args.task, attempt)
         );
     }
     Ok(())

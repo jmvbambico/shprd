@@ -165,12 +165,7 @@ impl EventLog {
         kind: EventKind,
         clock: &dyn Clock,
     ) -> Result<Event, LogError> {
-        match self.append_inner(
-            actor,
-            kind,
-            clock,
-            None::<fn(&[Event]) -> Result<(), RuleError>>,
-        ) {
+        match self.append_inner(actor, clock, move |_| Ok(kind)) {
             Ok(Ok(event)) => Ok(event),
             Ok(Err(refused)) => Err(LogError::Refused(Box::new(refused))),
             Err(err) => Err(err),
@@ -196,7 +191,34 @@ impl EventLog {
     where
         F: FnOnce(&[Event]) -> Result<(), RuleError>,
     {
-        match self.append_inner(actor, kind, clock, Some(check))? {
+        let built = move |events: &[Event]| {
+            check(events)?;
+            Ok(kind)
+        };
+        match self.append_inner(actor, clock, built)? {
+            Ok(event) => Ok(event),
+            Err(refused) => Err(AppendError::Refused(refused)),
+        }
+    }
+
+    /// Append one event that `build` makes from the log it will join, all
+    /// under the log's lock.
+    ///
+    /// For an event whose content depends on what is already logged, such as
+    /// a task id that is the next free one: the builder sees every event
+    /// written so far, and no other writer can append between its read and
+    /// the write, so two writers never build from the same state. A builder
+    /// that refuses writes nothing.
+    pub fn append_built<F>(
+        &mut self,
+        actor: Actor,
+        clock: &dyn Clock,
+        build: F,
+    ) -> Result<Event, AppendError>
+    where
+        F: FnOnce(&[Event]) -> Result<EventKind, RuleError>,
+    {
+        match self.append_inner(actor, clock, build)? {
             Ok(event) => Ok(event),
             Err(refused) => Err(AppendError::Refused(refused)),
         }
@@ -209,12 +231,11 @@ impl EventLog {
     fn append_inner<F>(
         &mut self,
         actor: Actor,
-        kind: EventKind,
         clock: &dyn Clock,
-        check: Option<F>,
+        build: F,
     ) -> Result<Result<Event, RuleError>, LogError>
     where
-        F: FnOnce(&[Event]) -> Result<(), RuleError>,
+        F: FnOnce(&[Event]) -> Result<EventKind, RuleError>,
     {
         let file = OpenOptions::new()
             .read(true)
@@ -230,12 +251,13 @@ impl EventLog {
         })?;
 
         let outcome = read_locked(&file, &self.path)?;
-        if let Some(check) = check
-            && let Err(refused) = check(&outcome.events)
-        {
-            let _ = file.unlock();
-            return Ok(Err(refused));
-        }
+        let kind = match build(&outcome.events) {
+            Ok(kind) => kind,
+            Err(refused) => {
+                let _ = file.unlock();
+                return Ok(Err(refused));
+            }
+        };
         // A crash can leave a partial line behind. Reads skip it, but an append
         // would glue the new event onto it, so cut it off before writing.
         repair_torn_tail(&file, &self.path)?;
