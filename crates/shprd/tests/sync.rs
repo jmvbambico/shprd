@@ -236,6 +236,9 @@ impl Fixture {
 
     /// Starts run `r1`, cut from `main`.
     fn start(&self) {
+        // The run lands on `main`, which git lets one worktree hold: the
+        // checkout lets go of it first, as `run start` asks of a person.
+        self.git(&["switch", "--detach"]);
         self.ok(&[
             "run",
             "start",
@@ -433,6 +436,17 @@ impl Fixture {
                 }
                 _ => None,
             })
+    }
+
+    /// The gate baselines the log recorded, as the base each ran on.
+    fn baselines(&self) -> Vec<String> {
+        self.events()
+            .into_iter()
+            .filter_map(|event| match event.kind {
+                EventKind::GateBaselined { base_sha, .. } => Some(base_sha),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Every escalation the log recorded, as bodies.
@@ -674,4 +688,37 @@ fn an_agent_may_not_sync_the_base() {
         !fixture.integration().join("src/base.txt").exists(),
         "nothing was merged"
     );
+}
+
+#[test]
+fn a_sync_that_moves_the_base_records_a_fresh_baseline_after_it() {
+    let fixture = Fixture::new();
+    fixture.start();
+    fixture.land_a_task("T1");
+    let before = fixture.baselines();
+    let moved = fixture.move_base("src/base.txt", "base\n");
+    fixture.ok(&["--as", "orchestrator", "sync"]);
+    let after = fixture.baselines();
+    assert_eq!(after.len(), before.len() + 1, "one new baseline: {after:?}");
+    assert_eq!(after.last(), Some(&moved), "it ran on the moved base");
+    let kinds: Vec<bool> = fixture
+        .events()
+        .into_iter()
+        .filter_map(|event| match event.kind {
+            EventKind::BaseSynced { .. } => Some(true),
+            EventKind::GateBaselined { .. } => Some(false),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(kinds.last(), Some(&false), "the baseline follows the sync");
+}
+
+#[test]
+fn a_sync_that_did_not_move_the_base_runs_no_gate() {
+    let fixture = Fixture::new();
+    fixture.start();
+    let before = fixture.baselines();
+    fixture.ok(&["sync"]);
+    fixture.ok(&["sync"]);
+    assert_eq!(fixture.baselines(), before, "no baseline was re-recorded");
 }

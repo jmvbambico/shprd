@@ -206,6 +206,9 @@ impl Fixture {
 
     /// Starts run `r1` on `main`.
     fn start(&self) {
+        // The run lands on `main`, which git lets one worktree hold: the
+        // checkout lets go of it first, as `run start` asks of a person.
+        self.git(&["switch", "--detach"]);
         self.ok(&[
             "run",
             "start",

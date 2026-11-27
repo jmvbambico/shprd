@@ -908,8 +908,10 @@ async fn answer(State(state): State<AppState>, body: Bytes) -> Result<Json<AskRe
     let actor = state.actor.clone();
     let hub = state.hub.clone();
     let after_write = state.after_write.clone();
-    // A stuck review's `review again` runs the engine's closure, so the answer
-    // route carries the service's engine like every other action does.
+    // The answer route carries the service's engine like every other action
+    // does: a stuck review's `review again` runs its closure, and a proposal
+    // card's confirmation may be one of the run's own verbs (`run close`),
+    // which only the binary can run.
     let engine = state.engine.clone();
     let reply = blocking(move || {
         let ctx = actions::Context {
