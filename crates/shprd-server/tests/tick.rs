@@ -3329,3 +3329,54 @@ fn a_landing_that_fails_for_a_machine_reason_records_its_real_cause() {
     let last = shprd_server::pass::LastPass::of(&report, &fixture.repo, 0);
     assert!(last.failed[0].error.contains("reading the branch tip"));
 }
+
+#[test]
+fn a_start_the_cap_held_back_waits_queued_and_starts_on_a_later_pass() {
+    // T1 works and the cap is one. T2's agent was stopped and a person retried
+    // it: the retry was answered "queued" and put in the start queue. Passes
+    // under the full cap leave it waiting; the first pass with a free slot
+    // starts it, and the queue is empty after.
+    let fixture = Fixture::new(vec![
+        started(),
+        added(2, "T1"),
+        spawned_ev(3, "T1"),
+        added(4, "T2"),
+        spawned_ev(5, "T2"),
+        ev(
+            6,
+            EventKind::TaskStopped {
+                task: String::from("T2"),
+                attempt: 1,
+            },
+        ),
+    ]);
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let worker = |cap: u32| {
+        let mut cfg = config(shprd_core::config::MergePolicy::Ask);
+        cfg.tick.max_running = cap;
+        fixture.worker(
+            Arc::new(Scripted::default()),
+            Arc::new(NoForge),
+            cfg,
+            recording_start(Arc::clone(&calls)),
+        )
+    };
+    let state_dir = shprd_server::state_dir(&shprd_server::state_home(&fixture.home, None));
+    shprd_server::start_queue::enqueue(&state_dir, "T2").expect("the wait is saved");
+
+    let full = worker(1).tick().expect("the pass ran");
+    assert!(full.ok(), "{:?}", full.steps);
+    assert!(calls.lock().expect("calls").is_empty(), "no slot, no start");
+    assert_eq!(shprd_server::start_queue::waiting(&state_dir), ["T2"]);
+
+    let free = worker(2).tick().expect("the next pass ran");
+    assert!(free.ok(), "{:?}", free.steps);
+    assert_eq!(*calls.lock().expect("calls"), ["T2"]);
+    assert!(
+        free.steps
+            .iter()
+            .any(|step| step.action == "start" && step.task == "T2" && step.ok),
+        "{free:?}"
+    );
+    assert!(shprd_server::start_queue::waiting(&state_dir).is_empty());
+}

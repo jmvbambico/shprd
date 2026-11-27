@@ -73,6 +73,7 @@ pub mod repos;
 pub mod self_update;
 pub mod service;
 pub mod snapshot;
+pub mod start_queue;
 pub mod tasks;
 pub mod terminal;
 pub mod tick;

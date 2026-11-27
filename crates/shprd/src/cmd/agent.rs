@@ -153,7 +153,7 @@ fn spawn_cmd(ctx: &Ctx, args: &SpawnArgs, home: Option<&Path>) -> Result<(), Cli
     let mux = spawn::real_mux();
     let env = spawn::build_env(ctx, home)?;
     if let Some(queued) = spawn::queued_for_slot(&env, &ctx.state()?, &args.task) {
-        println!("{queued}");
+        println!("{}", spawn::queue_start(ctx, home, &args.task, queued));
         return Ok(());
     }
     let request = spawn::SpawnRequest {
@@ -386,7 +386,7 @@ pub(crate) fn start_for_tick(ctx: &Ctx, home: &Path, task: &str) -> Result<Strin
     let env = spawn::build_env(ctx, Some(home)).map_err(|err| err.to_string())?;
     let state = ctx.state().map_err(|err| err.to_string())?;
     if let Some(queued) = spawn::queued_for_slot(&env, &state, task) {
-        return Ok(queued);
+        return Ok(spawn::queue_start(ctx, Some(home), task, queued));
     }
     let request = spawn::SpawnRequest {
         task: task.to_string(),

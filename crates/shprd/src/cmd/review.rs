@@ -1641,6 +1641,7 @@ pub fn review(
         // reviewer running with nothing naming it. Only `--again` replaces a
         // review that is still out.
         refuse_pending_review(task, attempt)?;
+        refuse_clashing_hand_in(env, &state, task, attempt)?;
         attempt
     };
     let reviewer = choose_reviewer(
@@ -1710,6 +1711,45 @@ pub fn review(
         brief: brief_path,
         tab,
     })
+}
+
+/// Sends a hand-in back before its review when its branch would clash with the
+/// integration branch as it stands, so a clash never costs a review.
+///
+/// The trial merge runs when the review is asked for, before the packet, the
+/// request or the tab exist. A clash is recorded exactly as a landing records
+/// one (a failed `integrate` gate and a ledger note), so the planner redoes the
+/// task without spending a round, and the review is refused with that reason.
+/// A branch git cannot judge goes on to its review.
+fn refuse_clashing_hand_in(
+    env: &ReviewEnv<'_>,
+    state: &shprd_core::state::RunState,
+    task: &Task,
+    attempt: &Attempt,
+) -> Result<(), CliError> {
+    let Some(run) = state.run.as_ref() else {
+        return Ok(());
+    };
+    let Some((clashing, files)) = shprd_git::land::clash_before_review(
+        &env.spawn.ctx.root,
+        &run.integration_branch,
+        &attempt.branch,
+    ) else {
+        return Ok(());
+    };
+    let head = shprd_git::git::Git::new(&env.spawn.ctx.root)
+        .rev_parse(&attempt.branch)
+        .unwrap_or_else(|_| attempt.branch.clone());
+    let err = shprd_git::land::LandError::Conflict {
+        commit: head,
+        files,
+        pr: None,
+    };
+    crate::cmd::land::record_conflict(env.spawn.ctx, task, &task.id, &clashing, &err)?;
+    Err(CliError::Invalid(anyhow!(
+        "{} No review was started.",
+        crate::cmd::land::conflict_message(&task.id, &err)
+    )))
 }
 
 /// `shprd agent review`: opens a reviewer on a task's latest attempt.
@@ -2811,6 +2851,43 @@ project_dirs = []
                 .iter()
                 .all(|call| !matches!(call, Call::Spawn(..))),
             "no tab may be opened"
+        );
+    }
+
+    #[test]
+    fn a_hand_in_that_clashes_is_sent_back_before_a_reviewer_starts() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        scratch.reported(&ctx);
+        // Work landed on the integration branch after the task was cut, in the
+        // very file the task edited.
+        let root = scratch.root();
+        git(root, &["checkout", "-q", "integration/m4"]);
+        std::fs::write(root.join("README.md"), "scratch\nsomeone else's change\n").unwrap();
+        git(root, &["commit", "-q", "-a", "-m", "landed meanwhile"]);
+        git(root, &["checkout", "-q", "main"]);
+        let env = scratch.review_env(&ctx, Some("codex/m1"));
+        let mux = scratch.mux();
+
+        let err = review(&mux, &env, &request(false)).unwrap_err();
+
+        let message = format!("{err}");
+        assert!(message.contains("No review was started"), "{message}");
+        assert!(message.contains("README.md"), "{message}");
+        // No review was asked for: no packet, no request, no tab.
+        assert!(!env.reviews_dir.exists(), "no packet may be written");
+        assert!(
+            mux.calls()
+                .iter()
+                .all(|call| !matches!(call, Call::Spawn(..))),
+            "no reviewer tab may be opened"
+        );
+        let state = ctx.state().unwrap_or_else(|err| panic!("{err}"));
+        let task = &state.tasks["T1"];
+        assert!(task.attempts[0].reviews.is_empty(), "no review round spent");
+        assert!(
+            shprd_core::rules::landing_conflict(task),
+            "the clash is recorded as the landing's failed gate so the redo is planned"
         );
     }
 
