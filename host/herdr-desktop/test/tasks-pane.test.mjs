@@ -12,6 +12,8 @@ import * as herdr from "herdr";
 import { record, walk } from "gpui-kit";
 import { click, inputState } from "./stub-gpui.js";
 import Tasks from "../mods/shprd-tasks/main.js";
+import Chat from "../mods/shprd-chat/main.js";
+import { cards as cardsOf } from "../mods/lib/asks.js";
 import { RepoCache } from "../mods/lib/client.js";
 import { paneState } from "../mods/lib/board.js";
 
@@ -177,6 +179,20 @@ test("the Tasks pane draws an old review-out task and its Needs you badge counts
     assert.ok(nodes.some((n) => n.idv === "task-OUT-drop"), "the asking row draws its Drop pill");
     click(root, "task-OUT-answer");
     assert.deepEqual(opened, ["OUT"], "Answer opens the task's card, where its three choices are drawn");
+    // The card Answer opens: made from the board this pane holds and drawn by
+    // the chat pane's own card renderer, choices and all.
+    const board = view.cache.get("/work/shop");
+    const [made] = cardsOf(board, { asks: board.asks }).filter((card) => card.task === "OUT");
+    assert.ok(made, "the pane's open ask makes a card");
+    const chat = new Chat();
+    chat.cx = { notify() {}, timer: { after() {} } };
+    chat.answering = null;
+    chat.answerRefusal = null;
+    const drawnCard = walk(chat.card(herdr.theme(), { red: "#f00", amber: "#fa0", green: "#0f0" }, made));
+    const cardWords = drawnCard.flatMap((n) => n.kids.filter((kid) => typeof kid === "string")).join("\n");
+    for (const choice of ["retry with another round", "take it as it is", "drop it"]) {
+      assert.ok(cardWords.includes(choice), `the opened card offers "${choice}"`);
+    }
   } finally {
     record(false);
   }

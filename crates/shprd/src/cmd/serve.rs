@@ -297,11 +297,7 @@ impl shprd_server::RepoFactory for Factory {
         // The person's start, retry and stop actions are the same two closures
         // the tick's steps run: one spawn path, one way of closing a task's
         // space, so a board's Start and the engine's own start cannot drift.
-        let engine = engine_of(&tick.worker)
-            .with_resend(resender(host.clone(), &home))
-            .with_review_again(review_again(&home, tick.worker.actor.clone()))
-            .with_report_reader(report_reader(&home, tick.worker.actor.clone()))
-            .with_run_verb(run_verb());
+        let engine = service_engine(&tick.worker, host.clone(), &home);
         if let Ok(mut built) = self.built.lock() {
             built.insert(
                 root.to_path_buf(),
@@ -985,6 +981,26 @@ fn engine_of(worker: &std::sync::Arc<shprd_server::Worker>) -> Engine {
     }
 }
 
+/// The engine the served API carries: the worker's start and stop plus every
+/// closure a card's answer needs (resend, `review again`, the report reader,
+/// the run verbs). The service has a host, so none of them is left out.
+fn service_engine(
+    worker: &std::sync::Arc<shprd_server::Worker>,
+    host: Arc<dyn Host>,
+    home: &Path,
+) -> Engine {
+    with_card_closures(engine_of(worker), host, home, worker.actor.clone())
+}
+
+/// Adds the closures a card's answer runs to `engine`.
+fn with_card_closures(engine: Engine, host: Arc<dyn Host>, home: &Path, actor: Actor) -> Engine {
+    engine
+        .with_resend(resender(host, home))
+        .with_review_again(review_again(home, actor.clone()))
+        .with_report_reader(report_reader(home, actor))
+        .with_run_verb(run_verb())
+}
+
 /// The board's Resend: types a task's latest brief into its agent again.
 fn resender(host: Arc<dyn Host>, home: &Path) -> shprd_server::Resender {
     let home = home.to_path_buf();
@@ -1623,6 +1639,19 @@ mod tests {
             mux.calls(),
             Vec::new(),
             "a refused start makes no workspace, looks none up and lists no tabs"
+        );
+    }
+
+    #[test]
+    fn the_served_engine_can_start_a_review_again() {
+        let home = TempDir::new().expect("home");
+        let bare = Engine::new(Arc::new(|_: &Path, _: &str| Ok(String::new())));
+        assert!(!bare.can_review_again());
+        let host: Arc<dyn Host> = Arc::new(FakeMux::default());
+        let served = with_card_closures(bare, host, home.path(), Actor::Human);
+        assert!(
+            served.can_review_again(),
+            "the service's engine carries the review-again closure"
         );
     }
 }
