@@ -376,3 +376,15 @@ test("a task's decision card offers Readmit for each dry agent, sending its agen
   assert.equal(read[0].label, "Readmit codex");
   assert.deepEqual(read[0].payload, { kind: "agent.readmit", agent: "codex", reason: "readmitted from its card" });
 });
+
+test("an operational run-wide card the coordinator settles is drawn nowhere a person decides", () => {
+  const state = {
+    needs: [
+      { seq: 1, body: "The local `main` has commits the remote lacks: abc fix", default_action: "push", for_you: false, kind: "decision", actions: ["ask_assistant", "dismiss"] },
+      { seq: 2, body: "Which database?", default_action: "sqlite", for_you: true, kind: "decision", actions: ["reply", "dismiss"] },
+      { seq: 3, body: "an old service's card", default_action: "x", kind: "decision", actions: ["dismiss"] },
+    ],
+  };
+  const drawn = cards(state, { asks: [] });
+  assert.deepEqual(drawn.map((card) => card.text), ["Which database?", "an old service's card"]);
+});

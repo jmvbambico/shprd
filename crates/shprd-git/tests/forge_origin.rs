@@ -237,3 +237,13 @@ fn a_repository_with_no_forge_never_has_its_integration_ref_reset() {
     );
     assert_eq!(repo.git(&["rev-parse", "main"]), ours);
 }
+
+#[test]
+fn realigning_a_ref_equal_to_origin_reads_aligned() {
+    let (repo, _bare) = forge_repo();
+    repo.git(&["switch", "-q", "-c", "elsewhere"]);
+    assert_eq!(
+        integrate::realign_outcome(&repo.path, "main", |_| false),
+        integrate::Realign::Aligned
+    );
+}

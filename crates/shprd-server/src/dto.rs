@@ -754,6 +754,12 @@ pub struct NeedDto {
     /// Cards with one key are one question: a client draws one card per key.
     #[serde(default)]
     pub key: String,
+    /// Whether the person is asked (`true`), or the coordinator settles it and
+    /// is told as news (`false`: an operational card about the run itself).
+    ///
+    /// A payload without one comes from an old service: read it as the person's.
+    #[serde(default = "yes")]
+    pub for_you: bool,
 }
 
 /// Whether a card asks the person to choose or only tells them something.

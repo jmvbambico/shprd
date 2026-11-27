@@ -63,6 +63,7 @@ pub fn snapshot(state: &RunState, now_ms: u64) -> SnapshotDto {
                     kind: CardKindDto::from(card.kind),
                     actions: card.actions.into_iter().map(|action| action.id).collect(),
                     key: card.key,
+                    for_you: !shprd_views::cards::is_operational_run_wide(escalation),
                 })
             })
             .collect(),
@@ -1100,5 +1101,36 @@ mod tests {
         let task = snapshot(&state, NOW).tasks.remove(0);
         assert_eq!(task.derived.status, DerivedStatusDto::NeedsYou);
         assert!(!task.derived.for_you, "{:?}", task.derived);
+    }
+
+    #[test]
+    fn a_run_wide_engine_card_is_not_for_you_and_an_agents_is() {
+        let mut state = with(vec![]);
+        let escalation = |seq, by_agent| shprd_core::state::Escalation {
+            seq,
+            task: None,
+            body: "The local `main` has commits the remote lacks: abc fix".to_string(),
+            default_action: "push".to_string(),
+            by_agent,
+        };
+        state.escalations.push(escalation(90, false));
+        state.escalations.push(escalation(91, true));
+        let needs = snapshot(&state, NOW).needs;
+        let for_you = |seq| {
+            needs
+                .iter()
+                .find(|need| need.seq == seq)
+                .map(|need| need.for_you)
+        };
+        assert_eq!(for_you(90), Some(false));
+        assert_eq!(for_you(91), Some(true));
+        // Dismissed: the card is history and is drawn nowhere.
+        state.dismissed_needs.insert(90);
+        assert!(
+            snapshot(&state, NOW)
+                .needs
+                .iter()
+                .all(|need| need.seq != 90)
+        );
     }
 }

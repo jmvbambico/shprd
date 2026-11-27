@@ -463,7 +463,10 @@ function merge(first, next) {
 export function cards(state, asks) {
   const open = (asks?.asks ?? []).map(fromAsk);
   const ids = new Set(open.map((card) => card.ask));
+  // A card the coordinator settles (an operational card about the run itself,
+  // `for_you: false`) is told to it as news and is drawn nowhere a person decides.
   const needs = (state?.needs ?? [])
+    .filter((need) => need.for_you !== false)
     .filter((need) => !namesOpenAsk(need.body, ids))
     .map((need) => withReadmits(fromNeed(need), state));
   const out = [];
