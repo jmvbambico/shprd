@@ -5998,7 +5998,7 @@ project_dirs = []
             ask: "dictation".to_string(),
             ask_kind: shprd_core::ask::AskKind::Question,
             text: "which microphone?".to_string(),
-            options: vec!["built-in".to_string()],
+            options: Vec::new(),
             created_at_ms: 1_000,
             expires_at_ms: None,
         })
