@@ -148,6 +148,16 @@ const WORKER_M11_SCOPE: &str = include_str!("../../../data/templates/history/wor
 const WORKER_M11_SCOPE_DIGEST: &str =
     "d0d28c2a06ec40f4a62ac5ca0ce6bd59b8ebbca5851aa174ba8c678e781b28ca";
 
+/// The worker wording before it banned real or shared data in proofs and said
+/// an ask's options are things the person does on the board.
+#[cfg(test)]
+const WORKER_M11_PRE_REAL_DATA: &str =
+    include_str!("../../../data/templates/history/worker-m11-pre-real-data.md");
+
+/// The SHA-256 of [`WORKER_M11_PRE_REAL_DATA`].
+const WORKER_M11_PRE_REAL_DATA_DIGEST: &str =
+    "b9ca850ee72a94477eed2b230fe28d36e93029e73223b2a5a53e5aac13da761a";
+
 /// The worker's retired defaults.
 const WORKER_OLD: &[&str] = &[
     WORKER_FIRST_DIGEST,
@@ -158,6 +168,7 @@ const WORKER_OLD: &[&str] = &[
     WORKER_PRE_IDENTITY_DIGEST,
     WORKER_M11_LONG_DIGEST,
     WORKER_M11_SCOPE_DIGEST,
+    WORKER_M11_PRE_REAL_DATA_DIGEST,
 ];
 
 /// The backup wording M9.5 shipped, retired for the same reason as the worker's:
@@ -291,6 +302,16 @@ const ASSISTANT_M11_ASK_PERSON: &str =
 const ASSISTANT_M11_ASK_PERSON_DIGEST: &str =
     "717c372ab7520dd34e1eb80ab1d54cfba3c28e5df6647a0690aede3fa0baa37a";
 
+/// The coordinator wording that said the person never types a command yet sent
+/// them to human-only verbs, and did not check for a moved base before landing.
+#[cfg(test)]
+const ASSISTANT_M11_PRE_BOARD_BUTTONS: &str =
+    include_str!("../../../data/templates/history/assistant-m11-pre-board-buttons.md");
+
+/// The SHA-256 of [`ASSISTANT_M11_PRE_BOARD_BUTTONS`].
+const ASSISTANT_M11_PRE_BOARD_BUTTONS_DIGEST: &str =
+    "20b992a8a0cfbdaa80f53aa1c7be4e9174719fa0d9f1db8980ed27e0202a9810";
+
 /// The coordinator's retired defaults.
 const ASSISTANT_OLD: &[&str] = &[
     ASSISTANT_M9_ASKS_DIGEST,
@@ -303,6 +324,7 @@ const ASSISTANT_OLD: &[&str] = &[
     ASSISTANT_M11_LONG_DIGEST,
     ASSISTANT_M11_SCOPE_DIGEST,
     ASSISTANT_M11_ASK_PERSON_DIGEST,
+    ASSISTANT_M11_PRE_BOARD_BUTTONS_DIGEST,
 ];
 
 /// The reviewer wording M9.6 shipped, which did not name the asks the packet

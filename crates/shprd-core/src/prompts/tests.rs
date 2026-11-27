@@ -956,3 +956,35 @@ fn the_reviewer_blocks_only_on_code_defects_and_the_tasks_criteria() {
     let installed = ensure(temp.path(), "reviewer").expect("the upgrade runs");
     assert_eq!(installed.change, Change::Upgraded, "{installed:?}");
 }
+
+/// The worker bans real data in proofs and phrases asks as board actions; the
+/// coordinator names board buttons and checks for a moved base. The retired
+/// wordings upgrade.
+#[test]
+fn worker_and_coordinator_wordings_are_current_and_retired_ones_upgrade() {
+    let worker = shipped_prompt("worker").expect("shipped").text;
+    assert!(worker.contains("never run the work against real or shared data"));
+    assert!(worker.contains("never phrase one as the person running a command"));
+    let assistant = shipped_prompt("assistant").expect("shipped").text;
+    assert!(!assistant.contains("they never type a command here"));
+    assert!(assistant.contains("agent propose"));
+    assert!(assistant.contains("check whether the base moved"));
+    for (id, old, old_digest) in [
+        (
+            "worker",
+            WORKER_M11_PRE_REAL_DATA,
+            WORKER_M11_PRE_REAL_DATA_DIGEST,
+        ),
+        (
+            "assistant",
+            ASSISTANT_M11_PRE_BOARD_BUTTONS,
+            ASSISTANT_M11_PRE_BOARD_BUTTONS_DIGEST,
+        ),
+    ] {
+        assert_eq!(digest(old.as_bytes()), old_digest);
+        let temp = dir();
+        std::fs::write(path_of(temp.path(), id), old).expect("old");
+        let installed = ensure(temp.path(), id).expect("the upgrade runs");
+        assert_eq!(installed.change, Change::Upgraded, "{installed:?}");
+    }
+}
