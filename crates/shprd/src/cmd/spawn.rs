@@ -500,7 +500,9 @@ fn adopt_live_worker(
         .iter()
         .find(|tab| match recorded.as_deref().map(str::trim) {
             Some(id) if !id.is_empty() => tab.id.as_str() == id,
-            _ => tab.title == title,
+            // Without a record only a first attempt matches by title: on a retry
+            // the same title is the failed attempt's own tab, not a new one.
+            _ => task.attempts.is_empty() && tab.title == title,
         });
     let Some(tab) = found else {
         return Ok(None);
