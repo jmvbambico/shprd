@@ -617,6 +617,13 @@ impl Worker {
         let now_ms = SystemClock.now_ms();
         for task in clean::lingering(&state, live) {
             self.close_worker_task(&task);
+            // A reviewer tab keeps the task live as much as its worker's does,
+            // so every attempt's reviewer is closed too.
+            if let Some(entry) = state.tasks.get(&task) {
+                for attempt in &entry.attempts {
+                    self.close_reviewer_task(&task, attempt.n);
+                }
+            }
         }
         let layout = Layout::from_settings(&self.home, &self.repo);
         let ready = clean::eligible(&state, live, now_ms);

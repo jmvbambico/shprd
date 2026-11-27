@@ -81,6 +81,7 @@ struct Fixture {
     home: PathBuf,
     windows: Arc<Windows>,
     closed: Arc<AtomicUsize>,
+    reviewers_closed: Arc<Mutex<Vec<(String, u32)>>>,
 }
 
 fn git(dir: &Path, args: &[&str]) {
@@ -116,6 +117,7 @@ impl Fixture {
             home,
             windows: Arc::new(Windows::default()),
             closed: Arc::new(AtomicUsize::new(0)),
+            reviewers_closed: Arc::new(Mutex::new(Vec::new())),
         };
         fixture.append(
             Actor::Engine,
@@ -248,6 +250,12 @@ impl Fixture {
             closed.fetch_add(1, Ordering::SeqCst);
             Ok(())
         });
+        let seen = Arc::clone(&self.reviewers_closed);
+        let close_reviewer: shprd_server::ReviewCloser =
+            Arc::new(move |_: &Path, task: &str, attempt: u32| {
+                seen.lock().unwrap().push((task.to_string(), attempt));
+                Ok(())
+            });
         Worker {
             repo: self.repo.clone(),
             home: self.home.clone(),
@@ -259,7 +267,7 @@ impl Fixture {
             local: false,
             start,
             review: None,
-            close_reviewer: None,
+            close_reviewer: Some(close_reviewer),
             switch_reviewers: None,
             close_worker: Some(close),
             actor: Actor::Engine,
@@ -324,6 +332,24 @@ impl Fixture {
             .map(|escalation| escalation.body)
             .collect()
     }
+}
+
+#[test]
+fn a_landed_task_with_a_reviewer_window_has_it_closed() {
+    let fixture = Fixture::new();
+    fixture.task("T1");
+    fixture.land("T1");
+    fixture.windows.live.lock().unwrap().insert("T1".into());
+    fixture.pass();
+    assert!(
+        fixture
+            .reviewers_closed
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(task, _)| task == "T1"),
+        "the reviewer's window is closed with the worker's"
+    );
 }
 
 #[test]
