@@ -374,6 +374,17 @@ pub struct TaskDerivedDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub reason: Option<String>,
+    /// Whether the row is the person's. A row the coordinator settles itself
+    /// (an operational card, a stopped agent) still reads Needs you, so the
+    /// person can see it, but is not counted in For you or the Needs you
+    /// badge. A payload without it comes from an old service: read it as true.
+    #[serde(default = "yes")]
+    pub for_you: bool,
+}
+
+/// `true`, for a field that an older service never sent.
+fn yes() -> bool {
+    true
 }
 
 /// The last progress line an agent recorded for a task.
@@ -802,6 +813,12 @@ pub struct SnapshotDto {
     pub asks: Vec<AskDto>,
     /// Whether the run has finished.
     pub finished: bool,
+    /// The integration pull request, once every task has landed or been
+    /// dropped: the one card besides a protected-path accept that is the
+    /// person's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub integration_pr: Option<IntegrationPrDto>,
     /// The spaces the sidebar's tree draws: one per repository this service
     /// serves.
     #[serde(default)]
@@ -814,6 +831,18 @@ pub struct SnapshotDto {
     /// role shows this word.
     #[serde(default)]
     pub role_titles: std::collections::BTreeMap<String, String>,
+}
+
+/// The run's integration pull request, as the board's "For you" draws it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "IntegrationPrDto.ts")]
+pub struct IntegrationPrDto {
+    /// The branch the pull request merges into.
+    pub base: String,
+    /// The run's integration branch, which the pull request carries.
+    pub branch: String,
+    /// How many tasks landed on it.
+    pub landed: u32,
 }
 
 /// One space of the sidebar's tree: a repository.
@@ -2093,6 +2122,7 @@ pub(crate) fn exports() -> Result<Vec<(String, String)>, ts_rs::ExportError> {
         one::<AgentOpenDto>()?,
         one::<AgentTabDto>()?,
         one::<SpaceDto>()?,
+        one::<IntegrationPrDto>()?,
         one::<LiveAgentDto>()?,
         one::<AgentOutputDto>()?,
         one::<AgentAttachDto>()?,

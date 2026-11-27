@@ -247,6 +247,8 @@ export function treeTasks(state, space, spaceCount = 1, now = Date.now()) {
       id: task.id,
       title: String(task.title ?? ""),
       status: task.derived?.status ?? "to_do",
+      // A needs-you row the coordinator settles itself is not the person's.
+      forYou: task.derived?.for_you !== false,
       glyph: shape.glyph,
       tone: shape.tone,
       pct: shape.pct,
@@ -273,7 +275,7 @@ export function spaceTree(state, herdrSpaces = [], now = Date.now()) {
       folder: space.folder ?? "",
       plain: false,
       tasks,
-      needs: tasks.filter((task) => task.status === "needs_you").length,
+      needs: tasks.filter((task) => task.status === "needs_you" && task.forYou !== false).length,
       ready: tasks.filter((task) => task.status === "ready").length,
     };
   });

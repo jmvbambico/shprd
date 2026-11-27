@@ -87,6 +87,34 @@ export function isLive(task) {
   return task?.status !== "dropped";
 }
 
+/**
+ * Whether a row is the person's: a needs-you row is theirs unless the service
+ * says the coordinator settles it itself (`for_you: false`, an operational card
+ * or a stopped agent). A payload without the field is an old service's: true.
+ */
+export function forYou(task) {
+  return task?.derived?.for_you !== false;
+}
+
+/**
+ * The integration pull request as a row for "For you", once the service reports
+ * one (every task landed or dropped). It is not a task: `synthetic` tells a row
+ * to open nothing and offer no verb.
+ */
+export function integrationRow(state) {
+  const pr = state?.integration_pr;
+  if (!pr) return null;
+  const n = Number(pr.landed ?? 0);
+  return {
+    id: "PR",
+    title: `Review the pull request into ${pr.base}`,
+    status: "integration_pr",
+    synthetic: "integration_pr",
+    derived: { status: "needs_you", need: "attention", reason: `${n} ${n === 1 ? "task" : "tasks"} landed on ${pr.branch}`, for_you: true },
+    added_at_ms: Number.MAX_SAFE_INTEGER,
+  };
+}
+
 /** The counts a badge or the status bar shows, over the live tasks. */
 export function counts(state, now = Date.now()) {
   const tally = { needs: 0, ready: 0, working: 0, done: 0, total: 0, open_asks: 0 };
@@ -95,11 +123,16 @@ export function counts(state, now = Date.now()) {
     tally.total += 1;
     const word = task?.derived?.status;
     // A task that needs the person is always counted, however old (UXC-7).
-    if (word === "needs_you") tally.needs += 1;
-    else if (word === "ready") tally.ready += 1;
+    // A card the coordinator settles itself (operational) shows on the row but is not the person's.
+    if (word === "needs_you") {
+      if (forYou(task)) tally.needs += 1;
+      else tally.working += 1;
+    } else if (word === "ready") tally.ready += 1;
     else if (word === "working" || word === "merging") tally.working += 1;
     else if (word === "done") tally.done += 1;
   }
+  // The integration pull request is the person's too.
+  if (state?.integration_pr) tally.needs += 1;
   tally.open_asks = (state?.asks ?? []).length;
   return tally;
 }
@@ -351,8 +384,16 @@ export function listView(
   }
   const first = groupBy === "status" ? [] : ["needs_you", "ready"];
   if (groupBy !== "status") {
-    const you = byRank([...rest.filter((t) => word(t) === "needs_you"), ...rest.filter((t) => word(t) === "ready")]);
+    const mine = byRank([
+      ...rest.filter((t) => word(t) === "needs_you" && forYou(t)),
+      ...rest.filter((t) => word(t) === "ready"),
+    ]);
+    const pr = searching ? null : integrationRow(state);
+    const you = pr ? [pr, ...mine] : mine;
     if (you.length > 0) groups.push(make("you", "For you", you));
+    // What the coordinator settles itself stays visible, under its own heading.
+    const theirs = byRank(rest.filter((t) => word(t) === "needs_you" && !forYou(t)));
+    if (theirs.length > 0) groups.push(make("coordinator", "With the coordinator", theirs));
   }
   for (const w of STATUS_ORDER) {
     if (first.includes(w)) continue;
@@ -563,7 +604,7 @@ function cardActions(task, state) {
 export function rowActions(task, state = null) {
   const word = task?.derived?.status;
   const status = task?.status;
-  if (!isLive(task)) return [];
+  if (!isLive(task) || task?.synthetic) return [];
   // A row that needs the person offers what its newest decision card offers: its
   // primary button, or Answer for an ask with options, and Drop (UXC-7).
   const card = word === "needs_you" && state ? cardActions(task, state) : null;

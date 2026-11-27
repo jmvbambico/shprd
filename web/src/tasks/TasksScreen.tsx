@@ -258,6 +258,21 @@ export function TasksScreen({ client, board, onOpen, onReview, onDrop }: TasksSc
                       {group.tasks.map((task) => (
                         <TaskRow key={task.id} task={task} onOpen={onOpen} onReview={onReview} onDrop={onDrop} onVerb={verb} />
                       ))}
+                      {group.integration ? (
+                        <li className="task-row" data-status="needs_you" data-row="integration-pr">
+                          <span className="task-row-main">
+                            <span className="task-row-text">
+                              <span className="task-row-title">Review the pull request into {group.integration.base}</span>
+                              <span className="task-row-line">
+                                <span className="task-row-says">
+                                  {group.integration.landed} {group.integration.landed === 1 ? "task" : "tasks"} landed on{" "}
+                                  {group.integration.branch}
+                                </span>
+                              </span>
+                            </span>
+                          </span>
+                        </li>
+                      ) : null}
                     </ul>
                   )}
                   {!group.shut && isDone && group.more && !searching ? (

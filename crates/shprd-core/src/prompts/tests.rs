@@ -876,6 +876,29 @@ fn the_scope_limit_wordings_upgrade_to_the_hint() {
     );
 }
 
+/// The coordinator settles operational cards itself, and an install of the
+/// wording before that upgrades.
+#[test]
+fn the_coordinator_settles_operational_cards_itself() {
+    let assistant = strip_leading_comment(shipped_prompt("assistant").expect("shipped").text);
+    assert!(
+        assistant.contains("Everything operational is yours"),
+        "{assistant}"
+    );
+    assert!(
+        assistant.contains("tell the person in one line what you chose"),
+        "{assistant}"
+    );
+    assert_eq!(
+        digest(ASSISTANT_M11_ASK_PERSON.as_bytes()),
+        ASSISTANT_M11_ASK_PERSON_DIGEST
+    );
+    let temp = dir();
+    std::fs::write(path_of(temp.path(), "assistant"), ASSISTANT_M11_ASK_PERSON).expect("old");
+    let installed = ensure(temp.path(), "assistant").expect("the upgrade runs");
+    assert_eq!(installed.change, Change::Upgraded, "{installed:?}");
+}
+
 /// Every shipped body (credit comment stripped) names no other product.
 #[test]
 fn no_shipped_body_names_another_product() {

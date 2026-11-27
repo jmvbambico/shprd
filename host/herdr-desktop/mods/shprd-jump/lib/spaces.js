@@ -171,10 +171,11 @@ export function sidebarRows(state, list = []) {
       sub: (look.status === "needs_you" ? needWords(task, state) : null) ?? secondLine(task),
       status: look.status,
       word: look.word,
-      tone: look.tone,
+      // A card the coordinator settles itself is not the person's: it reads amber (on it), not red.
+      tone: look.status === "needs_you" && task?.derived?.for_you === false ? "amber" : look.tone,
       glyph: look.glyph,
       pct: look.pct,
-      needs: look.status === "needs_you",
+      needs: look.status === "needs_you" && task?.derived?.for_you !== false,
       ready: look.status === "ready",
       active: Boolean(space?.active),
       space: space ?? null,

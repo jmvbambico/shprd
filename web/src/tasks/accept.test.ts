@@ -119,7 +119,7 @@ describe("verbs", () => {
 
   it("offers Send back only for a failed attempt, and nothing for a settled task", () => {
     expect(verbs(task("F", "queued", { status: "failed" }), "ask").sendBack).toBe(true);
-    expect(verbs(task("D", "done"), "ask")).toEqual({ accept: false, sendBack: false, drop: false, note: null });
+    expect(verbs(task("D", "done"), "ask")).toEqual({ accept: false, sendBack: false, drop: false, note: null, acceptBlocked: null });
     expect(whereNow(task("D", "done"))).toBe("Landed: its work is in the base branch.");
     expect(whereNow(null)).toBe("This task is no longer on the board.");
   });
