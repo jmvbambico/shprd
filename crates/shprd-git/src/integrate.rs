@@ -407,10 +407,15 @@ pub fn release_if_held(path: &Path) -> bool {
 /// ref is then moved with `git branch -f`. The commits stay reachable on the task
 /// branches and in the reflog. A branch that is checked out in a worktree is left
 /// alone, because moving it would change that worktree's files; so is a
-/// repository with no remote or a branch the remote does not have. Returns
+/// repository with no GitHub remote or a branch the remote does not have. Returns
 /// whether the ref moved.
 pub fn realign_with_remote(repo: &Path, branch: &str) -> bool {
     let git = Git::new(repo);
+    // Only a GitHub remote is a forge a landing goes through; any other
+    // remote's local branch may hold work that is not on it yet.
+    if !crate::land::forge_expected(&git) {
+        return false;
+    }
     let Some(remote) = crate::worktree::remote_of(&git) else {
         return false;
     };

@@ -121,3 +121,24 @@ fn a_github_remote_always_expects_the_forge_so_a_landing_never_goes_local() {
     let bare_only = Repo::new();
     assert!(!shprd_git::land::forge_expected(&Git::new(&bare_only.path)));
 }
+
+#[test]
+fn a_non_github_remote_keeps_its_local_only_integration_commit() {
+    let repo = Repo::new();
+    let bare = repo.path.parent().unwrap().join("plain-origin.git");
+    let out = std::process::Command::new("git")
+        .args(["init", "--bare", "-b", "main"])
+        .arg(&bare)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    repo.git(&["remote", "add", "origin", bare.to_str().unwrap()]);
+    repo.git(&["push", "-u", "origin", "main"]);
+    // A local-only landing on main that the remote never had.
+    repo.commit("local.txt", "local\n", "local-only landing");
+    let ours = repo.git(&["rev-parse", "main"]);
+    repo.git(&["switch", "-q", "-c", "elsewhere"]);
+    // Both the server idle path and the CLI landing call this helper.
+    assert!(!integrate::realign_with_remote(&repo.path, "main"));
+    assert_eq!(repo.git(&["rev-parse", "main"]), ours);
+}
