@@ -1973,17 +1973,9 @@ impl ResolvedRole {
     /// ignored, because a task picks a line by its program.
     pub fn lines(&self) -> Vec<WorkerLine> {
         let mut lines: Vec<WorkerLine> = Vec::new();
-        // The person's own `agents` list outranks the one program the old
-        // `config.toml` still names: a settings file that lists its programs
-        // never meant the pre-M9 key to go first (a reviewer list of only `pi`
-        // once reviewed on the `codex` an old roster named).
-        let legacy_first = self
-            .agent
-            .as_ref()
-            .is_some_and(|agent| agent.source == Source::Legacy)
-            && !self.agents.value.is_empty()
-            && self.agents.source != Source::Legacy;
-        if let Some(agent) = self.agent.as_ref().filter(|_| !legacy_first) {
+        // The role's own `agent` is always the first line, whatever layer set it:
+        // `agents` only lists what follows when it cannot run.
+        if let Some(agent) = self.agent.as_ref() {
             let some = |field: &Option<Sourced<String>>| {
                 field
                     .as_ref()
@@ -2532,7 +2524,11 @@ impl Loaded {
             },
             Some(value) => {
                 let inherited = self.preview(scope, key, None, task);
-                let same = inherited.get(key).map(|sourced| &sourced.value) == Some(&value);
+                // A value the old `config.toml` still supplies is not a settings
+                // layer: setting it to the same word must write the new layer, or
+                // the person's choice is never stored.
+                let same = inherited.get(key).map(|sourced| &sourced.value) == Some(&value)
+                    && inherited.source_of(key) != Some(Source::Legacy);
                 if same {
                     (WriteOutcome::EqualToInherited, None)
                 } else {
