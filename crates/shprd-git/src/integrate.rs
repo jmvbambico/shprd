@@ -483,7 +483,7 @@ pub fn realign_outcome(repo: &Path, branch: &str, authed: impl Fn(&str) -> bool)
         .run(&["worktree", "list", "--porcelain"])
         .is_ok_and(|list| list.lines().any(|line| line == format!("branch {local}")));
     if held {
-        return Realign::Aligned;
+        return Realign::Unchanged;
     }
     if git.run(&["branch", "-f", branch, &theirs]).is_ok() {
         Realign::Moved
