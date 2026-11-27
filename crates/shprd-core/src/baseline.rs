@@ -43,6 +43,11 @@ pub struct BaselineEntry {
 pub struct Baselines {
     /// One entry per gate command.
     pub entries: Vec<BaselineEntry>,
+    /// True when the base moved (a sync) and no baseline was recorded for the
+    /// new base yet: the entries describe an older base, so none may excuse a
+    /// failure (fail closed).
+    #[serde(default)]
+    pub stale: bool,
 }
 
 impl Baselines {
@@ -64,6 +69,13 @@ impl Baselines {
             None => self.entries.push(entry),
         }
     }
+}
+
+/// Rewrites `root` (the checkout a gate ran in) out of `output`, so the paths a
+/// linter prints absolutely read the same in any checkout folder.
+pub fn relativize(output: &str, root: &std::path::Path) -> String {
+    let prefix = format!("{}/", root.display().to_string().trim_end_matches('/'));
+    output.replace(&prefix, "")
 }
 
 /// Fingerprints a gate's output: the last error count it states, and the files
@@ -152,6 +164,9 @@ pub enum Verdict {
 
 /// Judges a failing check (`now` is its output tail's fingerprint).
 pub fn judge(baselines: &Baselines, command: &str, output_tail: &str) -> Verdict {
+    if baselines.stale {
+        return Verdict::Regression;
+    }
     match baselines.find(command) {
         Some(base) if !base.passed && no_worse(&base.fingerprint, &fingerprint(output_tail)) => {
             Verdict::PreExisting
@@ -159,6 +174,10 @@ pub fn judge(baselines: &Baselines, command: &str, output_tail: &str) -> Verdict
         _ => Verdict::Regression,
     }
 }
+
+/// The line a failing check carries when the baselines are stale, so the card
+/// says why the failure is judged a regression.
+pub const STALE_NOTE: &str = "gate baseline is stale: the base moved and its re-baseline did not finish, so this failure counts as a regression";
 
 /// The label a pre-existing failure is recorded with: the base's commit and,
 /// when it had one, its error count. The check keeps its true exit code.
@@ -200,6 +219,7 @@ mod tests {
                 },
                 base_sha: "abcdef1234567".into(),
             }],
+            stale: false,
         }
     }
 
@@ -264,6 +284,30 @@ mod tests {
     fn a_later_lower_count_does_not_hide_the_real_one() {
         let fp = fingerprint("70 errors\n3 errors fixed");
         assert_eq!(fp.errors, Some(70));
+    }
+
+    #[test]
+    fn a_stale_baseline_excuses_nothing() {
+        let mut base = entry(62, &["src/a.ts"]);
+        let tail = "src/a.ts\n62 errors";
+        assert_eq!(judge(&base, "npm run lint", tail), Verdict::PreExisting);
+        base.stale = true;
+        assert_eq!(judge(&base, "npm run lint", tail), Verdict::Regression);
+        assert_eq!(excuse(&base, "npm run lint", tail), None);
+    }
+
+    #[test]
+    fn paths_match_across_checkout_folders() {
+        let a = relativize(
+            "/tmp/baseline-checkout-1/src/a.ts:3:4 error\n62 errors",
+            std::path::Path::new("/tmp/baseline-checkout-1"),
+        );
+        let b = relativize(
+            "/work/tree/src/a.ts:3:4 error\n62 errors",
+            std::path::Path::new("/work/tree/"),
+        );
+        assert_eq!(fingerprint(&a), fingerprint(&b));
+        assert_eq!(fingerprint(&a).files, vec!["src/a.ts"]);
     }
 
     #[test]

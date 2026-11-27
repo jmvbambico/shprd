@@ -1192,12 +1192,16 @@ impl RunState {
                 for entry in entries {
                     self.gate_baselines.upsert(entry.clone());
                 }
+                self.gate_baselines.stale = false;
             }
             EventKind::OrchestratorNotified { up_to_seq } => {
                 self.notified_up_to_seq = Some(*up_to_seq);
             }
             EventKind::BaseSynced { base_sha, int_sha } => {
                 self.last_sync = Some((base_sha.clone(), int_sha.clone(), event.seq));
+                // The base moved: the baselines describe the old one until a
+                // `GateBaselined` follows.
+                self.gate_baselines.stale = true;
             }
             EventKind::RunFinished { abandoned } => {
                 self.finished = true;
@@ -1680,6 +1684,43 @@ mod tests {
             Some(("bbb222".to_string(), true, 4)),
             "the later event wins"
         );
+    }
+
+    #[test]
+    fn a_synced_base_makes_the_baselines_stale_until_they_are_recorded_again() {
+        let baselined = |seq| {
+            ev(
+                seq,
+                EventKind::GateBaselined {
+                    base_sha: "aaa111".to_string(),
+                    entries: Vec::new(),
+                },
+            )
+        };
+        let synced = ev(
+            4,
+            EventKind::BaseSynced {
+                base_sha: "aaa111".to_string(),
+                int_sha: "bbb222".to_string(),
+            },
+        );
+        let fresh = match fold_extra(vec![baselined(3)]) {
+            Ok(state) => state,
+            Err(err) => panic!("must fold: {err}"),
+        };
+        assert!(!fresh.gate_baselines.stale);
+        // The base moved and no baseline followed (the re-baseline failed).
+        let stale = match fold_extra(vec![baselined(3), synced.clone()]) {
+            Ok(state) => state,
+            Err(err) => panic!("must fold: {err}"),
+        };
+        assert!(stale.gate_baselines.stale, "fail closed after a moved base");
+        // A baseline recorded after the sync makes them current again.
+        let again = match fold_extra(vec![baselined(3), synced, baselined(5)]) {
+            Ok(state) => state,
+            Err(err) => panic!("must fold: {err}"),
+        };
+        assert!(!again.gate_baselines.stale);
     }
 
     #[test]

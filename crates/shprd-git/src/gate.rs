@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use shprd_core::baseline::{BaselineEntry, fingerprint};
+use shprd_core::baseline::{BaselineEntry, fingerprint, relativize};
 use shprd_core::event::{GATE_OUTPUT_TAIL_CHARS, GateStep};
 use shprd_core::spawn;
 
@@ -91,7 +91,7 @@ pub fn run_baseline(
                 fingerprint: if passed {
                     Default::default()
                 } else {
-                    fingerprint(&step.output_tail)
+                    fingerprint(&relativize(&step.output_tail, worktree))
                 },
                 base_sha: base_sha.to_string(),
             }
