@@ -675,10 +675,28 @@ pub(crate) fn queued_for_slot(env: &SpawnEnv<'_>, state: &RunState, task: &str) 
         .count();
     (running >= usize::try_from(max).unwrap_or(usize::MAX)).then(|| {
         format!(
-            "queued: {running} of {max} workers are running (`tasks.max_running`); {task} starts \
-             when one finishes"
+            "{} {running} of {max} workers are running (`tasks.max_running`); {task} starts \
+             when one finishes",
+            shprd_server::start_queue::QUEUED_PREFIX
         )
     })
+}
+
+/// Answers a start the cap held back: puts `task` in the service's start queue,
+/// so a later pass starts it once a slot is free, and returns the plain line.
+///
+/// A queue that cannot be written is said in the line rather than failing the
+/// start: the person is told the task waits, and that the wait is not kept.
+pub(crate) fn queue_start(ctx: &Ctx, home: Option<&Path>, task: &str, queued: String) -> String {
+    let dir = crate::ctx::resolve_home(home).map(|home| {
+        shprd_server::repo_state_dir(&crate::ctx::resolve_state_home(&home), &ctx.root)
+    });
+    match dir.map(|dir| shprd_server::start_queue::enqueue(&dir, task)) {
+        Ok(Ok(())) => queued,
+        _ => {
+            format!("{queued} (the wait could not be saved: start it again when a worker is free)")
+        }
+    }
 }
 
 /// The effort to pass and the warning when the model cannot use it.
@@ -6482,6 +6500,15 @@ project_dirs = []
         assert!(after.tasks["T2"].attempts.is_empty());
         // The running task's own retry is not counted against itself.
         assert!(queued_for_slot(&env, &state, "T1").is_none());
+        // The answer is kept: the service's state directory now lists T2, so a
+        // later pass starts it when a slot is free.
+        let line = queue_start(&ctx, Some(scratch.home.path()), "T2", queued.clone());
+        assert_eq!(line, queued);
+        let dir = shprd_server::repo_state_dir(
+            &crate::ctx::resolve_state_home(scratch.home.path()),
+            &ctx.root,
+        );
+        assert_eq!(shprd_server::start_queue::waiting(&dir), ["T2"]);
     }
 
     /// A retry answers the open "review rounds spent" ask, so the next review

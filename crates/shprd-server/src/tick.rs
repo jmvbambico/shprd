@@ -65,6 +65,7 @@ use crate::ledger;
 use crate::news::{self, NewsDesk, NewsSent};
 use crate::pass;
 use crate::service::AfterWrite;
+use crate::start_queue;
 
 /// Where the facts a pass needs come from.
 ///
@@ -552,10 +553,14 @@ impl Worker {
         let quiet = self.quiet_failures(&state);
         let landing = steps.iter().any(|step| matches!(step, Step::Land { .. }));
         self.clear_scope_waits(&state);
+        let planned: BTreeSet<String> = steps.iter().map(|step| step.task().to_string()).collect();
         for step in steps {
             let result = self.run_step(&config, &state, &step, &quiet);
             report.steps.push(result);
         }
+        // Starts the cap held back (a retry, a start action, an agent spawn)
+        // go next, once a slot is free, so a wait is never a refusal.
+        self.start_queued(&config, &planned, &mut report);
         // With no land pending, the `_int` worktree must not hold the integration
         // branch: a base sync takes it back and nothing else lets it go.
         if !landing {
@@ -585,6 +590,54 @@ impl Worker {
             SystemClock.now_ms(),
         ));
         Ok(report)
+    }
+
+    /// Starts the tasks whose start waited for a slot, while slots are free.
+    ///
+    /// A queued task leaves the queue when it started, or can no longer start
+    /// (it is working, handed in, landed or gone); one the cap still holds
+    /// back stays for the next pass. A task the pass planned a step for is left
+    /// to that step.
+    fn start_queued(&self, config: &Config, planned: &BTreeSet<String>, report: &mut TickReport) {
+        for task in start_queue::waiting(&self.state_dir) {
+            let Ok((state, _)) = ledger::load(&self.repo) else {
+                return;
+            };
+            let startable = state.tasks.get(&task).is_some_and(|found| {
+                matches!(found.status, TaskStatus::Queued | TaskStatus::Failed)
+            });
+            if !startable {
+                let _ = start_queue::dequeue(&self.state_dir, &task);
+                continue;
+            }
+            if planned.contains(&task) {
+                continue;
+            }
+            let working = state
+                .tasks
+                .values()
+                .filter(|other| other.status == TaskStatus::Working)
+                .count();
+            if working >= usize::try_from(config.tick.max_running.max(1)).unwrap_or(usize::MAX) {
+                return;
+            }
+            let step = Step::Start { task: task.clone() };
+            match (self.start)(&self.repo, &task) {
+                Ok(detail) if detail.starts_with(start_queue::QUEUED_PREFIX) => return,
+                Ok(detail) => {
+                    let _ = start_queue::dequeue(&self.state_dir, &task);
+                    match self.report_spawn(&step, detail) {
+                        Ok(done) => report.steps.push(done),
+                        Err(reason) => report.steps.push(StepReport::failed(&step, reason)),
+                    }
+                }
+                Err(reason) => {
+                    // A start the rules refuse is not waiting for a slot.
+                    let _ = start_queue::dequeue(&self.state_dir, &task);
+                    report.steps.push(StepReport::failed(&step, reason));
+                }
+            }
+        }
     }
 
     /// Cleans up the worktrees, branches and windows of tasks that landed or were

@@ -410,7 +410,7 @@ fn stale_pr_comment(task_id: &str) -> String {
 /// the task back as a new attempt: the finding is the part of the new brief that
 /// says to carry the earlier commits over and resolve these files. No card is
 /// raised, because nobody has to decide anything.
-fn record_conflict(
+pub(crate) fn record_conflict(
     ctx: &Ctx,
     task: &Task,
     task_id: &str,
@@ -449,7 +449,7 @@ fn record_conflict(
 }
 
 /// What a clashing landing prints: the plain sentence, then the files.
-fn conflict_message(task_id: &str, err: &land::LandError) -> String {
+pub(crate) fn conflict_message(task_id: &str, err: &land::LandError) -> String {
     match err {
         land::LandError::Conflict { files, .. } if !files.is_empty() => format!(
             "{} (files in conflict: {})",
