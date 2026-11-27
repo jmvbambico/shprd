@@ -1149,20 +1149,26 @@ impl RunState {
                 outcome,
                 ..
             } => {
-                // Every landing settles the task: it is done. A landing that
-                // found nothing of its own to merge is done too, and keeps the
-                // head it looked at in `nothing_to_merge`, which is what a
-                // board reads to say "done, nothing to merge".
+                // A landing that merged something, and one that found nothing of
+                // its own to merge, both settle the task: it is done. The
+                // second keeps the head it looked at in `nothing_to_merge`,
+                // which is what a board reads to say "done, nothing to merge".
                 if let Some(entry) = self.tasks.get_mut(task) {
-                    entry.status = TaskStatus::Integrated;
-                    if outcome.is_landed() {
-                        if let (Some(pr), Some(number)) = (entry.pr.as_mut(), number)
-                            && pr.number == *number
-                        {
-                            pr.merged = true;
+                    match outcome {
+                        crate::event::LandOutcome::Merged
+                        | crate::event::LandOutcome::AlreadyMerged
+                        | crate::event::LandOutcome::SquashMerged => {
+                            entry.status = TaskStatus::Integrated;
+                            if let (Some(pr), Some(number)) = (entry.pr.as_mut(), number)
+                                && pr.number == *number
+                            {
+                                pr.merged = true;
+                            }
                         }
-                    } else {
-                        entry.nothing_to_merge = Some(head.clone());
+                        crate::event::LandOutcome::NothingToMerge => {
+                            entry.status = TaskStatus::Integrated;
+                            entry.nothing_to_merge = Some(head.clone());
+                        }
                     }
                 }
             }
