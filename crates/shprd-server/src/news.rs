@@ -686,6 +686,22 @@ mod tests {
     }
 
     #[test]
+    fn a_task_that_landed_with_nothing_to_merge_is_done() {
+        let mut kinds = landed(7);
+        if let Some(EventKind::TaskLanded {
+            number, outcome, ..
+        }) = kinds.last_mut()
+        {
+            *number = None;
+            *outcome = LandOutcome::NothingToMerge;
+        }
+        let state = folded(kinds);
+        let task = state.tasks.get("A").expect("task A folded");
+        assert_eq!(task.status, shprd_core::state::TaskStatus::Integrated);
+        assert_eq!(outcome(task).as_deref(), Some("nothing to merge"));
+    }
+
+    #[test]
     fn a_backup_that_started_is_the_one_told() {
         let events = {
             let mut kinds = run();
