@@ -249,6 +249,13 @@ pub fn spawn(
 ) -> Result<SpawnReport, CliError> {
     let state = env.ctx.state()?;
     let task = task_of(&state, &req.task)?;
+    // The one gate every start passes: a retry action, a review-out answer, a
+    // clash redo and `shprd agent spawn` all end here, so the cap holds even
+    // for a caller that did not ask first. Callers that can answer softly ask
+    // `queued_for_slot` themselves and report the wait instead of an error.
+    if let Some(queued) = queued_for_slot(env, &state, &task.id) {
+        return Err(CliError::Invalid(anyhow!("{queued}")));
+    }
     let role = env.settings.resolve(None).role(BRIEF_ROLE);
     // The worker role's choice comes first, then the configured workers: a
     // person who set `roles.worker.agent` gets that program, and `--agent`
@@ -6252,6 +6259,23 @@ project_dirs = []
         let queued = queued_for_slot(&env, &state, "T2")
             .unwrap_or_else(|| panic!("the second start must wait"));
         assert!(queued.starts_with("queued: 1 of 1"), "{queued}");
+        // A caller that never asked still cannot start past the cap: spawn
+        // itself refuses, and nothing is recorded.
+        let refused = spawn(
+            &mux,
+            &env,
+            &SpawnRequest {
+                task: "T2".to_string(),
+                agent: None,
+                effort: None,
+            },
+        );
+        match refused {
+            Err(err) => assert!(err.to_string().contains("queued: 1 of 1"), "{err}"),
+            Ok(_) => panic!("spawn must refuse a start past the cap"),
+        }
+        let after = ctx.state().unwrap_or_else(|err| panic!("{err}"));
+        assert!(after.tasks["T2"].attempts.is_empty());
         // The running task's own retry is not counted against itself.
         assert!(queued_for_slot(&env, &state, "T1").is_none());
     }
