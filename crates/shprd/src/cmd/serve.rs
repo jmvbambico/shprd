@@ -291,7 +291,8 @@ impl shprd_server::RepoFactory for Factory {
         // space, so a board's Start and the engine's own start cannot drift.
         let engine = engine_of(&tick.worker)
             .with_resend(resender(host.clone(), &home))
-            .with_review_again(review_again(&home, tick.worker.actor.clone()));
+            .with_review_again(review_again(&home, tick.worker.actor.clone()))
+            .with_report_reader(report_reader(&home, tick.worker.actor.clone()));
         if let Ok(mut built) = self.built.lock() {
             built.insert(
                 root.to_path_buf(),
@@ -946,6 +947,15 @@ fn review_again(home: &Path, actor: Actor) -> shprd_server::Resender {
     Arc::new(move |repo: &Path, task: &str| {
         let ctx = crate::ctx::Ctx::new(repo.to_path_buf(), actor.clone(), false, true);
         crate::cmd::review::review_again_for_tick(&ctx, &home, task)
+    })
+}
+
+/// Reads a task's review report for the service, from the reviewer's packet.
+fn report_reader(home: &Path, actor: Actor) -> shprd_server::ReportReader {
+    let home = home.to_path_buf();
+    Arc::new(move |repo: &Path, task: &str, attempt: u32| {
+        let ctx = crate::ctx::Ctx::new(repo.to_path_buf(), actor.clone(), false, true);
+        crate::cmd::review::report_for_service(&ctx, &home, task, attempt)
     })
 }
 

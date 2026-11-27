@@ -1882,6 +1882,20 @@ pub fn review_again_for_tick(ctx: &Ctx, home: &Path, task: &str) -> Result<Strin
     start_review(ctx, home, task, true)
 }
 
+/// What the reviewer of `task`'s `attempt` wrote, for the service's answers and
+/// its "ready to land" card data; `None` when the file is absent or unreadable.
+pub fn report_for_service(
+    ctx: &Ctx,
+    home: &Path,
+    task: &str,
+    attempt: u32,
+) -> Option<shprd_core::review::ReviewReport> {
+    let env = ReviewEnv::build(ctx, Some(home)).ok()?;
+    let path = findings_path(&env.reviews_dir, &env.spawn.run, task, attempt);
+    let bytes = std::fs::read(&path).ok()?;
+    shprd_core::review::parse_report(&bytes, &path).ok()
+}
+
 /// One review start for the service: [`review`] with the verb's own arguments.
 fn start_review(ctx: &Ctx, home: &Path, task: &str, again: bool) -> Result<String, String> {
     let mux = spawn::real_mux();

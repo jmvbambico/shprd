@@ -541,6 +541,27 @@ pub struct DecisionDto {
     pub answer: Option<RemarkAnswerDto>,
 }
 
+impl From<shprd_core::review::DecisionToConfirm> for DecisionDto {
+    fn from(decision: shprd_core::review::DecisionToConfirm) -> Self {
+        Self {
+            index: decision.index,
+            title: decision.title,
+            detail: decision.detail,
+            answer: decision.answer.map(RemarkAnswerDto::from),
+        }
+    }
+}
+
+/// The decisions of one attempt's review, for the "ready to land" card.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "DecisionsDto.ts")]
+pub struct DecisionsDto {
+    /// The attempt whose review it is.
+    pub attempt: u32,
+    /// What the worker chose and said so, with the person's answers.
+    pub decisions: Vec<DecisionDto>,
+}
+
 /// Answer one finding or decision of a task's review.
 ///
 /// The service records it as an event; the first answer to a remark stands.
@@ -1999,6 +2020,11 @@ pub(crate) fn exports() -> Result<Vec<(String, String)>, ts_rs::ExportError> {
         one::<CheckDto>()?,
         one::<GateDto>()?,
         one::<FindingDto>()?,
+        one::<RemarkAnswerDto>()?,
+        one::<RemarkOfDto>()?,
+        one::<DecisionDto>()?,
+        one::<DecisionsDto>()?,
+        one::<AnswerRemarkRequest>()?,
         one::<ReviewDto>()?,
         one::<AgentDto>()?,
         one::<NeedDto>()?,
