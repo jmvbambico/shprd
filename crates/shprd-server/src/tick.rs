@@ -2491,8 +2491,9 @@ fn review_failure_prefix(task: &str) -> String {
 /// reads it the same way: the card is history once a newer attempt exists.
 pub fn repeated_failure_prefix(task: &str, step: &str, attempt: u32) -> String {
     format!(
-        "{task}: its `{step}` step has failed the same way {} passes in a row (attempt {attempt}): ",
-        pass::REPEATS_BEFORE_A_CARD
+        "{task}: its `{step}` step has failed the same way {} passes in a row ({}): ",
+        pass::REPEATS_BEFORE_A_CARD,
+        shprd_core::event::attempt_label(task, attempt)
     )
 }
 

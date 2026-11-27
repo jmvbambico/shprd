@@ -10,9 +10,10 @@
  */
 export type Action = { "kind": "task.add", 
 /**
- * Task id, e.g. `M1.6`.
+ * Task id, e.g. `M1.6`. Left out, the service assigns the next free
+ * `T<n>` and the reply's `task` carries it.
  */
-task: string, 
+task?: string, 
 /**
  * One-line title.
  */
