@@ -309,6 +309,16 @@ pub fn spawn(
         )));
     }
     let (worktree, branch) = work_place(env, &task.id)?;
+    // A start that finds the task's worker already up records it instead of
+    // failing: an earlier start opened the window and then lost the attempt (the
+    // record failed and the close was refused, or the process died between the
+    // two), and opening a second window or reporting "could not be created" over
+    // the first would strand a worker that is doing the whole task.
+    if uses_worktrees(env)
+        && let Some(report) = adopt_live_worker(mux, env, task, attempt, &pick, &worktree, &branch)?
+    {
+        return Ok(report);
+    }
     let skills = select_skills(&env.skills, &env.compat, &task.tags);
     // What the launch applies is decided before the brief is written, because
     // the Settings block names it.
@@ -461,6 +471,80 @@ pub fn spawn(
         warnings,
         replaced,
     })
+}
+
+/// Records the worker a lost start left running, when there is one.
+///
+/// The signs are the attempt's own worktree on disk and a tab that is still up:
+/// the one its `.tab` record names, else one titled as this task's worker is.
+/// The tab must hold an agent (anything but a finished or unreadable pane), so a
+/// stale record never adopts a corpse. Returns `None` when there is nothing to
+/// adopt, and the ordinary start goes on.
+fn adopt_live_worker(
+    mux: &dyn Host,
+    env: &SpawnEnv<'_>,
+    task: &Task,
+    attempt: u32,
+    pick: &Pick,
+    worktree: &Path,
+    branch: &str,
+) -> Result<Option<SpawnReport>, CliError> {
+    if !worktree.exists() {
+        return Ok(None);
+    }
+    let record = tab_path(&env.briefs_dir, &env.run, &task.id, attempt);
+    let recorded = std::fs::read_to_string(&record).ok();
+    let title = worker_title(&pick.agent, &task.id);
+    let tabs = all_handles(mux);
+    let found = tabs
+        .iter()
+        .find(|tab| match recorded.as_deref().map(str::trim) {
+            Some(id) if !id.is_empty() => tab.id.as_str() == id,
+            _ => tab.title == title,
+        });
+    let Some(tab) = found else {
+        return Ok(None);
+    };
+    if !matches!(
+        mux.agent_state(&tab.root_pane),
+        Ok(AgentState::Working | AgentState::Blocked | AgentState::Idle | AgentState::Unknown)
+    ) {
+        return Ok(None);
+    }
+    let base_sha = Git::new(worktree).head_sha().map_err(|err| {
+        CliError::other(anyhow!(err).context("reading the running worker's worktree"))
+    })?;
+    let created = Worktree {
+        path: worktree.to_path_buf(),
+        branch: branch.to_string(),
+        base_sha,
+    };
+    let kind = spawned_event(&task.id, attempt, pick, worktree, branch);
+    env.ctx.check(&kind)?;
+    record_attempt(env, &task.id, attempt, pick, &created)?;
+    write_tab(&record, &tab.id);
+    // Nothing says how this window's brief went, so the spawn record says the
+    // host cannot vouch for it, the safe direction for the live set.
+    write_spawn_record(
+        &spawn_record_path(&env.briefs_dir, &env.run, &task.id, attempt),
+        pick,
+        None,
+    );
+    Ok(Some(SpawnReport {
+        task: task.id.clone(),
+        attempt,
+        agent: pick.agent.clone(),
+        model: pick.model.clone(),
+        worktree: created.path,
+        branch: created.branch,
+        tab: tab.title.clone(),
+        brief: brief_path(&env.briefs_dir, &env.run, &task.id, attempt),
+        skills: Vec::new(),
+        warnings: vec![String::from(
+            "the task's worker was already running: its attempt is recorded, no second window was opened",
+        )],
+        replaced: None,
+    }))
 }
 
 /// The effort to pass and the warning when the model cannot use it.
@@ -4183,6 +4267,38 @@ project_dirs = []
             .collect();
         assert!(live.is_empty(), "still live: {live:?}");
         assert!(!created.path.exists(), "the worktree is still there");
+    }
+
+    /// The seen failure: a worker window opened in the task's worktree but its
+    /// attempt never reached the log, so every later start failed with "its new
+    /// workspace could not be created" while the worker did the task.
+    #[test]
+    fn a_start_that_finds_the_worker_already_up_records_it() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.spawn_env(&ctx);
+        let log = scratch.root().join(".shprd").join("events.jsonl");
+        let before = std::fs::read_to_string(&log).unwrap_or_else(|err| panic!("{err}"));
+        let mux = FakeMux::default().with_ready_agent();
+        spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
+        // The window, the worktree and the tab record are up; the attempt is lost.
+        std::fs::write(&log, before).unwrap_or_else(|err| panic!("{err}"));
+        let ctx = Ctx::new(scratch.root().to_path_buf(), Actor::Human, false, true);
+        let env = scratch.spawn_env(&ctx);
+        let state = ctx.state().unwrap_or_else(|err| panic!("{err}"));
+        assert!(state.tasks["T1"].attempts.is_empty());
+        let windows = all_handles(&mux).len();
+
+        let report = spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
+
+        assert_eq!(report.attempt, 1);
+        assert_eq!(all_handles(&mux).len(), windows, "a second window opened");
+        let state = ctx.state().unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(
+            state.tasks["T1"].attempts.len(),
+            1,
+            "the attempt is recorded"
+        );
     }
 
     #[test]
