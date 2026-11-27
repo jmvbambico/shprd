@@ -295,6 +295,20 @@ pub fn card_at(state: &RunState, escalation: &Escalation, now_ms: u64) -> Option
     Some(task_card(task, escalation, now_ms))
 }
 
+/// Whether `escalation` is an operational card about the run itself: one the
+/// engine raised with no task, that the coordinator settles with the verbs it has
+/// (a diverged local integration branch, say).
+///
+/// It reaches the coordinator as news and is not the person's: a client draws it
+/// nowhere a person is asked to decide. An agent's own run-wide question is the
+/// person's, and so is a self-update that may have left shprd not running.
+pub fn is_operational_run_wide(escalation: &Escalation) -> bool {
+    escalation.task.is_none()
+        && !escalation.by_agent
+        && !is_update_failure(escalation)
+        && !gate::is_update_settled(escalation)
+}
+
 /// Whether `escalation` is one of the three a failed self-update raises.
 fn is_update_failure(escalation: &Escalation) -> bool {
     escalation.task.is_none()
@@ -943,7 +957,9 @@ mod tests {
 
     // ---- kind, buttons, key (UXC-1) ----
 
-    use super::{BRIEF_LOST, CLASH_NOTICE_MS, CardKind, SELF_UPDATE_KEY, card_at};
+    use super::{
+        BRIEF_LOST, CLASH_NOTICE_MS, CardKind, SELF_UPDATE_KEY, card_at, is_operational_run_wide,
+    };
 
     /// An engine escalation about `T1` with `body` and `default_action`.
     fn raised(seq: u64, body: &str, default_action: &str) -> Escalation {
@@ -1287,5 +1303,24 @@ mod tests {
         // Dismissing the first does not bring the identical repeat back.
         state.dismissed_needs.insert(first.seq);
         assert!(card_at(&state, &again, 0).is_none());
+    }
+
+    #[test]
+    fn only_an_engine_run_wide_card_is_operational() {
+        let card = |task: Option<&str>, by_agent, default_action: &str| Escalation {
+            task: task.map(str::to_string),
+            body: "The local `main` has commits the remote lacks".to_string(),
+            default_action: default_action.to_string(),
+            seq: 1,
+            by_agent,
+        };
+        assert!(is_operational_run_wide(&card(None, false, "push")));
+        assert!(!is_operational_run_wide(&card(None, true, "push")));
+        assert!(!is_operational_run_wide(&card(Some("T1"), false, "push")));
+        assert!(!is_operational_run_wide(&card(
+            None,
+            false,
+            gate::UPDATE_FAILED_ACTIONS[2]
+        )));
     }
 }
