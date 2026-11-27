@@ -616,8 +616,16 @@ impl Registry {
         // A request for a repository that does not resolve still passes the
         // gate first, so an unauthenticated caller learns nothing about which
         // repositories are served.
+        // The self-update's check: loopback callers only, no token (the helper
+        // holds none), and it answers about folds, not about repositories.
+        let fold = Router::new()
+            .route("/api/health/repos", get(health_repos))
+            .layer(middleware::from_fn_with_state(base.clone(), auth::host))
+            .layer(middleware::from_fn_with_state(base.clone(), auth::peer))
+            .with_state(Arc::clone(self));
         Router::new()
             .merge(repos)
+            .merge(fold)
             .fallback(dispatch)
             .with_state(Arc::clone(self))
     }
@@ -718,6 +726,49 @@ fn token_only(door: &shprd_remote::Door) -> Result<(), ApiReject> {
         ));
     }
     Ok(())
+}
+
+/// One repository whose log the service could not fold.
+#[derive(Serialize)]
+struct FoldFailure {
+    id: String,
+    error: String,
+}
+
+/// `GET /api/health/repos`: folds every registered repository's log now, for
+/// the self-update's health check. `ok` is false, and `failed` names each
+/// repository and why, when any fold errors; a build that cannot read a log it
+/// was handed is not healthy, however well it answers `/api/health`. Answered
+/// to a loopback caller only, like the service's id.
+async fn health_repos(
+    State(registry): State<Arc<Registry>>,
+    Extension(auth::Peer(peer)): Extension<auth::Peer>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<serde_json::Value>, ApiReject> {
+    if !auth::is_local_caller(peer, &headers) {
+        return Err(ApiReject::not_found("not found"));
+    }
+    let counted = registry.counted();
+    let failed: Vec<FoldFailure> = tokio::task::spawn_blocking(move || {
+        counted
+            .into_iter()
+            .filter_map(|(repo, state)| {
+                crate::ledger::load(&state.repo)
+                    .err()
+                    .map(|err| FoldFailure {
+                        id: repo.id,
+                        error: err.to_string(),
+                    })
+            })
+            .collect()
+    })
+    .await
+    .map_err(|err| ApiReject::internal(err.to_string()))?;
+    Ok(Json(serde_json::json!({
+        "ok": failed.is_empty(),
+        "checked": registry.list().len(),
+        "failed": failed,
+    })))
 }
 
 #[derive(Serialize)]

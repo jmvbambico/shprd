@@ -1018,6 +1018,13 @@ test("a question answered but still pending after the grace comes back", async (
   }
 });
 
+import { SEND_REFUSED, sendWords } from "../mods/lib/chat.js";
+
+test("a host-refused send reads as plain words", () => {
+  assert.equal(sendWords("this host refused the send: not allowed"), SEND_REFUSED);
+  assert.equal(sendWords("the service did not answer"), "the service did not answer");
+});
+
 test("an open review-out ask draws a card with its three answers, through the chat pane's renderer", async () => {
   const ask = {
     id: "review-out-2",

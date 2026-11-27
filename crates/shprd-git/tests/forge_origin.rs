@@ -102,16 +102,64 @@ fn a_review_diff_is_taken_against_origin_not_a_diverged_local_ref() {
 }
 
 #[test]
-fn realigning_moves_a_diverged_local_ref_back_to_origin() {
+fn realigning_keeps_a_local_ref_with_commits_origin_lacks_and_names_them() {
     let (repo, bare) = forge_repo();
-    let (theirs, ours) = diverge(&repo, &bare);
+    let (_theirs, ours) = diverge(&repo, &bare);
+    repo.git(&["switch", "-q", "-c", "elsewhere"]);
+    let out = integrate::realign_outcome(&repo.path, "main", |_| false);
+    match out {
+        integrate::Realign::Kept(commits) => {
+            assert_eq!(commits.len(), 1, "{commits:?}");
+            assert!(commits[0].starts_with(&ours[..7]), "{commits:?}");
+        }
+        other => panic!("expected Kept, got {other:?}"),
+    }
+    assert!(!integrate::realign_with_remote(&repo.path, "main"));
+    assert_eq!(repo.git(&["rev-parse", "main"]), ours);
+}
+
+#[test]
+fn realigning_moves_a_local_ref_whose_commits_are_all_on_origin_by_content() {
+    let (repo, bare) = forge_repo();
+    // A local-only commit that origin later got again as a different commit
+    // with the same change (a rebase or squash landing).
+    repo.commit("same.txt", "same\n", "landing");
+    let local_tip = repo.git(&["rev-parse", "main"]);
+    let other = bare.parent().unwrap().join("carry");
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&other)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{args:?}");
+    };
+    let out = std::process::Command::new("git")
+        .args(["clone", "-q"])
+        .arg(&bare)
+        .arg(&other)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    run(&["config", "user.name", "t"]);
+    run(&["config", "user.email", "t@example.invalid"]);
+    std::fs::write(other.join("same.txt"), "same\n").unwrap();
+    run(&["add", "."]);
+    run(&["commit", "-q", "-m", "landing (carried over)"]);
+    run(&["push", "-q", "origin", "main"]);
+    let theirs = {
+        let o = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&other)
+            .output()
+            .unwrap();
+        String::from_utf8(o.stdout).unwrap().trim().to_string()
+    };
+    assert_ne!(theirs, local_tip);
     repo.git(&["switch", "-q", "-c", "elsewhere"]);
     assert!(integrate::realign_with_remote(&repo.path, "main"));
     assert_eq!(repo.git(&["rev-parse", "main"]), theirs);
-    // The local-only commit is not lost: it is still an object, reachable by sha.
-    assert!(repo.git(&["cat-file", "-t", &ours]).contains("commit"));
-    // A second pass has nothing to do, and a checked-out branch is left alone.
-    assert!(!integrate::realign_with_remote(&repo.path, "main"));
+    assert!(repo.git(&["cat-file", "-t", &local_tip]).contains("commit"));
 }
 
 #[test]
@@ -140,5 +188,52 @@ fn a_non_github_remote_keeps_its_local_only_integration_commit() {
     repo.git(&["switch", "-q", "-c", "elsewhere"]);
     // Both the server idle path and the CLI landing call this helper.
     assert!(!integrate::realign_with_remote(&repo.path, "main"));
+    assert_eq!(repo.git(&["rev-parse", "main"]), ours);
+}
+
+/// A repo whose `origin` is named at `host` (served by a local bare repo
+/// through `insteadOf`), with `main` pushed and then diverged from the remote.
+fn hosted_repo(host: &str) -> (Repo, String, String) {
+    let repo = Repo::new();
+    let bare = repo.path.parent().unwrap().join("hosted.git");
+    let out = std::process::Command::new("git")
+        .args(["init", "--bare", "-b", "main"])
+        .arg(&bare)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let url = format!("https://{host}/acme/widgets.git");
+    repo.git(&["remote", "add", "origin", &url]);
+    repo.git(&["config", &format!("url.{}.insteadOf", bare.display()), &url]);
+    repo.git(&["push", "-u", "origin", "main"]);
+    let (theirs, ours) = diverge(&repo, &bare);
+    (repo, theirs, ours)
+}
+
+#[test]
+fn a_configured_non_github_forge_realigns_the_local_integration_ref() {
+    let (repo, theirs, _ours) = hosted_repo("git.example.net");
+    repo.git(&["switch", "-q", "-c", "elsewhere"]);
+    let git = Git::new(&repo.path);
+    // A forge client that drives the host: its landings go through the forge.
+    assert!(shprd_git::land::forge_expected_with(&git, |h| h == "git.example.net"));
+    // The forge is recognised, so the realignment runs (it keeps the diverged
+    // ref and names the commit); with no forge it would not look at all.
+    assert!(matches!(
+        integrate::realign_outcome(&repo.path, "main", |h| h == "git.example.net"),
+        integrate::Realign::Kept(_)
+    ));
+    assert_ne!(repo.git(&["rev-parse", "main"]), theirs);
+}
+
+#[test]
+fn a_repository_with_no_forge_never_has_its_integration_ref_reset() {
+    // A hosted remote nobody can drive, and a remote with no host at all.
+    let (repo, _theirs, ours) = hosted_repo("git.example.net");
+    repo.git(&["switch", "-q", "-c", "elsewhere"]);
+    assert_eq!(
+        integrate::realign_outcome(&repo.path, "main", |_| false),
+        integrate::Realign::Unchanged
+    );
     assert_eq!(repo.git(&["rev-parse", "main"]), ours);
 }

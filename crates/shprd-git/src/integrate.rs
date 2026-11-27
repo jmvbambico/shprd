@@ -407,34 +407,86 @@ pub fn release_if_held(path: &Path) -> bool {
 /// ref is then moved with `git branch -f`. The commits stay reachable on the task
 /// branches and in the reflog. A branch that is checked out in a worktree is left
 /// alone, because moving it would change that worktree's files; so is a
-/// repository with no GitHub remote or a branch the remote does not have. Returns
+/// repository with no forge or a branch the remote does not have. Returns
 /// whether the ref moved.
 pub fn realign_with_remote(repo: &Path, branch: &str) -> bool {
+    matches!(
+        realign_outcome(repo, branch, |host| crate::land::gh_authed(repo, host)),
+        Realign::Moved
+    )
+}
+
+/// What [`realign_outcome`] did to the local integration ref.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Realign {
+    /// Nothing to do: no forge, no remote copy, already equal, or the branch is
+    /// checked out in a worktree.
+    Unchanged,
+    /// The local ref moved to the remote's copy.
+    Moved,
+    /// The local ref holds commits the remote does not have, even by content.
+    /// It is left as it is; these are the local-only commits (`sha subject`).
+    Kept(Vec<String>),
+}
+
+/// [`realign_with_remote`] with the forge-client check given (see
+/// [`crate::land::forge_expected_with`]), reporting what happened.
+///
+/// A local ref is moved back only when every commit it has that the remote
+/// lacks is already on the remote by content (`git cherry` shows only `-`
+/// lines: a squash or rebase landing carried them over as new commits). Any
+/// other local-only commit is work that exists nowhere else, so the ref is kept
+/// and the commits are named in [`Realign::Kept`].
+pub fn realign_outcome(repo: &Path, branch: &str, authed: impl Fn(&str) -> bool) -> Realign {
     let git = Git::new(repo);
-    // Only a GitHub remote is a forge a landing goes through; any other
-    // remote's local branch may hold work that is not on it yet.
-    if !crate::land::forge_expected(&git) {
-        return false;
+    // Only a remote with a forge behind it (GitHub, or a host a forge client
+    // can drive) is one a landing goes through; any other remote's local
+    // branch may hold work that is not on it yet.
+    if !crate::land::forge_expected_with(&git, authed) {
+        return Realign::Unchanged;
     }
     let Some(remote) = crate::worktree::remote_of(&git) else {
-        return false;
+        return Realign::Unchanged;
     };
     let _ = git.run(&["fetch", "--quiet", &remote, branch]);
     let tracking = format!("refs/remotes/{remote}/{branch}");
     let local = format!("refs/heads/{branch}");
     let (Ok(theirs), Ok(ours)) = (git.rev_parse(&tracking), git.rev_parse(&local)) else {
-        return false;
+        return Realign::Unchanged;
     };
     if theirs == ours {
-        return false;
+        return Realign::Unchanged;
+    }
+    // `git cherry <upstream> <head>`: `+` is a commit of head whose change the
+    // upstream lacks, `-` one it already has by content.
+    let Ok(cherry) = git.run(&["cherry", &tracking, &local]) else {
+        return Realign::Unchanged;
+    };
+    let only_here: Vec<String> = cherry
+        .lines()
+        .filter_map(|line| line.strip_prefix("+ "))
+        .map(|sha| {
+            let sha = sha.trim();
+            let subject = git
+                .run(&["log", "-1", "--format=%s", sha])
+                .unwrap_or_default();
+            format!("{} {}", &sha[..sha.len().min(7)], subject.trim())
+        })
+        .collect();
+    if !only_here.is_empty() {
+        return Realign::Kept(only_here);
     }
     let held = git
         .run(&["worktree", "list", "--porcelain"])
         .is_ok_and(|list| list.lines().any(|line| line == format!("branch {local}")));
     if held {
-        return false;
+        return Realign::Unchanged;
     }
-    git.run(&["branch", "-f", branch, &theirs]).is_ok()
+    if git.run(&["branch", "-f", branch, &theirs]).is_ok() {
+        Realign::Moved
+    } else {
+        Realign::Unchanged
+    }
 }
 
 /// Creates the directory a worktree will sit in.

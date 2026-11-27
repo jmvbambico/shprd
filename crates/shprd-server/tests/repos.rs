@@ -368,3 +368,27 @@ async fn a_repository_whose_space_closed_is_retired_and_one_still_shown_is_not()
     );
     assert_eq!(registry.list().len(), 1);
 }
+
+#[tokio::test]
+async fn the_health_check_folds_every_repository_and_names_one_that_cannot_be_read() {
+    let fx = fixture().await;
+    let (_a, shop) = folder("shop");
+    let (_b, blog) = folder("blog");
+    for repo in [&shop, &blog] {
+        fx.call("POST", "/api/repos", Some(json!({"folder": repo})))
+            .await;
+    }
+    let (status, ok) = fx.call("GET", "/api/health/repos", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(ok["ok"], true, "{ok}");
+    assert_eq!(ok["checked"], 2, "{ok}");
+
+    // A log the build cannot fold: the check says so, naming the repository.
+    let log = Path::new(&blog).join(".shprd").join("events.jsonl");
+    std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+    std::fs::write(&log, "{\"this\": \"is not an event\"}\n").unwrap();
+    let (status, bad) = fx.call("GET", "/api/health/repos", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(bad["ok"], false, "{bad}");
+    assert_eq!(bad["failed"].as_array().unwrap().len(), 1, "{bad}");
+}

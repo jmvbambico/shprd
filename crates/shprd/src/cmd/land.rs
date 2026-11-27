@@ -22,7 +22,6 @@
 //! nothing and exits 2.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
 use anyhow::anyhow;
 use shprd_core::config::{self, Config, MergePolicy};
@@ -1016,23 +1015,8 @@ pub(crate) fn local_landing(git: &Git) -> bool {
     !(land::forge_expected(git) || land::uses_forge(git, |host| gh_ready(git.dir(), host)))
 }
 
-/// Whether `gh` is installed and signed in, asked in the repository it would
-/// drive.
-///
-/// `gh auth status` answers from the local configuration, so this makes no
-/// network call; anything it cannot answer counts as "no forge", which is the
-/// safe answer because the local path writes to shprd's own worktree only.
 fn gh_ready(dir: &Path, host: &str) -> bool {
-    Command::new("gh")
-        .args(["auth", "status", "--hostname", host])
-        .current_dir(dir)
-        .env("GH_PROMPT_DISABLED", "1")
-        .env("LC_ALL", "C")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+    land::gh_authed(dir, host)
 }
 
 /// The config's `[land]`, with the repo file winning over the global one.

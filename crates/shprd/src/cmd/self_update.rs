@@ -433,6 +433,59 @@ fn health(port: u16) -> Option<String> {
         .map(str::to_string)
 }
 
+/// `GET /api/health/repos` on `port`: the service folds every repository it
+/// serves. `Ok` when none fails (or when the service has no such route, which
+/// an old build is); the repositories that could not be folded otherwise.
+fn repos_fold(port: u16) -> Result<(), String> {
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(20)))
+        .http_status_as_error(false)
+        .build()
+        .into();
+    let mut response = agent
+        .get(&format!("http://127.0.0.1:{port}/api/health/repos"))
+        .call()
+        .map_err(|err| format!("the repository check did not answer: {err}"))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "the repository check answered {}",
+            response.status()
+        ));
+    }
+    let text = response
+        .body_mut()
+        .read_to_string()
+        .map_err(|err| format!("the repository check was unreadable: {err}"))?;
+    let body: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|err| format!("the repository check was unreadable: {err}"))?;
+    if body.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
+        return Ok(());
+    }
+    let failed: Vec<String> = body
+        .get("failed")
+        .and_then(serde_json::Value::as_array)
+        .map(|list| {
+            list.iter()
+                .map(|item| {
+                    format!(
+                        "{}: {}",
+                        item.get("id")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("?"),
+                        item.get("error")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("cannot be folded")
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Err(format!(
+        "the new build cannot read a repository's log ({})",
+        failed.join("; ")
+    ))
+}
+
 impl Machine<'_> {
     /// Stops the recorded service; false when there was no record. Leaves the
     /// `restarting` mark up, which the health wait takes down.
@@ -545,12 +598,18 @@ impl Machine<'_> {
 
     /// Waits for a service other than the one that was asked to stop to answer.
     fn wait_for_new_service(&self) -> Result<String, String> {
-        let result = self.wait_inner();
+        self.wait_for_new_service_checking(false)
+    }
+
+    /// As [`Self::wait_for_new_service`]; with `fold`, the service must also
+    /// fold every repository it serves, or the wait fails.
+    fn wait_for_new_service_checking(&self, fold: bool) -> Result<String, String> {
+        let result = self.wait_inner(fold);
         let _ = fs::remove_file(self.args.state_dir.join(RESTARTING));
         result
     }
 
-    fn wait_inner(&self) -> Result<String, String> {
+    fn wait_inner(&self, fold: bool) -> Result<String, String> {
         let old = self.old_id.borrow().clone();
         let deadline = Instant::now() + Duration::from_secs(self.args.health_timeout_secs);
         loop {
@@ -559,6 +618,9 @@ impl Machine<'_> {
                 && alive(record.pid)
                 && let Some(version) = health(record.port)
             {
+                if fold {
+                    repos_fold(record.port)?;
+                }
                 return Ok(version);
             }
             if Instant::now() >= deadline {
@@ -733,7 +795,7 @@ impl Steps for Machine<'_> {
     }
 
     fn healthy(&self) -> Result<String, String> {
-        self.wait_for_new_service()
+        self.wait_for_new_service_checking(true)
     }
 
     fn rollback(&self) -> Result<(), String> {
