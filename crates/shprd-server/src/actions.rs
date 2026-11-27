@@ -847,7 +847,9 @@ fn ask_error(err: shprd_core::ask::AskError) -> ApiReject {
         AskError::AlreadyAnswered { .. } | AskError::Expired { .. } => {
             ApiReject::refused(err.to_string())
         }
-        AskError::InvalidName { .. } => ApiReject::bad_request(err.to_string()),
+        AskError::InvalidName { .. } | AskError::NotAChoice { .. } => {
+            ApiReject::bad_request(err.to_string())
+        }
         AskError::Io { .. } | AskError::Parse { .. } | AskError::AlreadyRaised { .. } => {
             ApiReject::internal(err.to_string())
         }

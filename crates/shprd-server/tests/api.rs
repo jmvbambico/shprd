@@ -1871,3 +1871,33 @@ async fn an_agent_answering_a_proposal_card_is_refused_and_runs_nothing() {
         "nothing ran and the card is still open"
     );
 }
+
+#[tokio::test]
+async fn an_answer_that_is_not_a_choice_is_refused_and_the_card_stays_open() {
+    let fixture = Fixture::prepared(spent_review_repo(), tempfile::tempdir().expect("state"));
+    let reply = fixture
+        .send(
+            Call::post(
+                "/api/asks/answer",
+                json!({"task": "T7", "ask": "review-out-2", "answer": "take it"}),
+            )
+            .with_token(&fixture.token)
+            .with_write_header(),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{:?}", reply.body);
+    assert!(
+        format!("{:?}", reply.body).contains("take it as it is"),
+        "the refusal lists the choices: {:?}",
+        reply.body
+    );
+    let events = EventLog::read_all(&fixture.repo.path().join(".shprd").join("events.jsonl"))
+        .expect("read the log")
+        .events;
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::AskAnswered { .. })),
+        "nothing was recorded"
+    );
+}
