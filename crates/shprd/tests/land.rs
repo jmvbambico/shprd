@@ -1582,3 +1582,63 @@ fn a_protected_base_waits_for_a_human_even_under_auto() {
         fixture.forge_calls()
     );
 }
+
+/// The cards-hidden-2 bug: a landing after an override merged in shprd's own
+/// worktree, wrote `task_landed` with no pull request and moved the local
+/// integration ref. A landing goes through the forge, records its pull request
+/// number, and leaves the local target branch exactly where it was (origin's).
+#[test]
+fn an_override_landing_goes_through_the_forge_and_the_local_ref_stays_with_origin() {
+    let (fixture, head) = landing_task_fixture("auto");
+    fixture.git(&["push", "-q", "origin", "main"]);
+    let main_before = fixture.git(&["rev-parse", "main"]);
+    assert_eq!(
+        fixture.origin_head("main").as_deref(),
+        Some(main_before.as_str())
+    );
+
+    fixture.ok(&[
+        "override",
+        "--task",
+        "T1",
+        "--rule",
+        "integrate_after_failed_gate",
+        "--reason",
+        "release branch",
+        "--yes",
+    ]);
+
+    fixture.script_forge(&task_script("shprd/r1/T1", &head, Some(true), false));
+    let printed = fixture.ok(&["land", "T1"]);
+    assert!(
+        printed.contains("merged https://example.invalid/pull/1"),
+        "{printed}"
+    );
+
+    // It went through the forge: a pull request was opened and merged.
+    let calls = fixture.forge_calls();
+    assert_eq!(calls_with(&calls, "create").len(), 1, "{calls:?}");
+    assert_eq!(
+        calls_with(&calls, &format!("merge 1 {head}")).len(),
+        1,
+        "{calls:?}"
+    );
+    // The commits are on origin before the landing is recorded.
+    assert_eq!(
+        fixture.origin_head("shprd/r1/T1").as_deref(),
+        Some(head.as_str())
+    );
+    // The record names the pull request, never a bare merge.
+    let outcomes = fixture.landed_outcomes("T1");
+    assert_eq!(outcomes.len(), 1, "{outcomes:?}");
+    match &outcomes[0] {
+        EventKind::TaskLanded { number, .. } => assert_eq!(*number, Some(1)),
+        other => panic!("not a landing: {other:?}"),
+    }
+    // The local target ref never moved on its own.
+    assert_eq!(fixture.git(&["rev-parse", "main"]), main_before);
+    assert_eq!(
+        fixture.origin_head("main").as_deref(),
+        Some(main_before.as_str())
+    );
+}
