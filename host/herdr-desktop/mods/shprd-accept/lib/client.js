@@ -888,6 +888,18 @@ export class Client {
     return this.call("POST", "/api/asks/answer", { body: { task, ask, answer } });
   }
 
+  /**
+   * `POST /api/chat/answer`: answer the question a space's terminal waits on, by
+   * its choice (`option`, counted from 1) or by words (`text`). The service
+   * presses the keys the dialog takes.
+   */
+  answerQuestion(space, id, { option = null, text = null } = {}) {
+    const body = { space, id };
+    if (option !== null) body.option = option;
+    else body.text = String(text ?? "");
+    return this.call("POST", "/api/chat/answer", { body });
+  }
+
   /** `POST /api/action`: one of the person's actions on a task. */
   action(payload) {
     return this.call("POST", "/api/action", { body: payload });

@@ -296,6 +296,11 @@ pub struct TaskDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub phase: Option<String>,
+    /// True exactly when a person accepted the task's newest failure with an
+    /// `integrate_after_failed_gate` override: it then reads Ready and Accept is
+    /// offered although its status is still failed.
+    #[serde(default)]
+    pub accepted_failure: bool,
     /// When the task was added, ms since the Unix epoch.
     ///
     /// A board shows the newest work first and folds a run's old leftovers out
@@ -918,6 +923,11 @@ pub struct TaskChangesDto {
     pub added: u64,
     /// Lines deleted across every file.
     pub deleted: u64,
+    /// The protected paths the task changed without declaring them, sorted.
+    /// The card draws them as one "Touches protected paths: …" line; empty
+    /// when nothing is flagged.
+    #[serde(default)]
+    pub protected: Vec<String>,
 }
 
 /// How many commits `GET /api/tasks/{id}/changes` names; the count covers all.
@@ -1280,6 +1290,8 @@ pub enum ErrorCode {
     Refused,
     /// The event log could not be read or written.
     Ledger,
+    /// The agent's terminal waits on a question: answer it before sending.
+    QuestionWaiting,
     /// Anything else.
     Internal,
 }
@@ -1739,6 +1751,68 @@ pub struct ChatDto {
     pub older: Option<String>,
     /// Why the page is empty, in words a panel shows, when it is.
     pub note: Option<String>,
+    /// The question the agent's terminal is waiting on, when it is: the chat
+    /// shows it as a card and answers it with `POST /api/chat/answer`.
+    pub question: Option<ChatQuestionDto>,
+}
+
+/// One choice of a waiting question.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "ChatOptionDto.ts")]
+pub struct ChatOptionDto {
+    /// The choice as the dialog shows it.
+    pub label: String,
+    /// What choosing it means; empty when the dialog gives none.
+    pub description: String,
+}
+
+/// A question the agent's terminal is waiting on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "ChatQuestionDto.ts")]
+pub struct ChatQuestionDto {
+    /// Names this question until it is answered; an answer carries it back.
+    pub id: String,
+    /// The short tag over the question; empty when there is none.
+    pub header: String,
+    /// The question.
+    pub question: String,
+    /// The choices, in the order the dialog numbers them.
+    pub options: Vec<ChatOptionDto>,
+    /// Whether the dialog takes more than one choice.
+    pub multi_select: bool,
+    /// How many further questions the dialog holds after this one.
+    pub more: u32,
+    /// Whether the chat can answer it: one question, one choice. Anything else
+    /// is answered in the terminal.
+    pub answerable: bool,
+}
+
+/// An answer to the question a terminal waits on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "ChatAnswerDto.ts")]
+pub struct ChatAnswerDto {
+    /// The space whose terminal waits: `coordinator`, or a task's id.
+    pub space: String,
+    /// The question's id, as the page gave it.
+    pub id: String,
+    /// The choice, counted from 1 as the dialog numbers them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub option: Option<u32>,
+    /// Words to answer with instead of a choice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub text: Option<String>,
+}
+
+/// What one answer did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "ChatAnswerReply.ts")]
+pub struct ChatAnswerReply {
+    /// The space whose dialog got the keys.
+    pub space: String,
+    /// True when the keys were pressed in the agent's pane.
+    pub answered: bool,
 }
 
 /// One chat line to type into a space's agent.
@@ -1925,6 +1999,10 @@ pub(crate) fn exports() -> Result<Vec<(String, String)>, ts_rs::ExportError> {
         one::<ChatSendDto>()?,
         one::<ChatAttachmentDto>()?,
         one::<ChatSendReply>()?,
+        one::<ChatOptionDto>()?,
+        one::<ChatQuestionDto>()?,
+        one::<ChatAnswerDto>()?,
+        one::<ChatAnswerReply>()?,
         one::<ChatStopDto>()?,
         one::<ChatStopReply>()?,
         one::<TerminalServerMsg>()?,

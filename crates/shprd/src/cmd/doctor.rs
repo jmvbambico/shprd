@@ -11,7 +11,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::anyhow;
 use shprd_agents::data::{DataDir, Kind};
-use shprd_agents::detect::{Detection, SignIn, detect_all, find_binary, vendor_name};
+use shprd_agents::detect::{
+    Detection, PREFLIGHT_TIMEOUT, SignIn, detect_all, find_binary, model_reads_images,
+    preflight_probe, vendor_name,
+};
 use shprd_agents::env::{self, EnvContext, LaunchEnv, Role};
 use shprd_agents::families::{Families, agent_vendor};
 use shprd_agents::models::AgentRef;
@@ -142,13 +145,73 @@ fn build(home_flag: Option<&Path>, no_quota: bool) -> Report {
     let clean = worker_env(&facts);
     let detections = detect_every(&facts, &specs, &roles);
     agents(&mut report, &detections);
+    preflight_section(&mut report, &facts, &specs, &detections, &clean);
     review(&mut report, &facts, &specs, &roles);
     if !no_quota {
         quota_section(&mut report, &facts, &specs, &roles);
     }
     skills_section(&mut report, &facts, &specs, &clean, &detections);
     launch_env_section(&mut report, &facts, &clean);
+    news_section(&mut report, &facts);
     report
+}
+
+/// The news section: how many stop alarms the task later contradicted, a
+/// measure of how trustworthy "Agent stopped" has been.
+fn news_section(report: &mut Report, facts: &Facts) {
+    let section = report.section("News");
+    let Some(repo) = facts.repo.as_deref() else {
+        section.add(Level::Warn, "not inside a repository, so no news memory");
+        return;
+    };
+    let count = crate::cmd::live_news::stops_contradicted(repo);
+    let (level, text) = contradicted_stops_line(count);
+    section.add(level, text);
+}
+
+/// The doctor line for the contradicted-stop count: a warning when a stop alarm
+/// has been wrong, since that is a false "Agent stopped" the person saw.
+fn contradicted_stops_line(count: u32) -> (Level, String) {
+    if count == 0 {
+        (Level::Ok, String::from("0 stop alarms contradicted"))
+    } else {
+        (
+            Level::Warn,
+            format!("{count} stop alarm(s) contradicted by the task itself"),
+        )
+    }
+}
+
+/// What `run start` warns about: the programs that fail to start, and whether
+/// the reviewer's model reads images. Only warnings, never a refusal.
+pub fn start_warnings(home: Option<&Path>) -> Vec<String> {
+    let facts = Facts::resolve(home);
+    let mut scratch = Report::default();
+    let specs = data(&mut scratch, &facts);
+    let roles = config_section(&mut scratch, &facts);
+    let clean = worker_env(&facts);
+    let detections = detect_every(&facts, &specs, &roles);
+    let mut report = Report::default();
+    preflight_section(&mut report, &facts, &specs, &detections, &clean);
+    if let Some(reviewer) = roles.reviewer.as_deref() {
+        image_line(report.section("Review"), &specs_model(&specs, reviewer));
+    } else {
+        report
+            .section("Review")
+            .add(Level::Warn, "reviewer not set, so no cross-vendor review");
+    }
+    warnings_of(&report)
+}
+
+/// The text of every warning line on the page.
+fn warnings_of(report: &Report) -> Vec<String> {
+    report
+        .sections
+        .iter()
+        .flat_map(|section| section.lines.iter())
+        .filter(|line| line.level == Level::Warn)
+        .map(|line| line.text.clone())
+        .collect()
 }
 
 /// The machine facts every section reads, resolved once.
@@ -239,7 +302,9 @@ fn host(report: &mut Report, facts: &Facts) {
     // The host the verbs would drive, and why: the same resolution the run does
     // (M10.9), so a person asking "which multiplexer is shprd using?" gets the
     // answer the next spawn will act on rather than a second opinion.
-    let resolution = crate::host::resolve();
+    // Through the sticky select, like every other caller, so doctor reports the
+    // host a spawn would drive rather than a second probe.
+    let (resolution, _host) = crate::host::select();
     let level = if resolution.fell_back {
         Level::Warn
     } else {
@@ -1043,6 +1108,86 @@ fn review(report: &mut Report, facts: &Facts, specs: &[HarnessSpec], roles: &Rol
         ),
         _ => {}
     }
+    image_line(section, &specs_model(specs, reviewer));
+}
+
+/// Section 4b: does every program a run starts actually start?
+///
+/// `node --version` and each installed agent CLI's version command are run, so a
+/// CLI that is on `PATH` but dies at launch (a missing dynamic library, say)
+/// shows its first error line here, instead of as a silent "version unknown"
+/// and a reviewer that never writes findings.
+fn preflight_section(
+    report: &mut Report,
+    facts: &Facts,
+    specs: &[HarnessSpec],
+    detections: &[Detection],
+    clean: &LaunchEnv,
+) {
+    let probes = preflight_probes(&facts.path_env, specs, detections, &clean.as_pairs());
+    preflight_lines(report.section("Preflight"), &probes);
+}
+
+/// Runs `node --version` and each installed agent's version command, returning
+/// one entry per program: `None` when it is not installed, else how it started.
+fn preflight_probes(
+    path_env: &str,
+    specs: &[HarnessSpec],
+    detections: &[Detection],
+    pairs: &[(String, Option<String>)],
+) -> Vec<(String, Option<Result<(), String>>)> {
+    let mut probes: Vec<(String, Option<Result<(), String>>)> = Vec::new();
+    let node = find_binary("node", path_env)
+        .map(|path| preflight_probe(&path, &["--version".to_owned()], pairs, PREFLIGHT_TIMEOUT));
+    probes.push(("node".to_owned(), node));
+    for detection in detections {
+        let Some(binary) = &detection.binary else {
+            continue;
+        };
+        let Some(spec) = specs.iter().find(|spec| spec.id == detection.id) else {
+            continue;
+        };
+        let result = preflight_probe(binary, &spec.detect.version_args, pairs, PREFLIGHT_TIMEOUT);
+        probes.push((detection.id.clone(), Some(result)));
+    }
+    probes
+}
+
+/// One line per probed program: started cleanly, not installed, or why not.
+fn preflight_lines(section: &mut Section, probes: &[(String, Option<Result<(), String>>)]) {
+    for (name, result) in probes {
+        match result {
+            Some(Ok(())) => section.add(Level::Ok, format!("{name} starts")),
+            Some(Err(why)) => section.add(Level::Warn, format!("{name} fails to start: {why}")),
+            None => section.add(Level::Warn, format!("{name} not on PATH")),
+        }
+    }
+}
+
+/// The model an agent string names, or the string itself when it names none.
+fn specs_model(specs: &[HarnessSpec], agent: &str) -> String {
+    match AgentRef::parse(agent, specs) {
+        Ok(named) => named.model.unwrap_or_else(|| named.program.clone()),
+        Err(_) => agent.to_owned(),
+    }
+}
+
+/// Whether the reviewer's model can read images, which decides whether image
+/// proof can be judged by it.
+fn image_line(section: &mut Section, model: &str) {
+    match model_reads_images(model) {
+        Some(true) => section.add(Level::Ok, format!("reviewer model {model} can read images")),
+        Some(false) => section.add(
+            Level::Warn,
+            format!(
+                "reviewer model {model} cannot read images: a review with image proof is degraded and its acceptance lines stay yours to check"
+            ),
+        ),
+        None => section.add(
+            Level::Warn,
+            format!("cannot tell whether reviewer model {model} reads images"),
+        ),
+    }
 }
 
 /// Section 6: what quota each agent reports, never naming a credential.
@@ -1311,6 +1456,86 @@ mod tests {
         config.roster.orchestrator = orchestrator.map(str::to_owned);
         config.roster.workers = workers.iter().map(|agent| (*agent).to_owned()).collect();
         config
+    }
+
+    #[test]
+    fn a_program_that_fails_to_start_is_named_with_its_error() {
+        let mut page = Report::default();
+        preflight_lines(
+            page.section("Preflight"),
+            &[
+                ("node".to_owned(), Some(Ok(()))),
+                (
+                    "claude".to_owned(),
+                    Some(Err("exited 134: dyld: Library not loaded".to_owned())),
+                ),
+            ],
+        );
+        let text = render(&page);
+        assert!(text.contains("✓ node starts"), "{text}");
+        assert!(
+            text.contains("! claude fails to start: exited 134: dyld"),
+            "{text}"
+        );
+        assert!(!page.has_fail());
+    }
+
+    #[test]
+    fn preflight_runs_node_and_names_its_first_error_line() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap_or_else(|err| panic!("{err}"));
+        let node = dir.path().join("node");
+        std::fs::write(
+            &node,
+            "#!/bin/sh\necho 'dyld: Library not loaded: libnode' >&2\nexit 134\n",
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+        std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o755))
+            .unwrap_or_else(|err| panic!("{err}"));
+        let path_env = dir.path().display().to_string();
+        let probes = preflight_probes(&path_env, &[], &[], &[]);
+        let [(name, Some(Err(why)))] = probes.as_slice() else {
+            panic!("node must be probed and fail: {probes:?}");
+        };
+        assert_eq!(name, "node");
+        assert!(why.contains("Library not loaded"), "{why}");
+        let none = preflight_probes("", &[], &[], &[]);
+        assert!(matches!(none.as_slice(), [(_, None)]), "{none:?}");
+    }
+
+    #[test]
+    fn run_start_warns_of_a_failing_cli_and_a_blind_reviewer() {
+        let mut page = Report::default();
+        preflight_lines(
+            page.section("Preflight"),
+            &[
+                ("node".to_owned(), Some(Ok(()))),
+                (
+                    "claude".to_owned(),
+                    Some(Err("dyld: Library not loaded".to_owned())),
+                ),
+            ],
+        );
+        image_line(page.section("Review"), "deepseek-v4");
+        let warnings = warnings_of(&page);
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(
+            warnings[0].contains("claude fails to start"),
+            "{warnings:?}"
+        );
+        assert!(warnings[1].contains("cannot read images"), "{warnings:?}");
+    }
+
+    #[test]
+    fn a_blind_reviewer_model_is_said_to_degrade_image_review() {
+        let mut page = Report::default();
+        image_line(page.section("Review"), "deepseek-v4");
+        let text = render(&page);
+        assert!(text.contains("cannot read images"), "{text}");
+        assert!(text.contains("degraded"), "{text}");
+        let mut page = Report::default();
+        image_line(page.section("Review"), "claude-opus");
+        assert!(render(&page).contains("can read images"));
     }
 
     #[test]
@@ -1679,5 +1904,14 @@ mod tests {
         let (text, failed) = forge_text(&gh);
         assert!(!failed, "{text}");
         assert!(text.contains("has write access"), "{text}");
+    }
+
+    /// The contradicted-stop count shows on the page, warning when non-zero.
+    #[test]
+    fn the_contradicted_stop_count_is_shown() {
+        assert_eq!(contradicted_stops_line(0).0, Level::Ok);
+        let (level, text) = contradicted_stops_line(3);
+        assert_eq!(level, Level::Warn);
+        assert!(text.contains('3'));
     }
 }

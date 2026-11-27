@@ -10,7 +10,6 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
-use crate::changed::{outside_scope, task_changes};
 use crate::git::{Git, GitError};
 use crate::worktree::{Layout, WorktreeError};
 
@@ -45,7 +44,7 @@ pub struct TaskCommits {
     /// The commits the task claims, oldest first. Abbreviated ids are accepted
     /// and resolved.
     pub claimed: Vec<String>,
-    /// The paths the task was allowed to change.
+    /// The paths the task declared: a hint for its worker, never a limit.
     pub scope: Vec<String>,
 }
 
@@ -101,12 +100,6 @@ pub enum IntegrateError {
         branch: String,
         /// The base it was cut from.
         base: String,
-    },
-    /// The branch changed paths the task was not allowed to change.
-    #[error("task changed {} path(s) outside its scope", outside.len())]
-    OutsideScope {
-        /// The offending paths.
-        outside: Vec<String>,
     },
     /// A cherry-pick failed. The integration worktree is back on the head it
     /// had before the attempt.
@@ -435,9 +428,8 @@ fn path_text(path: &Path) -> Result<String, WorktreeError> {
 /// Lands a task's commits on the integration branch.
 ///
 /// Everything is checked before anything is picked: the worktree must be
-/// clean, the branch must contain exactly the commits the task claimed, and
-/// every path those commits touch must be inside the task's scope. Only then
-/// are the commits cherry-picked, oldest first, with `-x` so each one records
+/// clean and the branch must contain exactly the commits the task claimed.
+/// Only then are the commits cherry-picked, oldest first, with `-x` so each one records
 /// where it came from.
 ///
 /// A pick that fails leaves the integration worktree on the head it started
@@ -469,15 +461,8 @@ pub fn integrate(
             branch: task.branch.clone(),
         });
     }
-    // Judged against the integration branch as it stands now, not the commit the
-    // task was cut from: what the base gained during the run is not the task's.
-    let int_head = git.head_sha()?;
-    let changed = task_changes(&int.path, &int_head, &tip)?;
-    let outside = outside_scope(&changed, &task.scope);
-    if !outside.is_empty() {
-        return Err(IntegrateError::OutsideScope { outside });
-    }
-
+    // The task's declared scope is a hint, not a limit: what the branch changes
+    // was judged by its review, so nothing here refuses a path.
     let head = git.head_sha()?;
     let mut picked = Vec::with_capacity(expected.len());
     for commit in &expected {

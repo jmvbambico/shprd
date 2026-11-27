@@ -246,37 +246,18 @@ pub fn answered_rounds_body(task: &Task, attempt: u32, rounds: u32, answer: &str
     )
 }
 
-/// What every ask id that offers a refused hand-in's choices begins with.
+/// What the id of a refused hand-in's card begins with. Builds before declared
+/// paths became a hint raised these; a log may still hold one, open or not.
 pub const HAND_IN_REFUSED_ASK_PREFIX: &str = "hand-in-refused-";
 
-/// The words every choice that widens the scope begins with; the paths follow.
-pub const WIDEN_CHOICE: &str = "widen the scope to ";
-
-/// The choice that stops the attempt and starts another.
-pub const SEND_BACK_CHOICE: &str = "send it back to a new attempt";
-
-/// The id of the card for the `n`th hand-in `attempt` had refused.
+/// Whether `path` is protected: deploy workflows, `AGENTS.md`,
+/// `go.mod`/`go.sum`, `package.json`, anything under `.agents/`, and anything
+/// matching one of the repo's own `globs` (the `high_risk_paths` of its
+/// `.agents/orchestration.yaml`, see [`crate::ask::high_risk_globs_in`]).
 ///
-/// A worker that hands in again after a widening and is refused for another
-/// reason is a new card, so the count is part of the id.
-pub fn hand_in_refused_ask(attempt: u32, n: usize) -> String {
-    format!("{HAND_IN_REFUSED_ASK_PREFIX}{attempt}-{n}")
-}
-
-/// The words that start a typed confirmation to widen a scope to high-risk
-/// paths; the paths follow. It is never an offered option: the person types it.
-pub const HIGH_RISK_CONFIRM: &str = "confirm high-risk widening to ";
-
-/// The most paths one widening option names.
-const MAX_OFFERED: usize = 5;
-
-/// The longest a widening option's text may be, in characters.
-const MAX_OPTION_CHARS: usize = 200;
-
-/// Whether `path` is one a widening is never offered as one click: deploy
-/// workflows, `AGENTS.md`, `go.mod`/`go.sum`, `package.json`, anything under
-/// `.agents/`, and anything matching one of the repo's own `globs` (its
-/// `high_risk_paths`).
+/// This is the one protected list. A task may change a protected path; when
+/// it did not declare it, the path is flagged where the person decides (the
+/// review contract, the Accept card, the pull request), never refused.
 pub fn is_high_risk_path(path: &str, globs: &[String]) -> bool {
     let path = path.trim_start_matches("./");
     let name = path.rsplit('/').next().unwrap_or_default();
@@ -284,6 +265,35 @@ pub fn is_high_risk_path(path: &str, globs: &[String]) -> bool {
         || (path.starts_with(".github/workflows/") && path.to_lowercase().contains("deploy"))
         || matches!(name, "AGENTS.md" | "go.mod" | "go.sum" | "package.json");
     builtin || globs.iter().any(|glob| glob_matches(glob, path))
+}
+
+/// The protected paths in `changed` that `declared` does not name, sorted and
+/// without repeats: what a task touched in the protected list without saying
+/// so. Naming a path (or a folder above it) in the task is the "says so".
+pub fn protected_undeclared(
+    changed: &[String],
+    declared: &[String],
+    globs: &[String],
+) -> Vec<String> {
+    let declared: Vec<String> = declared
+        .iter()
+        .filter_map(|entry| crate::scope::normalize(entry).ok())
+        .collect();
+    let mut out: Vec<String> = changed
+        .iter()
+        .filter_map(|path| crate::scope::normalize(path).ok())
+        .filter(|path| is_high_risk_path(path, globs))
+        .filter(|path| !crate::scope::within(path, &declared))
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// What a flagged task's review contract, Accept card and pull request say:
+/// `Touches protected paths: a, b`, or `None` when nothing is flagged.
+pub fn protected_line(paths: &[String]) -> Option<String> {
+    (!paths.is_empty()).then(|| format!("Touches protected paths: {}", paths.join(", ")))
 }
 
 /// A small glob: `*` matches within a segment, `**` across segments, and a
@@ -336,124 +346,6 @@ pub fn high_risk_globs_from_yaml(text: &str) -> Vec<String> {
         }
     }
     globs
-}
-
-/// What a widening card offers for `paths`.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct WidenOffer {
-    /// The entries the one-click option widens to: folders, at most five.
-    pub entries: Vec<String>,
-    /// How many more entries were left off the option to keep it short.
-    pub more: usize,
-    /// High-risk paths, never one click: they need the typed confirmation.
-    pub high_risk: Vec<String>,
-}
-
-/// Splits `paths` into the one-click entries and the high-risk ones.
-///
-/// Paths are folded into their folders (`dir/`) when there are more than five,
-/// at most five entries are offered, and the option stays under about 200
-/// characters; what does not fit is counted in `more`.
-pub fn widen_offer(paths: &[String], globs: &[String]) -> WidenOffer {
-    let (high, plain): (Vec<&String>, Vec<&String>) =
-        paths.iter().partition(|p| is_high_risk_path(p, globs));
-    let mut entries: Vec<String> = Vec::new();
-    let fold = plain.len() > MAX_OFFERED;
-    for path in plain {
-        let entry = match path.rsplit_once('/') {
-            Some((dir, _)) if fold => format!("{dir}/"),
-            _ => path.clone(),
-        };
-        if !entries.contains(&entry) {
-            entries.push(entry);
-        }
-    }
-    let total = entries.len();
-    let mut kept: Vec<String> = Vec::new();
-    let mut chars = WIDEN_CHOICE.len();
-    for entry in entries {
-        let cost = entry.chars().count() + 2;
-        if kept.len() == MAX_OFFERED || chars + cost > MAX_OPTION_CHARS {
-            break;
-        }
-        chars += cost;
-        kept.push(entry);
-    }
-    WidenOffer {
-        more: total - kept.len(),
-        entries: kept,
-        high_risk: high.into_iter().cloned().collect(),
-    }
-}
-
-/// The line a card adds when some paths are high-risk or did not fit.
-pub fn widen_note(offer: &WidenOffer) -> String {
-    let mut note = String::new();
-    if offer.more > 0 {
-        note.push_str(&format!(" {} more not offered.", offer.more));
-    }
-    if !offer.high_risk.is_empty() {
-        note.push_str(&format!(
-            " High-risk, so not one click: {}. To widen to them type `{HIGH_RISK_CONFIRM}<paths>`.",
-            offer.high_risk.join(", ")
-        ));
-    }
-    note
-}
-
-/// The choices a refused hand-in's card offers: widen the scope to the paths
-/// that fell outside it (when some did), or send the task back.
-pub fn hand_in_refused_options(out_of_scope: &[String]) -> Vec<String> {
-    hand_in_refused_options_for(out_of_scope, &[])
-}
-
-/// [`hand_in_refused_options`] with the repo's own high-risk `globs`.
-pub fn hand_in_refused_options_for(out_of_scope: &[String], globs: &[String]) -> Vec<String> {
-    let mut options = Vec::new();
-    let offer = widen_offer(out_of_scope, globs);
-    if !offer.entries.is_empty() {
-        options.push(format!("{WIDEN_CHOICE}{}", offer.entries.join(", ")));
-    }
-    options.push(SEND_BACK_CHOICE.to_string());
-    options
-}
-
-/// What a card for a refused hand-in says: the task, and the reason the engine
-/// gave.
-pub fn hand_in_refused_body(task: &str, attempt: u32, reason: &str) -> String {
-    format!(
-        "{task}: the engine refused attempt {attempt}'s hand-in, so nothing was recorded: \
-         {reason}"
-    )
-}
-
-/// What a person's answer to a refused hand-in's card chose.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum HandInChoice {
-    /// Add these paths to the task's scope and have the worker hand in again.
-    Widen(Vec<String>),
-    /// Stop the attempt and start another.
-    SendBack,
-}
-
-/// The choice `answer` makes on `ask`, when `ask` is a refused hand-in's card.
-pub fn hand_in_refused_choice(ask: &str, answer: &str) -> Option<HandInChoice> {
-    if !ask.starts_with(HAND_IN_REFUSED_ASK_PREFIX) {
-        return None;
-    }
-    let choice = answer.trim();
-    if let Some(paths) = choice
-        .strip_prefix(WIDEN_CHOICE)
-        .or_else(|| choice.strip_prefix(HIGH_RISK_CONFIRM))
-    {
-        let paths: Vec<String> = paths
-            .split(',')
-            .map(|path| path.trim().to_string())
-            .filter(|path| !path.is_empty())
-            .collect();
-        return (!paths.is_empty()).then_some(HandInChoice::Widen(paths));
-    }
-    (choice == SEND_BACK_CHOICE).then_some(HandInChoice::SendBack)
 }
 
 /// The event a person's answer to a spent review's card carries out, if it has one.
@@ -734,13 +626,12 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::{
-        ESCALATION_ACTION, HIGH_RISK_CONFIRM, HandInChoice, Next, REVIEW_GATE,
-        ROUNDS_SPENT_OPTIONS, SEND_BACK_CHOICE, WIDEN_CHOICE, after_failure, answer_leaves_a_verb,
-        answered_rounds_body, card_attempt, decide, failed_review_rounds, hand_in_refused_choice,
-        hand_in_refused_options, hand_in_refused_options_for, high_risk_globs_from_yaml,
-        latest_failed_review, provenance, rounds_spent_answer, rounds_spent_ask, rounds_spent_body,
+        ESCALATION_ACTION, Next, REVIEW_GATE, ROUNDS_SPENT_OPTIONS, after_failure,
+        answer_leaves_a_verb, answered_rounds_body, card_attempt, decide, failed_review_rounds,
+        high_risk_globs_from_yaml, latest_failed_review, protected_line, protected_undeclared,
+        provenance, rounds_spent_answer, rounds_spent_ask, rounds_spent_body,
         rounds_spent_followup, rounds_spent_prefix, rounds_spent_verb_ran,
-        send_back_failure_prefix, verdict, widen_note, widen_offer,
+        send_back_failure_prefix, verdict,
     };
     use crate::config::Review;
     use crate::event::{EventKind, Finding, ReviewSource, Severity};
@@ -1164,44 +1055,6 @@ mod tests {
     }
 
     #[test]
-    fn high_risk_paths_are_never_one_click_but_a_typed_confirmation_widens() {
-        let globs = vec![String::from("infra/**"), String::from("*.lock")];
-        let paths = vec![
-            String::from("src/a.rs"),
-            String::from("AGENTS.md"),
-            String::from(".agents/orchestration.yaml"),
-            String::from("infra/deep/main.tf"),
-            String::from("Cargo.lock"),
-            String::from(".github/workflows/deploy.yml"),
-        ];
-        let options = hand_in_refused_options_for(&paths, &globs);
-        assert_eq!(options[0], format!("{WIDEN_CHOICE}src/a.rs"), "{options:?}");
-        let offer = widen_offer(&paths, &globs);
-        assert_eq!(offer.high_risk.len(), 5, "{offer:?}");
-        assert!(widen_note(&offer).contains(HIGH_RISK_CONFIRM));
-        assert_eq!(
-            hand_in_refused_choice(
-                "hand-in-refused-1-1",
-                &format!("{HIGH_RISK_CONFIRM}AGENTS.md")
-            ),
-            Some(HandInChoice::Widen(vec![String::from("AGENTS.md")]))
-        );
-        // Only high-risk paths: nothing is offered to widen to.
-        let only = hand_in_refused_options(&[String::from("go.mod")]);
-        assert_eq!(only, vec![SEND_BACK_CHOICE.to_string()]);
-    }
-
-    #[test]
-    fn many_paths_fold_to_folders_and_stay_short() {
-        let paths: Vec<String> = (0..40).map(|n| format!("dir{n}/sub/file{n}.rs")).collect();
-        let offer = widen_offer(&paths, &[]);
-        assert!(offer.entries.len() <= 5);
-        assert_eq!(offer.entries.len() + offer.more, 40);
-        let options = hand_in_refused_options(&paths);
-        assert!(options[0].chars().count() <= 200, "{}", options[0]);
-    }
-
-    #[test]
     fn the_orchestration_yaml_gives_its_high_risk_globs() {
         let yaml = "name: x\nhigh_risk_paths:\n  - \"infra/**\"  # prod\n  - '*.lock'\nother: 1\n";
         assert_eq!(high_risk_globs_from_yaml(yaml), ["infra/**", "*.lock"]);
@@ -1209,31 +1062,26 @@ mod tests {
     }
 
     #[test]
-    fn a_refused_hand_in_card_offers_the_widening_and_reads_the_choice_back() {
-        let paths = vec![
-            String::from("tests/test_ops.py"),
-            String::from("tests/x.py"),
-        ];
-        let options = hand_in_refused_options(&paths);
-        assert_eq!(options.len(), 2, "{options:?}");
-        assert_eq!(
-            hand_in_refused_choice("hand-in-refused-1-1", &options[0]),
-            Some(HandInChoice::Widen(paths))
-        );
-        assert_eq!(
-            hand_in_refused_choice("hand-in-refused-1-1", &options[1]),
-            Some(HandInChoice::SendBack)
-        );
-        // No path outside the scope: only the send-back is offered.
-        assert_eq!(
-            hand_in_refused_options(&[]),
-            vec![SEND_BACK_CHOICE.to_string()]
-        );
-        assert_eq!(
-            hand_in_refused_choice("review-out-1", SEND_BACK_CHOICE),
-            None
-        );
-        assert_eq!(hand_in_refused_choice("hand-in-refused-1-1", "later"), None);
+    fn this_repos_own_list_flags_docs_and_github_but_not_crates() {
+        let globs = high_risk_globs_from_yaml(include_str!("../../../.agents/orchestration.yaml"));
+        for path in [
+            "docs/plan.md",
+            ".github/workflows/ci.yml",
+            "assets/logo.svg",
+            "LICENSE",
+            "README.md",
+            "data/skills/compat.toml",
+            "rust-toolchain.toml",
+        ] {
+            let flagged = protected_undeclared(&[path.to_string()], &[], &globs);
+            assert_eq!(flagged, [path], "{path} is protected");
+            assert_eq!(
+                protected_line(&flagged),
+                Some(format!("Touches protected paths: {path}"))
+            );
+        }
+        let crates = ["crates/shprd-core/src/gate.rs".to_string()];
+        assert!(protected_undeclared(&crates, &[], &globs).is_empty());
     }
 
     #[test]
@@ -1383,5 +1231,34 @@ mod tests {
             &state_of(vec![other.clone(), ok]),
             &other
         ));
+    }
+
+    #[test]
+    fn an_undeclared_protected_path_is_flagged_and_a_declared_one_is_not() {
+        let globs = vec!["docs/".to_string(), ".github/**".to_string()];
+        let changed = vec![
+            "src/a.rs".to_string(),
+            "docs/plan.md".to_string(),
+            "AGENTS.md".to_string(),
+            ".github/workflows/ci.yml".to_string(),
+            "Cargo.lock".to_string(),
+        ];
+        assert_eq!(
+            protected_undeclared(&changed, &["src".to_string()], &globs),
+            vec![".github/workflows/ci.yml", "AGENTS.md", "docs/plan.md"]
+        );
+        assert_eq!(
+            protected_undeclared(
+                &changed,
+                &["docs".to_string(), "AGENTS.md".to_string()],
+                &globs
+            ),
+            vec![".github/workflows/ci.yml"]
+        );
+        assert_eq!(
+            protected_line(&["AGENTS.md".to_string()]).as_deref(),
+            Some("Touches protected paths: AGENTS.md")
+        );
+        assert_eq!(protected_line(&[]), None);
     }
 }

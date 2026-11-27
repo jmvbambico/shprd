@@ -1,8 +1,8 @@
-//! Changed-path detection and scope checking, against real git.
+//! Changed-path detection and the protected-path flag, against real git.
 
 mod support;
 
-use shprd_git::changed::{changed_paths, outside_scope, task_changes};
+use shprd_git::changed::{changed_paths, protected_touches, task_changes};
 
 use support::Repo;
 
@@ -57,15 +57,6 @@ fn an_empty_range_has_no_changed_paths() {
     assert!(paths.is_empty(), "{paths:?}");
 }
 
-#[test]
-fn flags_a_path_outside_the_scope_and_accepts_one_inside() {
-    let scope = strings(&["crates/shprd-git"]);
-    let inside = strings(&["crates/shprd-git/src/lib.rs", "./crates/shprd-git/"]);
-    let outside = strings(&["docs/plan.md", "../escape"]);
-    assert!(outside_scope(&inside, &scope).is_empty());
-    assert_eq!(outside_scope(&outside, &scope), outside);
-}
-
 /// Cuts `name` from `main`, lets `main` gain 120 files, then merges `main` into
 /// the branch and edits two files of its own.
 fn branch_that_merged_a_moved_main(repo: &Repo, name: &str, own: [&str; 2]) {
@@ -103,7 +94,6 @@ fn a_task_that_merged_a_moved_main_changed_only_its_own_files() {
     let mut sorted = paths;
     sorted.sort();
     assert_eq!(sorted, strings(&["src/a.rs", "src/b.rs"]));
-    assert!(outside_scope(&sorted, &strings(&["src"])).is_empty());
 }
 
 #[test]
@@ -135,7 +125,12 @@ fn two_tasks_that_each_merged_the_new_main_do_not_blame_each_other() {
             Err(err) => panic!("task changes: {err}"),
         };
         assert_eq!(paths.len(), 2, "{name} changed two files");
-        assert!(outside_scope(&paths, &strings(&[scope])).is_empty());
+        assert!(
+            paths
+                .iter()
+                .all(|path| path.starts_with(&format!("{scope}/"))),
+            "{name}: {paths:?}"
+        );
     }
 }
 
@@ -153,4 +148,33 @@ fn a_path_with_the_same_content_as_the_base_is_not_the_tasks_change() {
         Err(err) => panic!("task changes: {err}"),
     };
     assert_eq!(paths, strings(&["mine.txt"]));
+}
+
+#[test]
+fn the_repos_own_list_and_the_built_ins_flag_undeclared_protected_paths() {
+    let repo = Repo::new();
+    repo.commit(
+        ".agents/orchestration.yaml",
+        "high_risk_paths:\n  - docs/\n",
+        "protect docs",
+    );
+    repo.git(&["checkout", "-b", "t1"]);
+    repo.commit("src/a.rs", "a\n", "work");
+    repo.commit("docs/plan.md", "plan\n", "docs");
+    repo.commit("AGENTS.md", "rules\n", "rules");
+    repo.git(&["checkout", "main"]);
+    let flagged = match protected_touches(&repo.path, "main", "t1", &strings(&["src"])) {
+        Ok(paths) => paths,
+        Err(err) => panic!("protected touches: {err}"),
+    };
+    assert_eq!(flagged, strings(&["AGENTS.md", "docs/plan.md"]));
+    let declared = match protected_touches(&repo.path, "main", "t1", &strings(&["src", "docs"])) {
+        Ok(paths) => paths,
+        Err(err) => panic!("protected touches: {err}"),
+    };
+    assert_eq!(
+        declared,
+        strings(&["AGENTS.md"]),
+        "a declared path is not flagged"
+    );
 }

@@ -144,6 +144,11 @@ pub struct Watcher {
     /// A reviewer's bad file is one escalation, not one per tick: the mark is
     /// cleared by a rewrite, which is the reviewer's second chance.
     rejected: BTreeMap<PathBuf, SystemTime>,
+    /// Per reviewer tab: the last lines its pane showed.
+    ///
+    /// A pane that is gone cannot be read, so the output a crash card quotes is
+    /// the last sample taken while the reviewer was alive.
+    reviewer_tails: BTreeMap<String, String>,
     /// When the orchestrator was first seen waiting on a prompt of its own.
     ///
     /// `None` while it is not, so the clock starts the first tick that finds
@@ -164,6 +169,7 @@ impl Watcher {
             cooldowns: BTreeMap::new(),
             policy,
             rejected: BTreeMap::new(),
+            reviewer_tails: BTreeMap::new(),
             orchestrator_blocked_since: None,
             orchestrator_escalated: false,
         }
@@ -231,6 +237,12 @@ impl Watcher {
             };
             let path = review::findings_path(&reviews, &env.run, &task.id, attempt);
             let Some(modified) = settled_mtime(&path) else {
+                // No findings file at all: the reviewer is still working, or it
+                // ended without writing any. A file that exists but is not
+                // settled is mid-write, and is never a crash.
+                if !path.exists() {
+                    self.watch_reviewer(mux, env, state, (&task.id, attempt), lines)?;
+                }
                 continue;
             };
             if let Err(err) = verdict::read_findings(&path) {
@@ -265,6 +277,54 @@ impl Watcher {
                 verdict::Outcome::AlreadyDecided => continue,
             };
             lines.push(format!("\u{25c7} {} review {word}", task.id));
+        }
+        Ok(())
+    }
+
+    /// Samples a reviewer that has not written findings yet, and raises a card
+    /// when its tab is gone: it exited or was killed without a verdict.
+    ///
+    /// One card per reviewer tab, whichever pass or restart noticed it; a
+    /// retried review opens a new tab and is watched afresh. A host that cannot
+    /// answer says nothing about the reviewer, so it is never read as an exit.
+    fn watch_reviewer(
+        &mut self,
+        mux: &dyn Host,
+        env: &SpawnEnv<'_>,
+        state: &RunState,
+        (task, attempt): (&str, u32),
+        lines: &mut Vec<String>,
+    ) -> Result<(), CliError> {
+        let record = review::tab_record_path(&env.briefs_dir, &env.run, task, attempt);
+        let Some(tab) = std::fs::read_to_string(record)
+            .ok()
+            .map(|text| text.trim().to_string())
+            .filter(|tab| !tab.is_empty())
+        else {
+            return Ok(());
+        };
+        let marker = verdict::reviewer_crash_marker(task, attempt, &tab);
+        if state
+            .escalations
+            .iter()
+            .any(|card| card.body.starts_with(&marker))
+        {
+            return Ok(());
+        }
+        match pane_for(mux, env, &tab) {
+            Ok(Some(pane)) => {
+                if let Ok(screen) = mux.read(&pane, 20) {
+                    self.reviewer_tails.insert(tab, screen);
+                }
+            }
+            Ok(None) | Err(MuxError::NotFound { .. }) => {
+                let tail = self.reviewer_tails.remove(&tab).unwrap_or_default();
+                verdict::record_reviewer_crash(env.ctx, task, attempt, &tab, &tail)?;
+                lines.push(format!(
+                    "escalated {task}: the reviewer ended without findings"
+                ));
+            }
+            Err(err) => eprintln!("warning: cannot look up the reviewer tab of {task}: {err}"),
         }
         Ok(())
     }
@@ -800,6 +860,23 @@ fn tick_task(
         return Ok(());
     }
     let process_exited = process_exited && !starting_up;
+    // A worker that handed in `completed` and then ended is finished, not dead:
+    // its exit is the normal one, so nothing is handed off and no stop is told.
+    if process_exited && handed_in_completed(events, &task.id, attempt.n) {
+        let asked = shprd_asked_to_quit(events, &task.id, attempt.n);
+        let message = finished_exit_message(mux, pane.as_ref(), asked);
+        // Recorded once: the next tick finds the line and stays quiet.
+        if !exit_recorded_for(events, &task.id) {
+            env.ctx.commit(EventKind::TaskStatus {
+                task: task.id.clone(),
+                message: message.clone(),
+                progress: None,
+            })?;
+            lines.push(format!("worker of {} finished: {message}", task.id));
+        }
+        watcher.watches.remove(&key);
+        return Ok(());
+    }
     let record_error = record_error(
         program,
         &env.transcript_roots,
@@ -1063,6 +1140,68 @@ fn reported_or_gated_ms(events: &[Event], task: &str, attempt: u32, now_ms: u64)
             _ => false,
         };
         (mine && event.at_ms <= now_ms).then_some(event.at_ms)
+    })
+}
+
+/// Whether the attempt has handed in as `completed`: a worker that then ends
+/// has finished.
+fn handed_in_completed(events: &[Event], task: &str, attempt: u32) -> bool {
+    events.iter().any(|event| {
+        matches!(
+            &event.kind,
+            EventKind::Reported { task: id, attempt: n, status: ReportStatus::Completed, .. }
+                if id == task && *n == attempt
+        )
+    })
+}
+
+/// The prefix of the status line that records a finished worker's exit.
+const FINISHED_EXIT_PREFIX: &str = "worker finished after a completed hand-in";
+
+/// The line recorded when a worker that handed in `completed` has ended: the
+/// exit code when the host knows it, and whether shprd asked it to quit.
+fn finished_exit_message(mux: &dyn Host, pane: Option<&PaneId>, asked: bool) -> String {
+    let code = pane
+        .and_then(|pane| mux.exit_of(pane).ok().flatten())
+        .and_then(|outcome| outcome.exit_code)
+        .map_or_else(
+            || String::from("no exit code"),
+            |code| format!("exit {code}"),
+        );
+    format!(
+        "{FINISHED_EXIT_PREFIX}; {code}; {}",
+        quit_request_note(asked)
+    )
+}
+
+/// The recorded fact of whether shprd asked the worker to quit.
+fn quit_request_note(asked: bool) -> &'static str {
+    if asked {
+        "shprd asked it to quit"
+    } else {
+        "shprd did not ask it to quit"
+    }
+}
+
+/// Whether shprd stopped this attempt's agent itself (the `task.stop` verb,
+/// recorded as `TaskStopped`), as opposed to the worker ending on its own.
+fn shprd_asked_to_quit(events: &[Event], task: &str, attempt: u32) -> bool {
+    events.iter().any(|event| {
+        matches!(
+            &event.kind,
+            EventKind::TaskStopped { task: id, attempt: n } if id == task && *n == attempt
+        )
+    })
+}
+
+/// Whether a finished worker's exit is already on the log for `task`.
+fn exit_recorded_for(events: &[Event], task: &str) -> bool {
+    events.iter().any(|event| {
+        matches!(
+            &event.kind,
+            EventKind::TaskStatus { task: id, message, .. }
+                if id == task && message.starts_with(FINISHED_EXIT_PREFIX)
+        )
     })
 }
 
@@ -3197,6 +3336,57 @@ project_dirs = []
         );
     }
 
+    /// A reviewer whose tab vanishes without findings raises one card, with the
+    /// last lines it showed; a live reviewer raises none.
+    #[test]
+    fn a_reviewer_that_ends_without_findings_raises_one_crash_card() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.env(&ctx, &["codex"]);
+        awaiting_review_task(&ctx);
+        let mux = mux_with_workspace(&scratch);
+        let space = mux
+            .find_space(&spawn::repo_space_name(&scratch.repo_name()))
+            .unwrap_or_else(|err| panic!("{err}"))
+            .unwrap_or_else(|| panic!("no space"));
+        let tab = mux.with_pane(&space.id, "reviewer");
+        mux.set_screen(&tab.root_pane, "dyld: Library not loaded: libfoo");
+        let record = review::tab_record_path(&env.briefs_dir, &env.run, "T1", 1);
+        std::fs::create_dir_all(record.parent().unwrap_or(&env.briefs_dir))
+            .unwrap_or_else(|err| panic!("{err}"));
+        std::fs::write(&record, tab.id.as_str()).unwrap_or_else(|err| panic!("{err}"));
+
+        let tick_on = |mux: &FakeMux, watcher: &mut Watcher, ctx: &Ctx, env: &SpawnEnv<'_>, now| {
+            let before = events(ctx).len();
+            let lines = watcher
+                .tick(mux, env, now)
+                .unwrap_or_else(|err| panic!("{err}"));
+            (lines, events(ctx)[before..].to_vec())
+        };
+        let mut watcher = Watcher::new(Policy::default());
+        let (_, fresh) = tick_on(&mux, &mut watcher, &ctx, &env, 1_000);
+        assert!(
+            !appended(&fresh, is_escalation),
+            "a live reviewer is not a crash"
+        );
+
+        mux.close_tab(&tab.id).unwrap_or_else(|err| panic!("{err}"));
+        let (lines, fresh) = tick_on(&mux, &mut watcher, &ctx, &env, 2_000);
+        let body = fresh
+            .iter()
+            .find_map(|event| match &event.kind {
+                EventKind::Escalated { body, .. } => Some(body.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no crash card: {lines:?}"));
+        assert!(body.contains("reviewer crashed"), "{body}");
+        assert!(body.contains("retry?"), "{body}");
+        assert!(body.contains("Library not loaded"), "{body}");
+
+        let (_, again) = tick_on(&mux, &mut watcher, &ctx, &env, 3_000);
+        assert!(!appended(&again, is_escalation), "one card per crash");
+    }
+
     /// A blocking finding fails the gate, and the line says so.
     #[test]
     fn a_failing_review_is_recorded_as_a_failed_gate() {
@@ -3999,5 +4189,96 @@ project_dirs = []
         assert!(said.contains("Raise ZeroDivisionError"), "{said}");
         assert!(said.contains("never say it did not ask"), "{said}");
         assert_eq!(ask_history(&events, "T2"), "");
+    }
+    /// Item 13: a worker that handed in `completed` and then exited has
+    /// finished; only a worker that never handed in (or handed in another
+    /// attempt) counts as one that died.
+    #[test]
+    fn a_completed_hand_in_makes_the_exit_a_finish() {
+        let report = |attempt: u32, status: ReportStatus| Event {
+            seq: 1,
+            at_ms: 1_700_000_000_000,
+            actor: Actor::Engine,
+            kind: EventKind::Reported {
+                task: "T1".to_string(),
+                attempt,
+                status,
+                summary: String::new(),
+                tests: Vec::new(),
+                checks: Vec::new(),
+                changed_paths: Vec::new(),
+                commit: None,
+                skills_used: Vec::new(),
+                proofs: Vec::new(),
+            },
+        };
+        assert!(!handed_in_completed(&[], "T1", 1));
+        assert!(handed_in_completed(
+            &[report(1, ReportStatus::Completed)],
+            "T1",
+            1
+        ));
+        assert!(!handed_in_completed(
+            &[report(1, ReportStatus::Failed)],
+            "T1",
+            1
+        ));
+        assert!(!handed_in_completed(
+            &[report(1, ReportStatus::Completed)],
+            "T1",
+            2
+        ));
+        assert!(!handed_in_completed(
+            &[report(1, ReportStatus::Completed)],
+            "T2",
+            1
+        ));
+    }
+
+    /// Item 13: the finished worker's exit is a recorded line, written once.
+    #[test]
+    fn a_finished_workers_exit_is_recorded_once() {
+        let status = |task: &str, message: String| Event {
+            seq: 2,
+            at_ms: 1_700_000_000_000,
+            actor: Actor::Engine,
+            kind: EventKind::TaskStatus {
+                task: task.to_string(),
+                message,
+                progress: None,
+            },
+        };
+        assert!(!exit_recorded_for(&[], "T1"));
+        let line = format!(
+            "{FINISHED_EXIT_PREFIX}; exit 0; {}",
+            quit_request_note(false)
+        );
+        assert!(exit_recorded_for(&[status("T1", line.clone())], "T1"));
+        assert!(!exit_recorded_for(&[status("T2", line)], "T1"));
+        assert!(!exit_recorded_for(
+            &[status("T1", "reading code".to_string())],
+            "T1"
+        ));
+    }
+
+    /// The finished-exit line says whether shprd asked the worker to quit.
+    #[test]
+    fn the_finished_exit_line_records_whether_shprd_asked() {
+        let stopped = |task: &str, attempt: u32| Event {
+            seq: 3,
+            at_ms: 1_700_000_000_000,
+            actor: Actor::Engine,
+            kind: EventKind::TaskStopped {
+                task: task.to_string(),
+                attempt,
+            },
+        };
+        assert!(!shprd_asked_to_quit(&[], "T1", 1));
+        assert!(shprd_asked_to_quit(&[stopped("T1", 1)], "T1", 1));
+        assert!(!shprd_asked_to_quit(&[stopped("T1", 1)], "T1", 2));
+        assert!(!shprd_asked_to_quit(&[stopped("T2", 1)], "T1", 1));
+        assert!(quit_request_note(true).contains("asked it to quit"));
+        assert!(quit_request_note(false).contains("did not ask"));
+        assert_ne!(quit_request_note(true), quit_request_note(false));
     }
 }

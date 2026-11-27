@@ -15,6 +15,7 @@ function page(over: Partial<ChatDto> = {}): ChatDto {
     more: false,
     older: null,
     note: null,
+    question: null,
     ...over,
   };
 }

@@ -41,7 +41,7 @@ use shprd_core::event::{
 use shprd_core::gate;
 use shprd_core::log::{Clock, SystemClock};
 use shprd_core::rules::RuleError;
-use shprd_core::state::{ResourceStatus, RunState, Task};
+use shprd_core::state::{ResourceStatus, RunState, Task, TaskStatus};
 use shprd_core::tick::{self, Facts, Input, Phase, PrFacts, Step};
 use shprd_git::forge::Forge;
 use shprd_git::git::Git;
@@ -524,6 +524,7 @@ impl Worker {
             live: self.facts.live(&state),
             local: self.local,
             settled_findings: self.settled_findings(&state),
+            protected: self.protected_tasks(&state),
         };
         // The ladder's facts are read before the phases because a provider cut
         // is what makes a task read "Needs you" rather than "Working".
@@ -549,15 +550,8 @@ impl Worker {
         // failure is still recorded: what goes quiet is the terminal.
         let quiet = self.quiet_failures(&state);
         let landing = steps.iter().any(|step| matches!(step, Step::Land { .. }));
+        self.clear_scope_waits(&state);
         for step in steps {
-            // A wait is the task's status line and nothing more: it is reported
-            // only on the pass that wrote it, so an idle queue stays quiet.
-            if let Step::Wait { task, path, other } = &step {
-                if let Some(done) = self.hold(&state, task, path, other) {
-                    report.steps.push(done);
-                }
-                continue;
-            }
             let result = self.run_step(&config, &state, &step, &quiet);
             report.steps.push(result);
         }
@@ -894,6 +888,27 @@ impl Worker {
                 let path =
                     shprd_core::review::findings_path(&reviews, &run.run_id, &task.id, attempt);
                 shprd_core::review::settled_mtime(&path).is_some()
+            })
+            .map(|task| task.id.clone())
+            .collect()
+    }
+
+    /// The tasks ready to land whose real diff touches a protected path they did
+    /// not declare: they wait for the person's Accept whatever the merge policy.
+    ///
+    /// Only a task the planner could land is read, so a pass runs git for the
+    /// few tasks at the gate and not for the whole plan. A task git cannot read
+    /// here is not flagged; its landing reads the same branch and fails loudly.
+    fn protected_tasks(&self, state: &RunState) -> BTreeSet<String> {
+        state
+            .tasks
+            .values()
+            .filter(|task| {
+                !matches!(task.status, TaskStatus::Integrated | TaskStatus::Dropped)
+                    && shprd_core::rules::ready_to_land(task).is_ok()
+            })
+            .filter(|task| {
+                !shprd_git::changed::protected_for_task(&self.repo, state, task).is_empty()
             })
             .map(|task| task.id.clone())
             .collect()
@@ -1293,8 +1308,6 @@ impl Worker {
         let mut cause: Option<String> = None;
         let result = match step {
             Step::Start { task } => self.start_task(task),
-            // Never reached: `tick` turns a wait into `hold` before it gets here.
-            Step::Wait { .. } => Ok(StepReport::done(step, "waiting", None)),
             Step::Review { task } => self.review_task(state, task),
             Step::SkipReview { task } => self.skip_review(state, task),
             Step::Verdict { task } => self.verdict_task(config, state, task),
@@ -1349,36 +1362,21 @@ impl Worker {
         }
     }
 
-    /// Says on a queued task's card that it waits for another task's scope.
+    /// Clears the "Waiting: <path> is in use by <task>" line a queued task kept
+    /// from when declared paths were a lock.
     ///
-    /// The line reads "Waiting: <path> is in use by <task>" and is written once
-    /// while it stays true. Returns a report only when it wrote the line: the
-    /// task is Queued, nothing failed, and nobody needs to be told.
-    fn hold(&self, state: &RunState, task: &str, path: &str, other: &str) -> Option<StepReport> {
-        let message = waiting_message(&format!(
-            "task {task:?} path {path:?} overlaps task {other:?}"
-        ));
-        let found = state.tasks.get(task)?;
-        if found
-            .last_status
-            .as_ref()
-            .is_some_and(|status| status.message == message)
-        {
-            return None;
-        }
-        let progress = found
-            .last_status
-            .as_ref()
-            .and_then(|status| status.progress);
-        match self.commit(EventKind::TaskStatus {
-            task: task.to_string(),
-            message: message.clone(),
-            progress,
-        }) {
-            Ok(seq) => Some(StepReport::ok("wait", task, message, Some(seq))),
-            Err(err) => {
-                tracing::warn!(%task, %err, "could not write why the task waits");
-                None
+    /// Nothing waits on a path any more, but a task held at the running cap gets
+    /// no step, so its old line would otherwise stay on its card. Once cleared
+    /// the line reads "No longer waiting", so this writes nothing on later passes.
+    fn clear_scope_waits(&self, state: &RunState) {
+        for (id, task) in &state.tasks {
+            let stale = task.status == TaskStatus::Queued
+                && task.last_status.as_ref().is_some_and(|status| {
+                    status.message.starts_with(WAITING_PREFIX)
+                        && status.message.contains(" is in use by ")
+                });
+            if stale {
+                self.clear_waiting(state, id);
             }
         }
     }
@@ -1653,6 +1651,9 @@ impl Worker {
     /// for ever with nothing in the ledger saying why. The escalation names the
     /// failure and the one verb that recovers it.
     fn review_task(&self, state: &RunState, task: &str) -> Result<StepReport, String> {
+        if let Some(report) = self.clash_before_review(state, task)? {
+            return Ok(report);
+        }
         let review = self
             .review
             .as_ref()
@@ -1676,6 +1677,53 @@ impl Worker {
         self.notify(seq);
         after_write(&self.after_write, &self.repo);
         Ok(StepReport::done(&step, detail, seq))
+    }
+
+    /// Sends a hand-in back before its review when its branch would clash with
+    /// the integration branch as it stands now.
+    ///
+    /// The clash is recorded exactly as a landing records one (a failed
+    /// `integrate` gate and a ledger note), so the planner redoes the task at
+    /// once without spending a review round, and the person never Accepts work
+    /// that cannot land. `None` when the branch merges cleanly or git cannot
+    /// tell, and the review goes ahead.
+    fn clash_before_review(
+        &self,
+        state: &RunState,
+        task: &str,
+    ) -> Result<Option<StepReport>, String> {
+        let (Some(run), Some(found)) = (state.run.as_ref(), state.tasks.get(task)) else {
+            return Ok(None);
+        };
+        let Some(attempt) = found.latest_attempt() else {
+            return Ok(None);
+        };
+        let Some((clashing, files)) =
+            land::clash_before_review(&self.repo, &run.integration_branch, &attempt.branch)
+        else {
+            return Ok(None);
+        };
+        // The note names the commit when git can resolve it, else the branch.
+        let head = Git::new(&self.repo)
+            .rev_parse(&attempt.branch)
+            .unwrap_or_else(|_| attempt.branch.clone());
+        let err = LandError::Conflict {
+            commit: head,
+            files,
+            pr: None,
+        };
+        // The finding names the ref the work clashed with, so the redo merges
+        // the very tip it has to land on, not a stale local ref.
+        let seq = self.record_conflict(found, &clashing, &err)?;
+        after_write(&self.after_write, &self.repo);
+        let step = Step::Review {
+            task: task.to_string(),
+        };
+        Ok(Some(StepReport::done(
+            &step,
+            conflict_message(task, &err),
+            seq,
+        )))
     }
 
     /// Passes a task on its own checks because review is off.
@@ -2009,7 +2057,10 @@ impl Worker {
             &self.home,
             &run.run_id,
             task,
-            &pr::task_pr_body_marked(found),
+            &pr::task_pr_body_flagged(
+                found,
+                &shprd_git::changed::protected_for_task(&self.repo, state, found),
+            ),
         )
         .map_err(|err| LandFail::at(task, "writing the pull request text", err))?;
         let forge = self.forge();
@@ -2782,17 +2833,11 @@ pub async fn run(
 /// What a card's status line begins with while a step is refused.
 const WAITING_PREFIX: &str = "Waiting: ";
 
-/// The status line for a step that failed with `reason`: a scope overlap reads
-/// "Waiting: <path> is in use by <task>", anything else carries the reason.
+/// The status line for a step that failed with `reason`.
 fn waiting_message(reason: &str) -> String {
-    let quoted: Vec<&str> = reason.split('"').skip(1).step_by(2).collect();
-    let text = match (reason.contains(" overlaps task "), quoted.as_slice()) {
-        (true, [_, path, other, ..]) => format!("{path} is in use by {other}"),
-        _ => reason.to_string(),
-    };
     let line = format!(
         "{WAITING_PREFIX}{}",
-        text.split_whitespace().collect::<Vec<_>>().join(" ")
+        reason.split_whitespace().collect::<Vec<_>>().join(" ")
     );
     if line.chars().count() <= shprd_core::event::ENGINE_STATUS_MAX_CHARS {
         return line;
@@ -2808,15 +2853,6 @@ fn waiting_message(reason: &str) -> String {
 #[cfg(test)]
 mod waiting_tests {
     use super::{OPEN_FAIL, open_fail, repeated_failure_action, waiting_message};
-
-    #[test]
-    fn an_overlap_reads_as_a_path_in_use() {
-        let reason = r#"task "serve-space-label" path "crates/shprd/tests" overlaps task "install-layout-source""#;
-        assert_eq!(
-            waiting_message(reason),
-            "Waiting: crates/shprd/tests is in use by install-layout-source"
-        );
-    }
 
     #[test]
     fn another_refusal_carries_its_reason_capped() {

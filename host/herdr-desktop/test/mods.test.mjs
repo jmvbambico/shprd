@@ -92,6 +92,7 @@ import {
   changeRows,
   changeCounts,
   changesLine,
+  protectedLine,
   commitRows,
   canReview,
   VIEW,
@@ -818,8 +819,11 @@ test("the add-task form says what is missing before the press", () => {
   });
   assert.equal(newTask({}).ready, false);
   assert.match(newTask({}).why, /title/);
-  assert.match(newTask({ title: "x" }).why, /folder or path/);
+  assert.match(newTask({ title: "x" }).why, /must be true/);
   assert.match(newTask({ title: "x", scope: "a" }).why, /must be true/);
+  // The paths are an optional hint: a task with none is ready.
+  assert.equal(newTask({ title: "x", acceptance: "it works" }).ready, true);
+  assert.deepEqual(newTask({ title: "x", acceptance: "it works" }).scope, []);
 });
 
 test("a panel finds the task its shared selection names, or nothing", () => {
@@ -867,6 +871,12 @@ test("a long summary keeps its first sentence and folds the rest away", () => {
 test("the changes are counted once, from the branch git read", () => {
   // The service names the commits too: "N commits · N files changed +a −r".
   assert.equal(changesLine(CHANGES), "7 commits · 3 files changed +6 −0");
+  assert.equal(protectedLine(CHANGES), null);
+  assert.equal(protectedLine({ protected: [] }), null);
+  assert.equal(
+    protectedLine({ protected: ["AGENTS.md", "docs/plan.md"] }),
+    "Touches protected paths: AGENTS.md, docs/plan.md",
+  );
   assert.deepEqual(changeCounts(CHANGES), { commits: "7 commits", files: "3 files changed", added: "+6", removed: "−0" });
   // An older service has no commit count, and the line is the files alone.
   assert.equal(changesLine({ files: [{ path: "a", added: 1, deleted: 2 }], added: 1, deleted: 2 }), "1 file changed +1 −2");
@@ -1042,6 +1052,14 @@ test("the review line names the reviewer and whether it was independent", () => 
   assert.deepEqual(reviewLine(none), { line: WORDS.noReview, degraded: false });
 });
 
+test("a failed task a person accepted offers Accept", () => {
+  const failed = { ...boardTask("T2"), status: "failed", derived: { status: "needs_you" } };
+  assert.equal(verbs(failed, "ask").accept, false);
+  const accepted = { ...failed, derived: { status: "ready" }, accepted_failure: true };
+  assert.equal(verbs(accepted, "ask").accept, true);
+  assert.equal(verbs(accepted, "checks").accept, false);
+});
+
 test("the card offers Accept only where a merge policy asks", () => {
   const ready = boardTask("T2");
   assert.equal(verbs(ready, "ask").accept, true);
@@ -1052,6 +1070,12 @@ test("the card offers Accept only where a merge policy asks", () => {
   }
   // A service that could not say leaves the decision to the engine.
   assert.equal(verbs(ready, null).accept, true);
+  // A task flagged for a protected path waits for the person under any policy.
+  for (const policy of ["checks", "auto"]) {
+    const flagged = verbs(ready, policy, { protected: ["AGENTS.md"] });
+    assert.equal(flagged.accept, true, policy);
+    assert.equal(flagged.note, null, policy);
+  }
   // A hand-in nobody reviewed yet is not a decision for the person: the card
   // offers no Accept until a review has passed it.
   const reported = { id: "T9", status: "reported", derived: { status: "working" }, attempts: [] };

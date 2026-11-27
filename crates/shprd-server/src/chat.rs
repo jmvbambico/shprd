@@ -28,17 +28,19 @@
 use std::path::PathBuf;
 
 use shprd_agents::spec::{HarnessSpec, TranscriptFormat};
-use shprd_agents::transcript::Transcript;
+use shprd_agents::transcript::{PendingQuestion, Transcript};
 use shprd_core::settings::{Loaded, RoleKind};
 use shprd_core::state::{RunState, Task};
 
 use crate::api::AppState;
 use crate::attachments;
 use crate::dto::{
-    ChatDto, ChatMessageDto, ChatSendDto, ChatSendReply, ChatStopDto, ChatStopReply, ChatToolDto,
+    ChatAnswerDto, ChatAnswerReply, ChatDto, ChatMessageDto, ChatOptionDto, ChatQuestionDto,
+    ChatSendDto, ChatSendReply, ChatStopDto, ChatStopReply, ChatToolDto,
 };
 use crate::error::ApiReject;
 use crate::ledger;
+use crate::terminal::TermKey;
 
 /// The word a client uses for the coordinator's space.
 pub const COORDINATOR: &str = "coordinator";
@@ -48,6 +50,15 @@ pub const COORDINATOR: &str = "coordinator";
 /// (a custom role may be one too, and then it is the one the settings order
 /// puts first).
 const COORDINATOR_ID: &str = "coordinator";
+
+/// One thing pressed or typed to answer a dialog in a terminal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AnswerStep {
+    /// One key press.
+    Key(TermKey),
+    /// Words typed at the cursor, without a newline.
+    Text(String),
+}
 
 /// What the service needs to type a chat line into a space.
 ///
@@ -68,6 +79,14 @@ pub trait ChatWriter: Send + Sync {
     /// Press Escape in `space`'s agent, which every supported program takes as
     /// "stop what you are doing". A host that cannot press a key says so.
     fn interrupt(&self, _space: Option<&str>) -> Result<(), String> {
+        Err(String::from(
+            "this service cannot press a key in a terminal",
+        ))
+    }
+
+    /// Press `steps` in `space`'s agent, one after the other, to answer the
+    /// dialog its terminal shows. A host that cannot press keys says so.
+    fn answer(&self, _space: Option<&str>, _steps: &[AnswerStep]) -> Result<(), String> {
         Err(String::from(
             "this service cannot press a key in a terminal",
         ))
@@ -227,6 +246,7 @@ pub(crate) fn page(
         more: false,
         older: None,
         note: place.note.clone(),
+        question: None,
     };
     let Some(program) = place.program.as_deref() else {
         return Ok(answer);
@@ -290,6 +310,15 @@ pub(crate) fn page(
         return Ok(answer);
     };
     watch_transcript(state, &transcript);
+    // A question the terminal waits on is the card at the bottom of the chat,
+    // whatever page of the conversation this is. A record that cannot be read for a
+    // moment (an agent restarting) leaves the card out; it does not fail the page.
+    answer.question = transcript
+        .pending_question()
+        .ok()
+        .flatten()
+        .as_ref()
+        .map(question_dto);
     // No cursor of this session (a first read, a panel that reloaded, an agent
     // that started a new session) opens at the newest messages; a cursor of this
     // session follows forward; `before` goes back through history.
@@ -330,6 +359,59 @@ pub(crate) fn page(
         answer.note = Some(String::from("nothing new"));
     }
     Ok(answer)
+}
+
+/// The card a pending question is, as a client draws it: the dialog's first
+/// question with its choices.
+fn question_dto(pending: &PendingQuestion) -> ChatQuestionDto {
+    let first = &pending.questions[0];
+    ChatQuestionDto {
+        id: pending.id.clone(),
+        header: first.header.clone(),
+        question: first.question.clone(),
+        options: first
+            .options
+            .iter()
+            .map(|option| ChatOptionDto {
+                label: option.label.clone(),
+                description: option.description.clone(),
+            })
+            .collect(),
+        multi_select: first.multi_select,
+        more: (pending.questions.len() - 1) as u32,
+        answerable: pending.questions.len() == 1 && !first.multi_select,
+    }
+}
+
+/// The keys that answer a one-question, one-choice dialog, the same a person
+/// presses: Down to the row, Enter. `choice` is 0-based; the row after the last
+/// option is "Type something", an inline text row: once the cursor is on it the
+/// answer is typed straight in and Enter sends. A leading Enter there would
+/// submit it empty, and claude declines the question (checked against a real
+/// claude dialog, claude 2.1.332).
+pub fn answer_steps(choice: usize, text: Option<&str>) -> Vec<AnswerStep> {
+    let mut steps: Vec<AnswerStep> = (0..choice)
+        .map(|_| AnswerStep::Key(TermKey::Down))
+        .collect();
+    if let Some(text) = text {
+        let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        steps.push(AnswerStep::Text(one_line));
+    }
+    steps.push(AnswerStep::Key(TermKey::Enter));
+    steps
+}
+
+/// The question `space`'s terminal waits on, read from its agent's record.
+///
+/// `None` is nothing waiting, or a record this service cannot read: a send that
+/// cannot tell is not stopped by it.
+pub(crate) fn pending_question(state: &AppState, space: &Space) -> Option<PendingQuestion> {
+    let place = place_of(state, space).ok()?;
+    let program = place.program.as_deref()?;
+    let spec = harness_spec(state, program).ok()??;
+    let roots = state.transcript_roots.as_ref()?;
+    let transcript = Transcript::locate_since(&spec.transcript, roots, &place.cwd, place.since_ms)?;
+    transcript.pending_question().ok()?
 }
 
 /// `GET /api/chat`'s answer, with a delivery failure the person has not heard
@@ -432,6 +514,11 @@ pub(crate) fn send(state: &AppState, body: &[u8]) -> Result<ChatSendReply, ApiRe
              with the host wired. Nothing was sent",
         )
     })?;
+    // A terminal on a question refuses a typed line (or takes it into the
+    // dialog): say so, typed, before anything is stored or typed.
+    if pending_question(state, &space).is_some() {
+        return Err(ApiReject::question_waiting());
+    }
     // Resolving the space first means a task that does not exist is refused
     // before anything is typed anywhere.
     let began = std::time::Instant::now();
@@ -458,6 +545,11 @@ pub(crate) fn send(state: &AppState, body: &[u8]) -> Result<ChatSendReply, ApiRe
     std::thread::spawn(move || background.run(done_tx, resolved, delivered_after));
     if let Ok(Err(reason)) = done_rx.recv_timeout(std::time::Duration::from_millis(ACCEPT_GRACE_MS))
     {
+        // The host's own refusal of a line typed at a dialog, when the record
+        // could not say so first.
+        if reason.contains("blocked (question)") {
+            return Err(ApiReject::question_waiting());
+        }
         return Err(ApiReject::refused(format!("{reason}. Nothing was sent")));
     }
     tracing::debug!(
@@ -512,6 +604,60 @@ impl BackgroundSend {
         self.hub.poke();
         let _ = done.send(typed);
     }
+}
+
+/// `POST /api/chat/answer`: answer the question a space's terminal waits on,
+/// pressing the keys a person would.
+pub(crate) fn answer(state: &AppState, body: &[u8]) -> Result<ChatAnswerReply, ApiReject> {
+    let request: ChatAnswerDto = serde_json::from_slice(body).map_err(|err| {
+        ApiReject::bad_request(format!(
+            "the body is not an answer: {err}; send {{\"space\": \"coordinator\", \"id\": \"…\", \"option\": 1}} or \"text\""
+        ))
+    })?;
+    let space = Space::parse(Some(&request.space));
+    let writer = state.chat.get().ok_or_else(|| {
+        ApiReject::refused("this service cannot press a key in a terminal. Nothing was answered")
+    })?;
+    let waiting = pending_question(state, &space).filter(|pending| pending.id == request.id);
+    let Some(waiting) = waiting else {
+        return Err(ApiReject::refused(
+            "that question is not waiting any more. Nothing was answered",
+        ));
+    };
+    let dto = question_dto(&waiting);
+    if !dto.answerable {
+        return Err(ApiReject::refused(
+            "this dialog has several questions or several choices: answer it in the terminal",
+        ));
+    }
+    let steps = match (request.option, request.text.as_deref().map(str::trim)) {
+        (Some(option), _) => {
+            let at = (option as usize)
+                .checked_sub(1)
+                .filter(|at| *at < dto.options.len());
+            let Some(at) = at else {
+                return Err(ApiReject::bad_request(format!(
+                    "the question has {} choices: `option` counts from 1",
+                    dto.options.len()
+                )));
+            };
+            answer_steps(at, None)
+        }
+        (None, Some(text)) if !text.is_empty() => answer_steps(dto.options.len(), Some(text)),
+        _ => {
+            return Err(ApiReject::bad_request(
+                "an answer needs a choice (`option`) or some words (`text`)",
+            ));
+        }
+    };
+    writer
+        .answer(space.target(), &steps)
+        .map_err(|reason| ApiReject::refused(format!("{reason}. Nothing was answered")))?;
+    state.hub.poke();
+    Ok(ChatAnswerReply {
+        space: space.name().to_owned(),
+        answered: true,
+    })
 }
 
 /// `POST /api/chat/stop`: press Escape in a space's agent, as the person.

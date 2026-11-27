@@ -519,6 +519,8 @@ pub enum TaskKey {
     StartNotes,
     /// Words put into a task's brief before it reports.
     FinishNotes,
+    /// Files copied or linked from the main checkout into every worktree.
+    WorktreeFiles,
     /// Seconds between two passes of the service's tick.
     TickSecs,
     /// Seconds a change must hold before the coordinator is told about it.
@@ -530,7 +532,7 @@ pub enum TaskKey {
 }
 
 /// Every `tasks.*` key, in the order a settings UI lists them.
-pub const TASK_KEYS: [TaskKey; 16] = [
+pub const TASK_KEYS: [TaskKey; 17] = [
     TaskKey::Merge,
     TaskKey::ReviewRounds,
     TaskKey::MustFix,
@@ -543,6 +545,7 @@ pub const TASK_KEYS: [TaskKey; 16] = [
     TaskKey::Branch,
     TaskKey::StartNotes,
     TaskKey::FinishNotes,
+    TaskKey::WorktreeFiles,
     TaskKey::TickSecs,
     TaskKey::NewsSettleSecs,
     TaskKey::SelfUpdate,
@@ -565,6 +568,7 @@ impl TaskKey {
             Self::Branch => "branch",
             Self::StartNotes => "start_notes",
             Self::FinishNotes => "finish_notes",
+            Self::WorktreeFiles => "worktree_files",
             Self::TickSecs => "tick_secs",
             Self::NewsSettleSecs => "news_settle_secs",
             Self::SelfUpdate => "self_update",
@@ -1544,6 +1548,10 @@ pub fn builtin() -> Layer {
     layer.set(Key::Task(TaskKey::StartNotes), Value::Text(String::new()));
     layer.set(Key::Task(TaskKey::FinishNotes), Value::Text(String::new()));
     layer.set(
+        Key::Task(TaskKey::WorktreeFiles),
+        Value::Text(String::new()),
+    );
+    layer.set(
         Key::Task(TaskKey::TickSecs),
         Value::Number(i64::try_from(config.tick.interval_secs).unwrap_or(15)),
     );
@@ -1965,17 +1973,9 @@ impl ResolvedRole {
     /// ignored, because a task picks a line by its program.
     pub fn lines(&self) -> Vec<WorkerLine> {
         let mut lines: Vec<WorkerLine> = Vec::new();
-        // The person's own `agents` list outranks the one program the old
-        // `config.toml` still names: a settings file that lists its programs
-        // never meant the pre-M9 key to go first (a reviewer list of only `pi`
-        // once reviewed on the `codex` an old roster named).
-        let legacy_first = self
-            .agent
-            .as_ref()
-            .is_some_and(|agent| agent.source == Source::Legacy)
-            && !self.agents.value.is_empty()
-            && self.agents.source != Source::Legacy;
-        if let Some(agent) = self.agent.as_ref().filter(|_| !legacy_first) {
+        // The role's own `agent` is always the first line, whatever layer set it:
+        // `agents` only lists what follows when it cannot run.
+        if let Some(agent) = self.agent.as_ref() {
             let some = |field: &Option<Sourced<String>>| {
                 field
                     .as_ref()
@@ -2086,6 +2086,9 @@ pub struct Tasks {
     pub start_notes: String,
     /// Words put into a task's brief before it reports.
     pub finish_notes: String,
+    /// The files to copy or link from the main checkout into every worktree:
+    /// one per line or comma-separated, `link:` before a path links it.
+    pub worktree_files: String,
     /// Seconds between two passes of the service's tick.
     pub tick_secs: u64,
     /// Seconds a change must hold before a space's coordinator is told about
@@ -2258,6 +2261,10 @@ impl Resolved {
                 .to_owned(),
             finish_notes: self
                 .text(TaskKey::FinishNotes)
+                .unwrap_or_default()
+                .to_owned(),
+            worktree_files: self
+                .text(TaskKey::WorktreeFiles)
                 .unwrap_or_default()
                 .to_owned(),
             tick_secs: u64::from(self.count(
@@ -2517,7 +2524,11 @@ impl Loaded {
             },
             Some(value) => {
                 let inherited = self.preview(scope, key, None, task);
-                let same = inherited.get(key).map(|sourced| &sourced.value) == Some(&value);
+                // A value the old `config.toml` still supplies is not a settings
+                // layer: setting it to the same word must write the new layer, or
+                // the person's choice is never stored.
+                let same = inherited.get(key).map(|sourced| &sourced.value) == Some(&value)
+                    && inherited.source_of(key) != Some(Source::Legacy);
                 if same {
                     (WriteOutcome::EqualToInherited, None)
                 } else {

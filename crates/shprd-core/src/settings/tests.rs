@@ -478,6 +478,10 @@ fn a_repo_committed_file_may_not_widen_a_guard() {
         ("[tasks]\nmerge = \"auto\"\n", "tasks.merge"),
         ("[tasks]\nmax_running = 10\n", "tasks.max_running"),
         ("[tasks]\ngh_user = \"someone\"\n", "tasks.gh_user"),
+        (
+            "[tasks]\nworktree_files = \".env\"\n",
+            "tasks.worktree_files",
+        ),
         ("[review]\ncross_vendor = false\n", "review"),
     ] {
         std::fs::write(&path, document).expect("the file is written");
@@ -646,6 +650,53 @@ fn the_old_roster_reviewer_is_the_lower_layer_of_the_reviewer_role() {
     assert_eq!(
         source_of(&resolved, "roles.reviewer.effort"),
         Some(Source::Legacy)
+    );
+}
+
+#[test]
+fn the_legacy_reviewer_stays_first_and_the_agents_lines_are_fallbacks() {
+    let home = home();
+    let path = user_config(home.path());
+    std::fs::create_dir_all(path.parent().expect("the config dir")).expect("the dir");
+    std::fs::write(&path, "[roster]\nreviewer = \"codex/gpt-6-luna\"\n").expect("old config");
+    std::fs::write(
+        user_file(home.path()),
+        "[roles.reviewer]\nperm = \"read-only\"\nagents = [\"pi|Command Code/z-ai/glm-5.3-flash|||read-only\"]\n",
+    )
+    .expect("settings");
+    let loaded = Loaded::read(home.path(), None).expect("both load");
+    let resolved = loaded.resolve(None);
+    let lines = resolved.role("reviewer").expect("reviewer").lines();
+    assert_eq!(
+        lines[0].agent, "codex",
+        "the resolved main reviewer is first"
+    );
+    assert_eq!(lines[0].model.as_deref(), Some("gpt-6-luna"));
+    assert_eq!(lines[1].agent, "pi", "the agents line is only a fallback");
+}
+
+#[test]
+fn setting_a_key_to_what_the_old_config_resolves_stores_it_in_the_new_layer() {
+    let home = home();
+    let path = user_config(home.path());
+    std::fs::create_dir_all(path.parent().expect("the config dir")).expect("the dir");
+    std::fs::write(&path, "[roster]\nreviewer = \"codex/gpt-6-luna\"\n").expect("old config");
+    let loaded = Loaded::read(home.path(), None).expect("loads");
+    let key = Key::parse("roles.reviewer.agent").expect("key");
+    let written = loaded
+        .write(
+            home.path(),
+            &Scope::You,
+            &key,
+            Some(Value::Text("codex".into())),
+            None,
+        )
+        .expect("written");
+    assert_eq!(written.outcome, WriteOutcome::Stored);
+    let loaded = Loaded::read(home.path(), None).expect("reloads");
+    assert_eq!(
+        source_of(&loaded.resolve(None), "roles.reviewer.agent"),
+        Some(Source::You)
     );
 }
 
@@ -1272,5 +1323,27 @@ fn the_gh_account_is_pinned_per_repo_and_empty_by_default() {
     assert_eq!(ask("mine"), "alice");
     assert_eq!(ask("another"), "");
     let key = Key::parse("land.gh_user").expect("the alias parses");
+    assert_eq!(key.kind(), Kind::Text);
+}
+
+#[test]
+fn worktree_files_are_per_repo_text_and_empty_by_default() {
+    let file = File::parse("[repos.mine.tasks]\nworktree_files = \".env\\nlink:data\"\n")
+        .expect("the file parses");
+    let ask = |repo: &str| {
+        resolve(
+            &file,
+            &Request {
+                repo: Some(repo),
+                repo_file: None,
+                task: None,
+            },
+        )
+        .tasks()
+        .worktree_files
+    };
+    assert_eq!(ask("mine"), ".env\nlink:data");
+    assert_eq!(ask("another"), "");
+    let key = Key::parse("tasks.worktree_files").expect("the key parses");
     assert_eq!(key.kind(), Kind::Text);
 }

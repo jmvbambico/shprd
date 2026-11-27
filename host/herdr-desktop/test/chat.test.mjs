@@ -53,8 +53,8 @@ import {
   toolLine,
   when,
 } from "../mods/lib/chat.js";
-import { inputState } from "./stub-gpui.js";
-import { forSpace, cards as cardsOf } from "../mods/lib/asks.js";
+import { inputState, ScrollHandle } from "./stub-gpui.js";
+import { forSpace, cards as cardsOf, questionCard } from "../mods/lib/asks.js";
 
 /** A context that answers `cx.sleep`, `cx.notify`, `cx.spawn` and `cx.timer`. */
 function context() {
@@ -835,4 +835,185 @@ test("a notice's Dismiss posts need.dismiss, and a Drop asks twice", async () =>
   assert.equal(actions.length, 1, "the first press only arms the drop");
   await view.choose(decision, decision.buttons[0]);
   assert.equal(actions[1].kind, "task.drop");
+});
+
+// ---- a question the agent's terminal waits on ---------------------------------
+
+const QUESTION = {
+  id: "toolu_host",
+  header: "Host",
+  question: "Can I set this repo's host to herdr-desktop?",
+  options: [
+    { label: "Yes, set it (Recommended)", description: "Set host = herdr-desktop now." },
+    { label: "No", description: "Leave it on auto." },
+  ],
+  multi_select: false,
+  more: 0,
+  answerable: true,
+};
+
+/** The words and the clickable elements of the card the chat draws for `question`. */
+function drawCard(view, question = view.chat.question) {
+  const card = questionCard(question, view.space);
+  record(true);
+  try {
+    const tree = view.card(herdr.theme(), { red: "#f00", amber: "#fa0", green: "#0f0" }, card);
+    const nodes = walk(tree);
+    const words = nodes.flatMap((node) => node.kids.filter((kid) => typeof kid === "string"));
+    return { card, words, nodes };
+  } finally {
+    record(false);
+  }
+}
+
+/** Presses the button that says `word`, the way a click does. */
+function pressWord({ nodes }, word) {
+  const node = nodes.find((n) => n.click && n.kids.includes(word));
+  assert.ok(node, `a button says ${word}`);
+  return node.click({}, { notify() {}, stop_propagation() {} });
+}
+
+test("a page carries the waiting question, and the next page that has none closes it", () => {
+  const held = fold(empty(), page({ question: QUESTION }));
+  assert.equal(held.question.id, "toolu_host");
+  assert.equal(fold(held, page({ question: null })).question, null);
+});
+
+test("the chat draws the question as a card: header, text, each option with its words, a button each", () => {
+  const { view } = panel([page({ question: QUESTION })]);
+  view.chat = fold(empty(), page({ question: QUESTION }));
+  const drawn = drawCard(view);
+  assert.equal(drawn.card.from, "terminal");
+  assert.deepEqual(drawn.card.buttons.map((b) => b.label), ["Yes, set it (Recommended)", "No"]);
+  assert.equal(drawn.card.freeText, true);
+  for (const word of [
+    "Host",
+    "Can I set this repo's host to herdr-desktop?",
+    "1. Yes, set it (Recommended)",
+    "Set host = herdr-desktop now.",
+    "2. No",
+    "Leave it on auto.",
+  ]) {
+    assert.ok(drawn.words.includes(word), `the card says ${word}`);
+  }
+  assert.equal(forSpace([drawn.card], COORDINATOR).length, 1, "it is the coordinator's chat's card");
+  assert.equal(forSpace([drawn.card], "T1").length, 0, "and no task's");
+});
+
+test("pressing an option answers the dialog with that option and the card closes", async () => {
+  const { view } = panel([page({ question: QUESTION })]);
+  view.chat = fold(empty(), page({ question: QUESTION }));
+  const answers = [];
+  view.client.answerQuestion = async (space, id, how) => {
+    answers.push({ space, id, how });
+    return { answered: true };
+  };
+  await pressWord(drawCard(view), "No");
+  assert.deepEqual(answers, [{ space: COORDINATOR, id: "toolu_host", how: { option: 2, text: null } }]);
+  assert.equal(view.chat.question, null, "the card closes");
+  // The record has not caught up yet: the same question must not bring the card back.
+  await view.refresh();
+  assert.equal(view.chat.question, null, "the record has not caught up, and the same question does not bring the card back");
+});
+
+test("a typed answer goes as words, and a refusal puts the card back with the reason", async () => {
+  const { view } = panel([page({ question: QUESTION })]);
+  view.chat = fold(empty(), page({ question: QUESTION }));
+  const card = questionCard(QUESTION, COORDINATOR);
+  const seen = [];
+  view.client.answerQuestion = async (space, id, how) => {
+    seen.push(how);
+    const error = new Error("that question is not waiting any more. Nothing was answered");
+    error.name = "ServiceError";
+    throw error;
+  };
+  await view.respond(card, "  later please ");
+  assert.deepEqual(seen, [{ option: null, text: "later please" }]);
+  assert.equal(view.answerRefusal.text, "that question is not waiting any more. Nothing was answered");
+  assert.equal(view.answering, null);
+  assert.equal(view.chat.question.id, "toolu_host", "a refused answer leaves the card");
+});
+
+test("a send while a question waits shows no host error, keeps the words, and sends them once it is answered", async () => {
+  const { view, calls } = panel([page({ question: QUESTION })]);
+  view.chat = fold(empty(), page({ question: QUESTION }));
+  view.client.answerQuestion = async () => ({ answered: true });
+  view.input.set_value("also, check the gate");
+  await view.send();
+  assert.equal(calls.filter((c) => c.method === "POST").length, 0, "nothing reaches the host");
+  assert.match(view.refusal, /question is waiting above/i);
+  assert.doesNotMatch(view.refusal, /herdr-core|terminal\.send|blocked/);
+  assert.equal(view.input.value(), "also, check the gate", "the typed text stays");
+  // Answered: the held message goes.
+  await view.answerTerminal(questionCard(QUESTION, COORDINATOR), { option: 1 });
+  const posted = calls.filter((c) => c.method === "POST" && c.path === "/api/chat");
+  assert.deepEqual(posted.map((c) => c.body.text), ["also, check the gate"]);
+  assert.equal(view.refusal, null);
+});
+
+test("a typed question_waiting from the service is the same held send, not the raw error", async () => {
+  const { view } = panel([page({ messages: [] })]);
+  view.input.set_value("hello");
+  view.client.call = async (method) => {
+    if (method === "GET") return page({ messages: [] });
+    const error = new Error("a question is waiting above: answer it first. Your message was not sent");
+    error.name = "ServiceError";
+    error.code = "question_waiting";
+    throw error;
+  };
+  await view.send();
+  assert.equal(view.input.value(), "hello");
+  assert.match(view.refusal, /question is waiting above/i);
+  assert.equal(view.holdSend, view.slot);
+  assert.deepEqual(view.echoes ?? [], [], "no echo of a line that was not sent");
+});
+
+test("the Needs you pill's request lands the chat on its card, once, and only for its own space", () => {
+  const { view } = panel([page({ question: QUESTION })]);
+  view.pinned = null;
+  herdr.setShared("shprd.chat.focus", { space: "T9", at: Date.now() });
+  view.focusCard();
+  assert.equal(view.pinned, null, "another space's request is not this chat's");
+  herdr.setShared("shprd.chat.focus", { space: COORDINATOR, at: Date.now() + 1 });
+  view.focusCard();
+  assert.equal(view.pinned, "card");
+  view.pinned = null;
+  view.focusCard();
+  assert.equal(view.pinned, null, "the same request is acted on once");
+});
+
+test("the Needs you pill scrolls the chat to the question card and outlines it", () => {
+  const msgs = Array.from({ length: 6 }, (_, i) => ({ id: `m${i}`, role: "assistant", text: `line ${i}`, at: 1 }));
+  const { view } = panel([page({ question: QUESTION, messages: msgs })]);
+  view.chat = fold(empty(), page({ question: QUESTION, messages: msgs }));
+  view.scroll = ScrollHandle.new();
+  const list = [questionCard(QUESTION, COORDINATOR)];
+  const rows = timeline(view.chat, list);
+  const cardAt = rows.findIndex((row) => row.kind === "card");
+  assert.ok(cardAt > 0, "the card is a row after the messages");
+  view.drawn = { rows: rows.length, cards: 1 };
+  view.pinned = null;
+  view.reveal(rows, list);
+  assert.deepEqual(view.scroll.revealed, [], "nothing moves by itself");
+  herdr.setShared("shprd.chat.focus", { space: COORDINATOR, at: Date.now() + 5 });
+  view.focusCard();
+  assert.ok(Date.now() < view.litUntil, "the card is outlined");
+  view.reveal(rows, list);
+  assert.deepEqual(view.scroll.revealed, [cardAt], "the chat scrolls to the card's row");
+});
+
+test("a question answered but still pending after the grace comes back", async () => {
+  const { view } = panel([page({ question: QUESTION })]);
+  view.client.answerQuestion = async () => ({ answered: true });
+  view.chat = fold(empty(), page({ question: QUESTION }));
+  await view.answerTerminal(questionCard(QUESTION, COORDINATOR), { option: 1 });
+  assert.equal(view.answered(QUESTION.id), true, "hidden while the record catches up");
+  const realNow = Date.now;
+  try {
+    Date.now = () => realNow() + 7000;
+    assert.equal(view.answered(QUESTION.id), false, "the keys did not take: the card is back");
+    assert.equal(view.answeredQ, null);
+  } finally {
+    Date.now = realNow;
+  }
 });

@@ -7,6 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::ask::{AskId, AskKind};
+use crate::baseline::BaselineEntry;
 
 /// Identifies a task inside a run.
 pub type TaskId = String;
@@ -168,6 +169,12 @@ pub struct CheckReport {
     /// The last lines it printed, capped at [`CHECK_OUTPUT_LINES`].
     #[serde(default)]
     pub output_tail: String,
+    /// Set by the engine when the check failed no worse than the gate did on
+    /// the base: `pre-existing on base (<sha>, N errors on base; exit E)`. The
+    /// exit code above stays the real one; the rules, not this note, decide a
+    /// hand-in may carry the failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_existing: Option<String>,
 }
 
 impl CheckReport {
@@ -181,6 +188,7 @@ impl CheckReport {
             command: command.to_string(),
             exit_code: Some(0),
             output_tail: String::new(),
+            pre_existing: None,
         }
     }
 }
@@ -820,6 +828,18 @@ pub enum EventKind {
         /// The integration branch's head after the merge.
         int_sha: String,
     },
+    /// Each worker gate was run on the base: how it fared, with a fingerprint
+    /// of any failure.
+    ///
+    /// Recorded when a run starts and again on every sync that moves the base.
+    /// A hand-in whose gate fails no worse than its baseline is accepted as
+    /// pre-existing; only a regression refuses it.
+    GateBaselined {
+        /// The base commit the gates ran on.
+        base_sha: String,
+        /// One entry per worker gate command.
+        entries: Vec<BaselineEntry>,
+    },
     /// A provider cut a turn off and the fallback ladder sent the agent a
     /// carry-on message.
     ///
@@ -907,7 +927,7 @@ impl EventKind {
     /// The log is how a reader follows one task: which events name it is the
     /// same question every reader asks, so it is answered once here rather
     /// than matched again in each view. Run-wide events (`RunStarted`,
-    /// `FullGate`, `BaseSynced`, the two launcher events) name none, and
+    /// `FullGate`, `BaseSynced`, `GateBaselined`, the two launcher events) name none, and
     /// `Escalated` names one only when it is not run-wide.
     pub fn task(&self) -> Option<&str> {
         match self {
@@ -973,6 +993,7 @@ mod tests {
             command: "cargo test --workspace".to_string(),
             exit_code: Some(0),
             output_tail: "test result: ok. 42 passed".to_string(),
+            pre_existing: None,
         }
     }
 
@@ -1139,6 +1160,16 @@ mod tests {
                 base_sha: "abc1234".to_string(),
                 int_sha: "def5678".to_string(),
             },
+            EventKind::GateBaselined {
+                base_sha: "abc1234".to_string(),
+                entries: vec![BaselineEntry {
+                    command: "npm run lint".to_string(),
+                    passed: false,
+                    exit_code: Some(1),
+                    fingerprint: Default::default(),
+                    base_sha: "abc1234".to_string(),
+                }],
+            },
             EventKind::Nudged {
                 task: "M1.1".to_string(),
                 attempt: 1,
@@ -1178,7 +1209,7 @@ mod tests {
     #[test]
     fn every_kind_round_trips() {
         let kinds = every_kind();
-        assert_eq!(kinds.len(), 31, "one case per EventKind variant");
+        assert_eq!(kinds.len(), 32, "one case per EventKind variant");
 
         for (index, kind) in kinds.into_iter().enumerate() {
             let event = Event {

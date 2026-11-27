@@ -2,6 +2,7 @@
 //! file), and the spawn retry every external program shprd runs goes through.
 
 pub mod ask;
+pub mod baseline;
 pub mod config;
 pub mod event;
 pub mod gate;

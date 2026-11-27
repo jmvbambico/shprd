@@ -77,6 +77,12 @@ space?: string,
  */
 phase?: string, 
 /**
+ * True exactly when a person accepted the task's newest failure with an
+ * `integrate_after_failed_gate` override: it then reads Ready and Accept is
+ * offered although its status is still failed.
+ */
+accepted_failure: boolean, 
+/**
  * When the task was added, ms since the Unix epoch.
  *
  * A board shows the newest work first and folds a run's old leftovers out

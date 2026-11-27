@@ -906,6 +906,12 @@ export const WORKFLOW = [
     kind: "notes",
   },
   {
+    key: "tasks.worktree_files",
+    title: "Files for worktrees",
+    about: "Files copied into every worker's worktree from the main checkout, one per line (for example .env); write link: before a path to link it instead of copying.",
+    kind: "notes",
+  },
+  {
     key: "tasks.tick_secs",
     title: "Time between passes",
     about: "Seconds between two passes of the service's tick.",
