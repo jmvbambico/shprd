@@ -1691,6 +1691,65 @@ async fn review_again_on_a_stuck_review_needs_a_host_and_consumes_nothing_withou
     );
 }
 
+#[tokio::test]
+async fn review_again_on_a_stuck_review_starts_a_new_review_when_the_service_has_a_host() {
+    let repo = refused_hand_in_repo();
+    let ask = shprd_core::review::stuck_ask(1, 1);
+    let options = shprd_core::review::stuck_options();
+    let path = repo.path().join(".shprd").join("events.jsonl");
+    let mut log = EventLog::open(&path).expect("open");
+    put(
+        &mut log,
+        Actor::Engine,
+        EventKind::AskRaised {
+            task: "T1".into(),
+            ask: ask.clone(),
+            ask_kind: shprd_core::ask::AskKind::Question,
+            text: "stuck".into(),
+            options: options.clone(),
+            created_at_ms: 2,
+            expires_at_ms: None,
+        },
+    );
+    shprd_core::ask::AskQueue::for_repo(repo.path())
+        .raise(
+            &shprd_core::ask::Ask::new(
+                ask.clone(),
+                "T1",
+                shprd_core::ask::AskKind::Question,
+                "stuck",
+                2,
+            )
+            .with_options(options),
+        )
+        .expect("the ask file");
+    let mut fixture = Fixture::prepared(repo, tempfile::tempdir().expect("state"));
+    let reviewed = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let seen = reviewed.clone();
+    let engine = shprd_server::Engine::new(std::sync::Arc::new(
+        |_repo: &std::path::Path, task: &str| Ok(task.to_string()),
+    ))
+    .with_review_again(std::sync::Arc::new(
+        move |_repo: &std::path::Path, task: &str| {
+            seen.lock().expect("lock").push(task.to_string());
+            Ok("started a review".to_string())
+        },
+    ));
+    fixture.app = fixture.app.with_engine(engine);
+    let reply = fixture
+        .send(
+            Call::post(
+                "/api/asks/answer",
+                json!({"task": "T1", "ask": ask, "answer": "review again"}),
+            )
+            .with_token(&fixture.token)
+            .with_write_header(),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+    assert_eq!(*reviewed.lock().expect("lock"), vec!["T1".to_string()]);
+}
+
 /// Runs `git` in `dir`, panicking on failure (tests only).
 fn git_in(dir: &std::path::Path, args: &[&str]) -> String {
     let out = std::process::Command::new("git")

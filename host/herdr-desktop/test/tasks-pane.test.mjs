@@ -9,7 +9,11 @@ import test, { afterEach } from "node:test";
 import assert from "node:assert/strict";
 
 import * as herdr from "herdr";
+import { record, walk } from "gpui-kit";
+import { click, inputState } from "./stub-gpui.js";
 import Tasks from "../mods/shprd-tasks/main.js";
+import Chat from "../mods/shprd-chat/main.js";
+import { cards as cardsOf } from "../mods/lib/asks.js";
 import { RepoCache } from "../mods/lib/client.js";
 import { paneState } from "../mods/lib/board.js";
 
@@ -124,5 +128,78 @@ test("a refused verb rolls the row back and says why in one line", async () => {
   assert.equal(view.state.tasks[0].derived.status, "working", "back to the true state");
   assert.equal(view.state.tasks[0].pending, undefined);
   assert.match(view.actionError, /Stop T1: nope/);
+  herdr.SHARED.clear();
+});
+
+test("the Tasks pane draws an old review-out task and its Needs you badge counts the open ask", () => {
+  herdr.SHARED.clear();
+  herdr.setSpaces([{ folder: "/work/shop", active: true }]);
+  const view = pane();
+  Object.assign(view, {
+    shut: new Set(),
+    filter: "all",
+    doneOpen: false,
+    olderOpen: false,
+    allDone: false,
+    groupBy: "you",
+    chips: { primary: [], more: [] },
+    view: "tasks",
+    clearing: null,
+    adding: false,
+    searching: false,
+    query: inputState({ placeholder: "Filter tasks" }),
+    handle: {},
+  });
+  const old = Date.now() - 20 * 60 * 60 * 1000;
+  const mk = (id, word) => ({
+    id,
+    title: `task ${id}`,
+    status: "queued",
+    derived: { status: word },
+    added_at_ms: old,
+    touched_at_ms: old,
+  });
+  view.cache.set("/work/shop", {
+    seq: 1,
+    tasks: [mk("OUT", "needs_you"), mk("OLD", "queued")],
+    asks: [{ id: "review-out-2", task: "OUT", kind: "question", text: "OUT: review failed", options: ["retry with another round", "take it as it is", "drop it"] }],
+    needs: [{ seq: 1, task: "OUT", body: "OUT: review failed", default_action: "x", kind: "decision", actions: ["review", "drop"] }],
+  });
+  view.sync();
+  record(true);
+  let nodes;
+  let root;
+  try {
+    root = view.render();
+    nodes = walk(root);
+    // The row of a task with an open ask offers Answer (the card's choices) and Drop.
+    const opened = [];
+    view.open = (task) => opened.push(task.id);
+    assert.ok(nodes.some((n) => n.idv === "task-OUT-answer"), "the asking row draws its Answer pill");
+    assert.ok(nodes.some((n) => n.idv === "task-OUT-drop"), "the asking row draws its Drop pill");
+    click(root, "task-OUT-answer");
+    assert.deepEqual(opened, ["OUT"], "Answer opens the task's card, where its three choices are drawn");
+    // The card Answer opens: made from the board this pane holds and drawn by
+    // the chat pane's own card renderer, choices and all.
+    const board = view.cache.get("/work/shop");
+    const [made] = cardsOf(board, { asks: board.asks }).filter((card) => card.task === "OUT");
+    assert.ok(made, "the pane's open ask makes a card");
+    const chat = new Chat();
+    chat.cx = { notify() {}, timer: { after() {} } };
+    chat.answering = null;
+    chat.answerRefusal = null;
+    const drawnCard = walk(chat.card(herdr.theme(), { red: "#f00", amber: "#fa0", green: "#0f0" }, made));
+    const cardWords = drawnCard.flatMap((n) => n.kids.filter((kid) => typeof kid === "string")).join("\n");
+    for (const choice of ["retry with another round", "take it as it is", "drop it"]) {
+      assert.ok(cardWords.includes(choice), `the opened card offers "${choice}"`);
+    }
+  } finally {
+    record(false);
+  }
+  const words = nodes.flatMap((node) => node.kids.filter((kid) => typeof kid === "string"));
+  assert.ok(words.includes("Answer"), "the pill is labelled Answer");
+  assert.ok(words.includes("1"), "the Needs you badge counts the asking task");
+  assert.ok(words.some((w) => w.includes("task OUT")), "the asking task's row is drawn");
+  assert.ok(!words.some((w) => w.includes("task OLD")), "the unasked old task stays folded away");
   herdr.SHARED.clear();
 });

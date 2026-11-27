@@ -114,6 +114,7 @@ import {
 } from "../mods/lib/accept.js";
 import { PR_WORDS, branchLine, openUrl, prSize, taskPr } from "../mods/lib/taskpr.js";
 import { openAccept } from "../mods/lib/panel.js";
+import { cards as cardsOf } from "../mods/lib/asks.js";
 import * as herdr from "herdr";
 
 /** One fixture, parsed. */
@@ -1417,6 +1418,34 @@ test("an open task untouched for hours is old; a fresh one, a working one and a 
   // A needs-you task is never old, however long it has waited (UXC-7).
   assert.deepEqual([...staleIds(board, NOW)].sort(), ["OLD1", "OLD2"]);
   assert.equal(STALE_MS, 3 * HOURS);
+});
+
+test("a task with an open review-out ask is never old: it badges, stays on top, and draws its three answers", () => {
+  const ask = {
+    id: "review-out-2",
+    task: "OUT",
+    kind: "question",
+    text: "OUT: its review failed; answer the card `review-out-2`",
+    options: ["retry with another round", "take it as it is", "drop it"],
+  };
+  const board = {
+    tasks: [aged("OUT", "needs_you", 20), aged("OLD", "queued", 20)],
+    asks: [ask],
+    needs: [
+      { seq: 1, task: "OUT", body: ask.text, default_action: "x", kind: "decision", actions: ["review", "drop"] },
+    ],
+  };
+  assert.deepEqual([...staleIds(board, NOW)], ["OLD"], "only the task nobody asks about is old");
+  assert.equal(counts(board, NOW).needs, 1, "the badge counts the asking task");
+  const view = listView(board, { now: NOW });
+  assert.notEqual(view.groups[0].key, "older", "the asking task is not folded away");
+  assert.ok(view.groups[0].tasks.some((t) => t.id === "OUT"));
+  const drawn = cardsOf(board, { asks: [ask] }).filter((card) => card.task === "OUT");
+  assert.equal(drawn.length, 1);
+  assert.deepEqual(
+    drawn[0].options.map((option) => option.answer),
+    ["retry with another round", "take it as it is", "drop it"],
+  );
 });
 
 test("a queued task waiting on an old task is old with it, however new", () => {
