@@ -605,42 +605,43 @@ impl Worker {
         // The idle sweep has just let go of the worktree, so the branch is
         // free to move unless the person has it checked out.
         let repo = self.repo.clone();
-        match integrate::realign_outcome(&repo, &run.base_branch, |host| {
+        let outcome = integrate::realign_outcome(&repo, &run.base_branch, |host| {
             shprd_git::land::gh_authed(&repo, host)
-        }) {
-            integrate::Realign::Moved => {
-                tracing::warn!(branch = %run.base_branch, "moved the local branch back to the remote's copy");
+        });
+        if outcome == integrate::Realign::Moved {
+            tracing::warn!(branch = %run.base_branch, "moved the local branch back to the remote's copy");
+        }
+        for kind in diverged_events(&run.base_branch, &outcome, state) {
+            let told = match &kind {
+                EventKind::Escalated {
+                    body,
+                    default_action,
+                    ..
+                } => Some(shprd_views::news::run_wide_line(body, default_action)),
+                _ => None,
+            };
+            if let Ok(seq) = self.commit(kind) {
+                if let Some(line) = told {
+                    self.notify(Some(seq));
+                    self.tell_coordinator(state, &line);
+                }
             }
-            integrate::Realign::Kept(commits) => {
-                self.raise_diverged_card(&run.base_branch, &commits, state)
-            }
-            integrate::Realign::Unchanged => {}
         }
     }
 
-    /// Raises one card naming the local-only commits a local integration branch
-    /// holds that its remote copy does not, told once per distinct set.
-    fn raise_diverged_card(&self, branch: &str, commits: &[String], state: &RunState) {
-        let marker = format!("The local `{branch}` has commits the remote lacks");
-        let body = format!("{marker}: {}", commits.join("; "));
-        if state
-            .escalations
-            .iter()
-            .any(|escalation| escalation.body == body)
-        {
+    /// Tells the coordinator one line of news about the run itself, when a news
+    /// desk is wired and a coordinator is reachable. A host that refuses the
+    /// write is logged; the card stays on the board for the coordinator's next
+    /// look.
+    fn tell_coordinator(&self, state: &RunState, line: &str) {
+        let Some(desk) = &self.news else {
             return;
-        }
-        let default_action = format!(
-            "push `{branch}` to the remote if those commits should land, or move it back \
-             with `git branch -f {branch} origin/{branch}` if they should not; shprd leaves \
-             the local branch as it is"
-        );
-        if let Ok(seq) = self.commit(EventKind::Escalated {
-            task: None,
-            body,
-            default_action,
-        }) {
-            self.notify(Some(seq));
+        };
+        let Some(pane) = desk.coordinator.pane(state) else {
+            return;
+        };
+        if let Err(reason) = desk.coordinator.tell(&pane, line) {
+            tracing::warn!(%reason, "a run-wide card could not be told to the coordinator");
         }
     }
 
@@ -2535,6 +2536,57 @@ fn ladder_state(state: &RunState) -> LadderState {
     ladder
 }
 
+/// What a realign outcome writes about the run's diverged-branch card.
+///
+/// - `Kept`: one run-wide card naming the local-only commits, per distinct set.
+///   An open card or a person's dismissal of the same words stands (a dismissal
+///   sticks); only a card the engine itself retired is raised again.
+/// - `Moved` or `Aligned`: the cause is gone, so every open card of the branch is
+///   retired by the engine on this first pass.
+/// - `Unchanged`: nothing was learned, so nothing is written.
+fn diverged_events(branch: &str, outcome: &integrate::Realign, state: &RunState) -> Vec<EventKind> {
+    let marker = diverged_marker(branch);
+    match outcome {
+        integrate::Realign::Kept(commits) => {
+            let body = format!("{marker}: {}", commits.join("; "));
+            if state.escalations.iter().any(|escalation| {
+                escalation.body == body && !state.retired_needs.contains(&escalation.seq)
+            }) {
+                return Vec::new();
+            }
+            let default_action = format!(
+                "push `{branch}` to the remote if those commits should land, or move it back \
+                 with `git branch -f {branch} origin/{branch}` if they should not; shprd leaves \
+                 the local branch as it is"
+            );
+            vec![EventKind::Escalated {
+                task: None,
+                body,
+                default_action,
+            }]
+        }
+        integrate::Realign::Moved | integrate::Realign::Aligned => state
+            .escalations
+            .iter()
+            .filter(|escalation| {
+                escalation.task.is_none()
+                    && !escalation.by_agent
+                    && escalation.body.starts_with(&marker)
+                    && !state.dismissed_needs.contains(&escalation.seq)
+            })
+            .map(|escalation| EventKind::NeedDismissed {
+                need: escalation.seq,
+            })
+            .collect(),
+        integrate::Realign::Unchanged => Vec::new(),
+    }
+}
+
+/// The words every "local branch has commits the remote lacks" card begins with.
+fn diverged_marker(branch: &str) -> String {
+    format!("The local `{branch}` has commits the remote lacks")
+}
+
 /// What every escalation body for a review the engine could not start begins
 /// with.
 ///
@@ -2957,5 +3009,77 @@ mod waiting_tests {
         assert!(line.contains("already checked out at '/repo'"), "{line}");
         assert!(!line.contains("in the shprd log"), "{line}");
         assert!(fail.cause.contains("opening the integration worktree"));
+    }
+}
+
+#[cfg(test)]
+mod diverged_tests {
+    use super::diverged_events;
+    use shprd_core::event::EventKind;
+    use shprd_core::state::{Escalation, RunState};
+    use shprd_git::integrate::Realign;
+
+    const BODY: &str = "The local `main` has commits the remote lacks: abc1234 fix";
+
+    fn card(seq: u64) -> Escalation {
+        Escalation {
+            task: None,
+            body: BODY.to_string(),
+            default_action: "push".to_string(),
+            seq,
+            by_agent: false,
+        }
+    }
+
+    fn kept() -> Realign {
+        Realign::Kept(vec!["abc1234 fix".to_string()])
+    }
+
+    #[test]
+    fn a_diverged_ref_raises_one_card_and_the_same_set_is_not_told_again() {
+        let mut state = RunState::default();
+        let first = diverged_events("main", &kept(), &state);
+        assert!(
+            matches!(&first[..], [EventKind::Escalated { task: None, body, .. }] if body == BODY)
+        );
+        state.escalations.push(card(5));
+        assert!(diverged_events("main", &kept(), &state).is_empty());
+    }
+
+    #[test]
+    fn a_dismissal_sticks_for_the_same_commits_and_a_new_set_is_a_new_card() {
+        let mut state = RunState::default();
+        state.escalations.push(card(5));
+        state.dismissed_needs.insert(5);
+        assert!(diverged_events("main", &kept(), &state).is_empty());
+        let other = Realign::Kept(vec!["def5678 other".to_string()]);
+        assert_eq!(diverged_events("main", &other, &state).len(), 1);
+    }
+
+    #[test]
+    fn the_engine_retires_the_card_once_the_cause_is_gone() {
+        let mut state = RunState::default();
+        state.escalations.push(card(5));
+        for gone in [Realign::Moved, Realign::Aligned] {
+            let events = diverged_events("main", &gone, &state);
+            assert!(matches!(
+                &events[..],
+                [EventKind::NeedDismissed { need: 5 }]
+            ));
+        }
+        // Not learned anything: nothing is written.
+        assert!(diverged_events("main", &Realign::Unchanged, &state).is_empty());
+        // Already dismissed: not dismissed twice.
+        state.dismissed_needs.insert(5);
+        assert!(diverged_events("main", &Realign::Aligned, &state).is_empty());
+    }
+
+    #[test]
+    fn a_card_the_engine_retired_is_raised_again_when_the_cause_returns() {
+        let mut state = RunState::default();
+        state.escalations.push(card(5));
+        state.dismissed_needs.insert(5);
+        state.retired_needs.insert(5);
+        assert_eq!(diverged_events("main", &kept(), &state).len(), 1);
     }
 }

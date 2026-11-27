@@ -28,6 +28,12 @@ pub struct RunState {
     pub escalations: Vec<Escalation>,
     /// Sequence numbers of escalations a person dismissed.
     pub dismissed_needs: std::collections::BTreeSet<u64>,
+    /// The subset of [`Self::dismissed_needs`] the engine retired itself because
+    /// the cause it checks was gone, as against a person's dismissal.
+    ///
+    /// A person's dismissal sticks for the same words; an engine's retirement
+    /// does not, so the same cause arising again is raised again.
+    pub retired_needs: std::collections::BTreeSet<u64>,
     /// Asks raised during the run, keyed by task and ask id.
     ///
     /// The queue's files hold the same asks; the fold is what the board and
@@ -1023,6 +1029,9 @@ impl RunState {
             }
             EventKind::NeedDismissed { need } => {
                 self.dismissed_needs.insert(*need);
+                if matches!(event.actor, Actor::Engine) {
+                    self.retired_needs.insert(*need);
+                }
             }
             EventKind::Override { task, rule, reason } => {
                 // An override with an empty task is run-wide: it belongs to the

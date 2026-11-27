@@ -424,6 +424,9 @@ pub enum Realign {
     Unchanged,
     /// The local ref moved to the remote's copy.
     Moved,
+    /// The local ref holds nothing the remote lacks (equal to it, or only
+    /// commits it has by content), so no diverged-ref condition holds.
+    Aligned,
     /// The local ref holds commits the remote does not have, even by content.
     /// It is left as it is; these are the local-only commits (`sha subject`).
     Kept(Vec<String>),
@@ -455,7 +458,7 @@ pub fn realign_outcome(repo: &Path, branch: &str, authed: impl Fn(&str) -> bool)
         return Realign::Unchanged;
     };
     if theirs == ours {
-        return Realign::Unchanged;
+        return Realign::Aligned;
     }
     // `git cherry <upstream> <head>`: `+` is a commit of head whose change the
     // upstream lacks, `-` one it already has by content.
@@ -480,7 +483,7 @@ pub fn realign_outcome(repo: &Path, branch: &str, authed: impl Fn(&str) -> bool)
         .run(&["worktree", "list", "--porcelain"])
         .is_ok_and(|list| list.lines().any(|line| line == format!("branch {local}")));
     if held {
-        return Realign::Unchanged;
+        return Realign::Aligned;
     }
     if git.run(&["branch", "-f", branch, &theirs]).is_ok() {
         Realign::Moved

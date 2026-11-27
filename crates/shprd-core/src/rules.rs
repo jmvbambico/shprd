@@ -460,7 +460,7 @@ pub enum RuleError {
         actor: Actor,
     },
     /// A dismissal came from something that is not a person.
-    #[error("{actor:?} cannot dismiss a card: only a person can")]
+    #[error("{actor:?} cannot dismiss a card: only a person or the engine can")]
     DismissNotHuman {
         /// Who tried.
         actor: Actor,
@@ -890,7 +890,7 @@ fn check_with(
             None => Ok(()),
         },
         EventKind::NeedDismissed { need } => {
-            if !matches!(actor, Actor::Human) {
+            if !matches!(actor, Actor::Human | Actor::Engine) {
                 return Err(RuleError::DismissNotHuman {
                     actor: actor.clone(),
                 });
@@ -3725,6 +3725,12 @@ mod tests {
             refused_append(&dismiss(3, agent)),
             RuleError::DismissNotHuman { .. }
         ));
+        // The engine may retire a card whose cause is gone; the fold marks it so a
+        // person's dismissal can be told from it.
+        let retired = folded(&dismiss(3, Actor::Engine));
+        assert!(retired.dismissed_needs.contains(&3));
+        assert!(retired.retired_needs.contains(&3));
+        assert!(!state.retired_needs.contains(&3));
         assert!(matches!(
             refused_append(&dismiss(99, Actor::Human)),
             RuleError::UnknownNeed { seq: 99 }

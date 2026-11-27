@@ -685,8 +685,8 @@ pub enum EventKind {
     /// A person dismissed a card: the escalation recorded at `seq` is no longer
     /// in front of them.
     ///
-    /// Only a human writes it, and only for the sequence number of an
-    /// `Escalated` event the run holds. The card reads as history from then on;
+    /// A human writes it, or the engine when the cause of a card it raised is
+    /// gone; only for the sequence number of an `Escalated` event the run holds. The card reads as history from then on;
     /// a log written before this event existed folds unchanged.
     NeedDismissed {
         /// Sequence number of the `Escalated` event whose card is dismissed

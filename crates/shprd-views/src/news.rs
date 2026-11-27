@@ -852,6 +852,26 @@ fn line(task: &str, reading: &Reading, event: NewsEvent, words: Option<&str>) ->
     )
 }
 
+/// The line the coordinator is told when the engine raises an operational card
+/// about the run itself (no task): the card's words and what the engine does if
+/// nobody acts, tagged so it reads as news and never as the person's words.
+///
+/// The person is not asked: the coordinator settles it and says in one line what
+/// it did.
+pub fn run_wide_line(body: &str, default_action: &str) -> String {
+    let text = format!(
+        "{} · yours to settle, then tell the person in one line what you chose. {}",
+        one_line(body),
+        one_line(default_action)
+    )
+    .replace('<', "\u{2039}")
+    .replace('>', "\u{203a}");
+    format!(
+        "<shprd-news task=\"\" event=\"{}\">{text}</shprd-news>",
+        NewsEvent::NeedsYou.name()
+    )
+}
+
 /// The choices a card offers the coordinator, when the line is an operational
 /// card it settles itself (a stuck review, a lost brief, a clash, a stopped
 /// agent): the person does not see it under "For you", so the line says what to
@@ -1689,5 +1709,17 @@ mod tests {
         asks.need = Some(Need::Asks);
         let told = line("T3", &asks, NewsEvent::NeedsYou, None);
         assert!(!told.contains("Choices"), "{told}");
+    }
+
+    #[test]
+    fn a_run_wide_card_is_told_as_news_the_coordinator_settles() {
+        let line = run_wide_line("The local `main` has commits <x>", "push it");
+        assert!(
+            line.starts_with("<shprd-news task=\"\" event=\"needs-you\">"),
+            "{line}"
+        );
+        assert!(line.contains("yours to settle"), "{line}");
+        assert!(line.ends_with("</shprd-news>"));
+        assert_eq!(line.matches('<').count(), 2, "{line}");
     }
 }
