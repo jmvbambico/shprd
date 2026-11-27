@@ -38,7 +38,11 @@ ident = uuid.uuid4().hex
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        body = json.dumps({"ok": True, "id": ident, "version": version}).encode()
+        if self.path == "/api/health/repos":
+            bad = version == "unfoldable"
+            body = json.dumps({"ok": not bad, "checked": 1, "failed": [{"id": "r", "error": "answer is not one of the choices"}] if bad else []}).encode()
+        else:
+            body = json.dumps({"ok": True, "id": ident, "version": version}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -77,6 +81,13 @@ for a in "$@"; do
 done
 [ "$1" = serve ] || exit 0
 [ "$VERSION" = bad ] && exit 1
+# The unfoldable build comes up once (the check catches it), and a supervisor
+# that restarts it before the rollback's file swap finds it gone, as it would a
+# service that cannot start.
+if [ "$VERSION" = unfoldable ]; then
+  [ -f "$FAKE_STATE/unfoldable-served" ] && exit 1
+  touch "$FAKE_STATE/unfoldable-served"
+fi
 exec python3 "$FAKE_PY" "$FAKE_STATE" "$VERSION"
 "#
     )
@@ -608,6 +619,28 @@ fn a_new_binary_that_fails_its_health_check_is_rolled_back() {
         world.log_lines("install v1").len() == 1,
         "the old desktop is put back too"
     );
+}
+
+#[test]
+fn a_new_binary_that_cannot_fold_a_repository_log_is_rolled_back() {
+    if !have_python() {
+        return;
+    }
+    // The fake "unfoldable" build answers /api/health but fails the fold check.
+    let world = World::new("crates/x.rs", "unfoldable");
+    let out = world.helper("ok", "unfoldable");
+    assert!(out.status.success(), "a rollback is reported: {out:?}");
+    assert!(
+        world.binary_text().contains("VERSION=v1"),
+        "the previous binary is back: {}",
+        world.binary_text()
+    );
+    world.wait_for_version("v1", Duration::from_secs(15));
+    let status = world.status().unwrap();
+    assert_eq!(status["ok"], false);
+    let line = status["line"].as_str().unwrap();
+    assert!(line.contains("went back to the version it had"), "{line}");
+    assert!(line.contains("cannot read a repository's log"), "{line}");
 }
 
 /// The cards a repository's own log draws, as the chat and board show them.
