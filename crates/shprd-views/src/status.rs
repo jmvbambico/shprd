@@ -242,10 +242,7 @@ mod tests {
     fn each_status_gets_its_own_symbol() {
         let text = status(&fixture::state(), fixture::NOW);
         assert_eq!(line_of(&text, "M1.1"), "✔ M1.1 Done (landed) · event log");
-        assert_eq!(
-            line_of(&text, "M1.2"),
-            "● M1.2 Needs you · unwrap used · views"
-        );
+        assert_eq!(line_of(&text, "M1.2"), "✓ M1.2 Ready · views");
         assert_eq!(line_of(&text, "M1.3"), "○ M1.3 To do · roster");
     }
 
@@ -421,7 +418,7 @@ mod tests {
             None => panic!("the fixture has {id}"),
         };
         assert_eq!(read("M1.1").status, DerivedStatus::Done);
-        assert_eq!(read("M1.2").status, DerivedStatus::NeedsYou);
+        assert_eq!(read("M1.2").status, DerivedStatus::Ready);
         assert_eq!(read("M1.3"), Derived::default());
         assert_eq!(reading(&state, "M9.9", fixture::NOW), None);
     }

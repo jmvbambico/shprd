@@ -66,6 +66,11 @@ pub struct RunState {
     /// whether the run was ever brought up to date, which a later reader of a
     /// merged pull request wants to know.
     pub last_sync: Option<(String, String, u64)>,
+    /// How each worker gate fared on the base, the newest run per command.
+    ///
+    /// A hand-in's failing gate is judged against it: no worse is
+    /// pre-existing, anything else is a regression.
+    pub gate_baselines: crate::baseline::Baselines,
     /// The run's pull request, once `shprd land` opened one.
     ///
     /// One run proposes one pull request, so the newest `PrOpened` wins and a
@@ -1182,6 +1187,11 @@ impl RunState {
                     pane: pane.clone(),
                     process_group: *process_group,
                 });
+            }
+            EventKind::GateBaselined { entries, .. } => {
+                for entry in entries {
+                    self.gate_baselines.upsert(entry.clone());
+                }
             }
             EventKind::OrchestratorNotified { up_to_seq } => {
                 self.notified_up_to_seq = Some(*up_to_seq);

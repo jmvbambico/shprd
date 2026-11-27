@@ -142,36 +142,18 @@ export const ACTION_BUSY = {
 /** The busy word of a button that answers an ask. */
 export const ANSWER_BUSY = "Sending\u2026";
 
-/** The words a choice of a scope card begins with (`shprd_core::gate::WIDEN_CHOICE`). */
-const WIDEN_CHOICE = "widen the scope to ";
-/** The choice that stops the attempt and starts another (`SEND_BACK_CHOICE`). */
-const SEND_BACK_CHOICE = "send it back to a new attempt";
-/** The choice that leaves a scope as it is (`KEEP_SCOPE_CHOICE`). */
-const KEEP_SCOPE_CHOICE = "keep the scope";
-/** The ids of the two asks that are one scope question. */
-const SCOPE_ASK_PREFIXES = ["scope-widen-", "hand-in-refused-"];
-
-/** The button word of a choice an ask offers: the scope choices read as short verbs, the rest as written. */
+/** The button word of a choice an ask offers: the choice as written. */
 export function choiceLabel(option) {
-  const text = String(option ?? "").trim();
-  if (text.startsWith(WIDEN_CHOICE)) return "Allow these files";
-  if (text === SEND_BACK_CHOICE) return "Send back";
-  if (text === KEEP_SCOPE_CHOICE) return "Keep the scope";
-  return text;
+  return String(option ?? "").trim();
 }
 
 /**
- * The key of an ask: cards with one key are one question.
- *
- * A service that sends one is believed; the two scope asks of a task (a refused
- * hand-in's and a widening verb's) share `scope:<task>`, the same key
- * `shprd_core::ask::scope_key` gives them.
+ * The key of an ask: cards with one key are one question. A service that sends
+ * one is believed; otherwise every ask is its own question.
  */
 export function askKey(ask) {
   if (typeof ask?.key === "string" && ask.key !== "") return ask.key;
-  const id = String(ask?.id ?? "");
-  if (ask?.task && SCOPE_ASK_PREFIXES.some((prefix) => id.startsWith(prefix))) return `scope:${ask.task}`;
-  return `ask:${ask?.task ?? ""}:${id}`;
+  return `ask:${ask?.task ?? ""}:${String(ask?.id ?? "")}`;
 }
 
 /** One button that answers one ask with one of its choices. */
@@ -248,6 +230,69 @@ function fromAsk(ask) {
     ifNothing: "",
     at: Number.isFinite(ask.created_at_ms) ? ask.created_at_ms : null,
     expires: Number.isFinite(ask.expires_at_ms) ? ask.expires_at_ms : null,
+  };
+}
+
+/** The word a card's buttons are answered with when they press keys in a terminal. */
+export const TERMINAL_BUSY = "Answering\u2026";
+
+/**
+ * The card for the question an agent's terminal waits on (`GET /api/chat`'s
+ * `question`): its header, the question, and each option with what it means,
+ * one button each, and a free-text answer. It is answered through
+ * `POST /api/chat/answer`, which presses the dialog's own keys, so it is a
+ * card of the chat's own space and not an ask of the run.
+ *
+ * A dialog the chat cannot answer (several questions, several choices at once)
+ * is drawn with no buttons and says to answer it in the terminal.
+ */
+export function questionCard(question, space) {
+  if (!question) return null;
+  const task = space === "coordinator" ? null : space;
+  const options = (question.options ?? []).map((option, at) => ({
+    label: choiceLabel(option.label),
+    description: String(option.description ?? ""),
+    answer: at + 1,
+  }));
+  const answerable = question.answerable === true;
+  const more = Number(question.more ?? 0);
+  return {
+    id: `terminal:${question.id}`,
+    key: `terminal:${question.id}`,
+    from: "terminal",
+    task,
+    space,
+    ask: null,
+    asks: [],
+    question: question.id,
+    kind: "question",
+    notice: false,
+    title: String(question.header ?? "").trim() === "" ? "Question" : question.header,
+    text: question.question ?? "",
+    options,
+    buttons: answerable
+      ? options.map((option) => ({
+          id: `terminal:${question.id}:${option.answer}`,
+          label: option.label,
+          description: option.description,
+          busy: TERMINAL_BUSY,
+          chose: option.label,
+          kind: "terminal",
+          option: option.answer,
+        }))
+      : [],
+    freeText: answerable,
+    verb: null,
+    action: null,
+    actionLabel: "",
+    default_action: null,
+    ifNothing: answerable
+      ? ""
+      : more > 0
+        ? "This dialog has more questions: answer it in the terminal."
+        : "This dialog takes several choices: answer it in the terminal.",
+    at: null,
+    expires: null,
   };
 }
 

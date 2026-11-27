@@ -3,8 +3,9 @@
 | Term | Meaning |
 |---|---|
 | **run** | one shprd session on one repo, from `shprd up` to land; has an id like `7f3a` |
-| **task** | one unit of work with a scope, acceptance criteria and tags; runs in its own worktree |
-| **scope** | the paths a task may change; overlapping scopes don't run in parallel |
+| **task** | one unit of work with declared paths, acceptance criteria and tags; runs in its own worktree |
+| **declared paths** | where a task expects to work: a hint for its worker, never a limit. A task may change what it needs |
+| **protected path** | a path on AGENTS.md's "Don't touch" list (kept in `.agents/orchestration.yaml` `high_risk_paths`, plus built-ins). A task touching one it did not declare waits for your Accept, even under auto-merge |
 | **orchestrator** (★) | the one CLI that talks to you and plans |
 | **worker** (●) | a CLI implementing one task |
 | **reviewer** (◇) | a CLI reviewing a diff; always a different vendor than the implementer |

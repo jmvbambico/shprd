@@ -92,6 +92,8 @@ export function empty(space = COORDINATOR) {
     older: null,
     expanded: false,
     note: null,
+    /** The question the agent's terminal waits on, as the service reads it from the record. */
+    question: null,
   };
 }
 
@@ -140,6 +142,8 @@ export function fold(chat, answer, keep = null) {
     older: first ? (answer?.older ?? null) : (held.older ?? null),
     expanded,
     note: answer?.note ?? null,
+    // Every page says whether a question waits now: it is the record's end, not a message.
+    question: answer?.question ?? null,
   };
 }
 

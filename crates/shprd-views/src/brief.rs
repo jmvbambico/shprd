@@ -504,12 +504,7 @@ fn earlier_asks(input: &BriefInput<'_>, asks: &[AskRecord]) -> String {
     let mut found: Vec<&AskRecord> = asks
         .iter()
         .filter(|ask| ask.task == input.task.id)
-        .filter(|ask| {
-            !ask.id.starts_with(shprd_core::ask::SCOPE_WIDEN_ASK_PREFIX)
-                && !ask
-                    .id
-                    .starts_with(shprd_core::gate::HAND_IN_REFUSED_ASK_PREFIX)
-        })
+        .filter(|ask| !shprd_core::ask::is_scope_card(&ask.id))
         .filter(|ask| ask.answer.is_some())
         .filter(|ask| spawn.is_none_or(|spawn| ask.raised_seq < spawn))
         .collect();
@@ -573,7 +568,7 @@ fn task_sections(input: &BriefInput<'_>, asks: &[AskRecord]) -> String {
     for item in &input.task.acceptance {
         out.push_str(&format!("- {item}\n"));
     }
-    out.push_str("\n## Scope — change only these paths\n\n");
+    out.push_str("\n## Where to start — a hint, not a limit\n\n");
     for path in &input.task.scope {
         out.push_str(&format!("- {path}\n"));
     }
@@ -586,7 +581,8 @@ fn task_sections(input: &BriefInput<'_>, asks: &[AskRecord]) -> String {
     }
     out.push_str("\n## Rules\n\n");
     out.push_str(&format!(
-        "- work only in `{}`; change nothing outside the scope above\n",
+        "- work only in `{}`; change what the task needs, wire it end to end, and leave protected \
+         paths alone unless the task names them\n",
         input.worktree
     ));
     out.push_str(&format!("- commit on your branch `{}`\n", input.branch));
@@ -1204,7 +1200,7 @@ branch `task/30-m9-4` in worktree `/home/me/.shprd/worktrees/shprd/m9/M9.4`
 
 - M9.4 does what it says
 
-## Scope — change only these paths
+## Where to start — a hint, not a limit
 
 - data/templates
 - crates/shprd-views
@@ -1215,7 +1211,7 @@ branch `task/30-m9-4` in worktree `/home/me/.shprd/worktrees/shprd/m9/M9.4`
 
 ## Rules
 
-- work only in `/home/me/.shprd/worktrees/shprd/m9/M9.4`; change nothing outside the scope above
+- work only in `/home/me/.shprd/worktrees/shprd/m9/M9.4`; change what the task needs, wire it end to end, and leave protected paths alone unless the task names them
 - commit on your branch `task/30-m9-4`
 - `.shprd/` and `.dagr/` are shprd's own and git ignores them: never commit them or add them to `.gitignore`
 - gates to run before you hand in, each passed with `--check`: `cargo fmt --all --check`, `cargo test --workspace`
@@ -1456,7 +1452,14 @@ Each line ends with the layer that set it: `this task`, `this repo`, `you`, `the
     fn the_rules_name_the_worktree_and_leave_the_proof_rule_to_the_prompt() {
         let text = plain_brief(AskRoute::Hook);
         assert!(
-            text.contains("- work only in `/wt/M9.4`; change nothing outside the scope above\n"),
+            text.contains(
+                "- work only in `/wt/M9.4`; change what the task needs, wire it end to end, and \
+                 leave protected paths alone unless the task names them\n"
+            ),
+            "{text}"
+        );
+        assert!(
+            !text.contains("change only") && !text.contains("change nothing outside"),
             "{text}"
         );
         assert!(!text.contains("leave one real proof"), "{text}");

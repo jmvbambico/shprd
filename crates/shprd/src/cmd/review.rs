@@ -234,12 +234,16 @@ pub struct ContractInput<'a> {
     /// path inside the packet)`. A proof the worker named that is not here
     /// could not be copied, and the contract says so.
     pub proof_copies: &'a [(String, Option<String>)],
+    /// The protected paths the attempt's real diff touches that the task did
+    /// not declare ([`shprd_git::changed::protected_touches`]). Flagged for the
+    /// reviewer, never refused.
+    pub protected: &'a [String],
 }
 
 /// Renders the contract a reviewer checks the diff against.
 ///
 /// It carries what the diff cannot say: what the task was for, what "done"
-/// meant, what the attempt was allowed to touch, what it asked the person and
+/// meant, where it was expected to work, what it asked the person and
 /// what they answered, and what the agent claimed — including where its
 /// proof is. An acceptance criterion that says "ask first, then use the answer"
 /// is unverifiable from a diff alone, so the asks belong in the packet rather
@@ -265,17 +269,19 @@ pub fn render_contract(input: &ContractInput<'_>) -> String {
     for item in &task.acceptance {
         out.push_str(&format!("- {item}\n"));
     }
-    out.push_str("\n## Scope — the only paths the attempt could change\n\n");
+    out.push_str("\n## Where the task was expected to work (a hint, not a limit)\n\n");
     for path in &task.scope {
         out.push_str(&format!("- {path}\n"));
     }
-    out.push_str(&implied_scope_section(
-        &task.scope,
-        attempt
-            .and_then(|attempt| attempt.report.as_ref())
-            .map(|report| report.changed_paths.as_slice())
-            .unwrap_or(&[]),
-    ));
+    out.push_str(
+        "\nA change elsewhere is fine when the task needs it: judge whether each change serves \
+         the task, and name one it did not need in a finding.\n",
+    );
+    if let Some(line) = shprd_core::gate::protected_line(input.protected) {
+        out.push_str(&format!(
+            "\n{line}. The task did not name them: say in a finding whether it needed them.\n"
+        ));
+    }
     out.push_str(&asks_section(&task.id, attempt, input.asks));
     out.push_str("\n## What the agent reported\n\n");
     let report = attempt.and_then(|attempt| attempt.report.as_ref());
@@ -291,63 +297,6 @@ pub fn render_contract(input: &ContractInput<'_>) -> String {
     out.push_str(&proof_section(input.proof_copies));
     if let Some(commit) = &report.commit {
         out.push_str(&format!("- commit: {commit}\n"));
-    }
-    out
-}
-
-/// The paths the scope rules allow without declaring them: the patterns the
-/// declared entries imply, then the reported paths that only those rules allow.
-///
-/// The hand-in check and the diff check use [`shprd_core::scope::within`], so a
-/// reviewer must not call these paths outside the scope.
-fn implied_scope_section(scope: &[String], changed: &[String]) -> String {
-    use shprd_core::scope::{normalize, within};
-    const MODS: &str = "host/herdr-desktop/mods";
-    let mut patterns: Vec<String> = Vec::new();
-    for entry in scope {
-        if let Some(rest) = entry.strip_prefix("crates/")
-            && let Some((krate, below)) = rest.split_once('/')
-            && !krate.is_empty()
-            && !below.is_empty()
-        {
-            patterns.push(format!("crates/{krate}/tests (tests of the crate)"));
-        }
-        if entry == MODS || entry.starts_with(&format!("{MODS}/")) {
-            patterns.push("host/herdr-desktop/test (the desktop tests)".to_string());
-        }
-        if entry == &format!("{MODS}/lib") || entry.starts_with(&format!("{MODS}/lib/")) {
-            let tail = entry.strip_prefix(&format!("{MODS}/lib")).unwrap_or("");
-            patterns.push(format!(
-                "{MODS}/<mod>/lib{tail} (synced copies of a shared file)"
-            ));
-        }
-    }
-    patterns.sort();
-    patterns.dedup();
-    let declared = |path: &str| {
-        scope
-            .iter()
-            .any(|entry| path == entry || path.starts_with(&format!("{entry}/")))
-    };
-    let touched: Vec<&String> = changed
-        .iter()
-        .filter(|path| match normalize(path) {
-            Ok(path) => !declared(&path) && within(&path, scope),
-            Err(_) => false,
-        })
-        .collect();
-    if patterns.is_empty() && touched.is_empty() {
-        return String::new();
-    }
-    let mut out = String::from(
-        "\n## Also allowed by the scope rules\n\nThese paths are implied by the scope above, \
-         so a change to one is inside the scope, never outside it:\n\n",
-    );
-    for pattern in &patterns {
-        out.push_str(&format!("- {pattern}\n"));
-    }
-    for path in touched {
-        out.push_str(&format!("- {path} (changed by this attempt)\n"));
     }
     out
 }
@@ -450,15 +399,10 @@ fn copy_proofs(worktree: &Path, proofs: &[String], packet: &Path) -> Vec<(String
     out
 }
 
-/// Whether an ask is a card the engine raised (a refused hand-in or a scope
-/// widening) rather than one the worker raised itself.
+/// Whether an ask is a scope card an older build raised (a refused hand-in or a
+/// scope widening) rather than one the worker raised itself.
 fn engine_card(record: &AskRecord) -> bool {
-    record
-        .id
-        .starts_with(shprd_core::ask::SCOPE_WIDEN_ASK_PREFIX)
-        || record
-            .id
-            .starts_with(shprd_core::gate::HAND_IN_REFUSED_ASK_PREFIX)
+    shprd_core::ask::is_scope_card(&record.id)
 }
 
 /// One ask as the contract lists it: text, options and the answer.
@@ -584,88 +528,19 @@ pub fn findings_schema() -> Value {
 /// since this one forked. It is taken against the freshest of the local base
 /// and `origin/<base>` (fetched first), so a landing merged on the forge, which
 /// moves only the remote ref, is not read as the task's work.
-fn diff_against_merge_base(
-    repo: &Path,
-    base: &str,
-    branch: &str,
-    scope: &[String],
-) -> Result<Result<String, Vec<String>>, CliError> {
+///
+/// The task's declared scope is a hint, not a limit: a diff that leaves it is
+/// reviewed like any other, and the reviewer judges whether each change serves
+/// the task.
+fn diff_against_merge_base(repo: &Path, base: &str, branch: &str) -> Result<String, CliError> {
     let git = Git::new(repo);
     let merge_base = shprd_git::sync::attempt_base(&git, base, branch, true).map_err(|err| {
         CliError::other(anyhow!(err).context(format!("finding where {branch} forked from {base}")))
     })?;
-    // The scope is judged on this real diff, never on the worker's `--changed`
-    // list: a file it left off the list still stops the review here.
-    let changed = shprd_git::changed::task_changes(repo, base, branch).map_err(|err| {
-        CliError::other(anyhow!(err).context(format!("listing what {branch} changed")))
-    })?;
-    let outside = shprd_git::changed::outside_scope(&changed, scope);
-    if !outside.is_empty() {
-        return Ok(Err(outside));
-    }
     git.run(&["diff", &format!("{merge_base}..{branch}")])
-        .map(Ok)
         .map_err(|err| {
             CliError::other(anyhow!(err).context(format!("diffing {branch} against {base}")))
         })
-}
-
-/// Puts the refused-hand-in card in front of the person for a branch whose real
-/// diff leaves the task's scope, the same card a hand-in listing such a path
-/// raises (`shprd agent report`).
-///
-/// Best effort, and one open card per attempt: the tick tries the review again
-/// every pass, and a card that could not be written must not hide the refusal.
-fn raise_out_of_scope_card(ctx: &Ctx, task: &str, attempt: u32, outside: &[String]) {
-    use shprd_core::ask::{Ask, AskKind, AskQueue};
-    use shprd_core::gate;
-    let Ok(state) = ctx.state() else { return };
-    let prefix = format!("{}{attempt}-", gate::HAND_IN_REFUSED_ASK_PREFIX);
-    let mine = || {
-        state
-            .asks
-            .values()
-            .filter(|ask| ask.task == task && ask.id.starts_with(&prefix))
-    };
-    if mine().any(|ask| ask.answer.is_none()) {
-        return;
-    }
-    let id = gate::hand_in_refused_ask(attempt, mine().count() + 1);
-    let reason = format!(
-        "the branch changes paths outside the task's scope: {}",
-        outside.join(", ")
-    );
-    // The repo's own high-risk list is never one click: those paths need the
-    // typed confirmation, and the card says so.
-    let globs = shprd_core::ask::high_risk_globs_in(&ctx.root);
-    let note = gate::widen_note(&gate::widen_offer(outside, &globs));
-    let text = gate::hand_in_refused_body(task, attempt, &format!("{reason}.{note}"));
-    let options = gate::hand_in_refused_options_for(outside, &globs);
-    let now_ms = shprd_core::log::Clock::now_ms(&shprd_core::log::SystemClock);
-    let ask = Ask::new(
-        id.clone(),
-        task.to_string(),
-        AskKind::Question,
-        text.clone(),
-        now_ms,
-    )
-    .with_options(options.clone());
-    let queue = AskQueue::for_repo(&ctx.root);
-    if queue.raise(&ask).is_err() {
-        return;
-    }
-    let raised = ctx.commit(EventKind::AskRaised {
-        task: task.to_string(),
-        ask: id.clone(),
-        ask_kind: AskKind::Question,
-        text,
-        options,
-        created_at_ms: now_ms,
-        expires_at_ms: None,
-    });
-    if raised.is_err() {
-        let _ = queue.remove(task, &id);
-    }
 }
 
 /// Writes the packet a reviewer reads, and returns its folder.
@@ -676,29 +551,23 @@ fn raise_out_of_scope_card(ctx: &Ctx, task: &str, attempt: u32, outside: &[Strin
 /// attempt refreshes the packet instead of appending to it.
 fn write_packet(env: &ReviewEnv<'_>, task: &Task, attempt: &Attempt) -> Result<PathBuf, CliError> {
     let dir = packet_dir(&env.reviews_dir, &env.spawn.run, &task.id, attempt.n);
-    // The diff is read, and its scope judged, before the packet's folder exists:
-    // a refused review leaves nothing behind.
-    let diff = match diff_against_merge_base(
-        &env.spawn.ctx.root,
-        &env.spawn.base_branch,
-        &attempt.branch,
-        &task.scope,
-    )? {
-        Ok(diff) => diff,
-        Err(outside) => {
-            raise_out_of_scope_card(env.spawn.ctx, &task.id, attempt.n, &outside);
-            return Err(CliError::Refused(
-                shprd_core::rules::RuleError::PathOutOfScope {
-                    task: task.id.clone(),
-                    path: outside.join(", "),
-                },
-            ));
-        }
-    };
+    // The diff is read before the packet's folder exists: a review that cannot
+    // read it leaves nothing behind.
+    let diff =
+        diff_against_merge_base(&env.spawn.ctx.root, &env.spawn.base_branch, &attempt.branch)?;
     std::fs::create_dir_all(&dir).map_err(|err| {
         CliError::other(anyhow!(err).context(format!("creating {}", dir.display())))
     })?;
     write_file(&dir.join("diff.patch"), &diff)?;
+    // The protected flag reads the same real diff, against the current base. A
+    // flag git could not compute is left off: the person still sees the diff.
+    let protected = shprd_git::changed::protected_touches(
+        &env.spawn.ctx.root,
+        &env.spawn.base_branch,
+        &attempt.branch,
+        &task.scope,
+    )
+    .unwrap_or_default();
     // The attempt's own asks come from the fold, which is the only place an
     // answer is recorded: the reviewer reads the same answer the worker did.
     let state = env.spawn.ctx.state()?;
@@ -718,6 +587,7 @@ fn write_packet(env: &ReviewEnv<'_>, task: &Task, attempt: &Attempt) -> Result<P
             task,
             asks: &asks,
             proof_copies: &proof_copies,
+            protected: &protected,
         }),
     )?;
     write_file(&dir.join("findings.schema.json"), &schema_text()?)?;
@@ -2608,36 +2478,6 @@ project_dirs = []
         assert!(!brief.contains(DEGRADED_LABEL), "{brief}");
     }
 
-    /// `implied_scope_section` lists the synced copy of a shared lib file as allowed.
-    #[test]
-    fn contract_lists_implied_paths_as_allowed() {
-        let scope = vec![
-            "host/herdr-desktop/mods/lib/panel.js".to_string(),
-            "crates/shprd/src/cmd/review.rs".to_string(),
-        ];
-        let copy = "host/herdr-desktop/mods/chat/lib/panel.js".to_string();
-        let text = implied_scope_section(
-            &scope,
-            &[
-                copy.clone(),
-                "crates/shprd/tests/it.rs".to_string(),
-                "crates/shprd/src/cmd/review.rs".to_string(),
-            ],
-        );
-        assert!(
-            text.contains("## Also allowed by the scope rules"),
-            "{text}"
-        );
-        assert!(
-            text.contains(&format!("- {copy} (changed by this attempt)")),
-            "{text}"
-        );
-        assert!(text.contains("crates/shprd/tests/it.rs"), "{text}");
-        assert!(text.contains("crates/shprd/tests (tests"), "{text}");
-        assert!(!text.contains("review.rs (changed"), "{text}");
-        assert!(implied_scope_section(&["README.md".to_string()], &[]).is_empty());
-    }
-
     /// The contract for a task with one completed attempt, as text.
     ///
     /// It goes through the real log: the asks are folded events, so a test that
@@ -2701,7 +2541,49 @@ project_dirs = []
             task,
             asks: &asks,
             proof_copies: &[],
+            protected: &[],
         })
+    }
+
+    #[test]
+    fn a_contract_for_work_outside_the_declared_paths_calls_them_a_hint() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        scratch.reported(&ctx);
+        let state = ctx.state().unwrap_or_else(|err| panic!("{err}"));
+        let mut task = state.tasks["T1"].clone();
+        // The attempt changed README.md; the task declared only docs.
+        task.scope = vec!["docs".to_string()];
+        let contract = render_contract(&ContractInput {
+            task: &task,
+            asks: &[],
+            proof_copies: &[],
+            protected: &[],
+        });
+        assert!(
+            contract.contains("## Where the task was expected to work (a hint, not a limit)"),
+            "{contract}"
+        );
+        assert!(contract.contains("README.md"), "{contract}");
+        for word in [
+            "outside scope",
+            "outside the scope",
+            "only paths",
+            "Also allowed",
+        ] {
+            assert!(!contract.contains(word), "{word:?} in {contract}");
+        }
+        assert!(!contract.contains("Touches protected paths"), "{contract}");
+        let flagged = render_contract(&ContractInput {
+            task: &task,
+            asks: &[],
+            proof_copies: &[],
+            protected: &["AGENTS.md".to_string()],
+        });
+        assert!(
+            flagged.contains("Touches protected paths: AGENTS.md. The task did not name them"),
+            "{flagged}"
+        );
     }
 
     #[test]
@@ -3037,6 +2919,28 @@ project_dirs = []
         write("version = 1\n[review]\ncross_vendor = false\n");
         let off = ReviewEnv::build(&ctx, Some(home.path())).unwrap_or_else(|err| panic!("{err}"));
         assert!(off.reviewer.same_vendor_ok);
+    }
+
+    #[test]
+    fn a_review_the_service_starts_reuses_the_resolved_host() {
+        let home = tempfile::tempdir().unwrap_or_else(|err| panic!("{err}"));
+        let repo = tempfile::tempdir().unwrap_or_else(|err| panic!("{err}"));
+        let ctx = Ctx::new(repo.path().to_path_buf(), Actor::Human, false, true);
+        let probe = crate::host::Probe {
+            core: Some("0.1.22".to_string()),
+            window: true,
+            ..Default::default()
+        };
+        let counts = crate::host::test_select::install(probe);
+        // The service resolved at start.
+        let _ = crate::host::select();
+        // Starting a review (the task does not exist, so it fails after the host
+        // is picked) and starting one again must not probe the machine again.
+        let _ = start_review(&ctx, home.path(), "no-such-task", false);
+        let _ = start_review(&ctx, home.path(), "no-such-task", true);
+        crate::host::test_select::uninstall();
+        assert_eq!(counts.resolves.get(), 1, "one probe for the whole service");
+        assert_eq!(counts.opens.get(), 3, "each review still opens the host");
     }
 
     #[test]
@@ -4494,10 +4398,25 @@ project_dirs = []
         commit_file(&repo, "own.txt");
         git_ok(&repo, &["branch", "-f", "integration/m11", &seed]);
 
-        let diff = diff_against_merge_base(&repo, "integration/m11", "task", &["own.txt".into()])
-            .unwrap()
-            .unwrap();
+        let diff = diff_against_merge_base(&repo, "integration/m11", "task").unwrap();
         assert!(diff.contains("own.txt"), "{diff}");
         assert!(!diff.contains("landed.txt"), "{diff}");
+    }
+
+    #[test]
+    fn the_packet_is_written_for_a_diff_outside_the_declared_paths() {
+        let temp = TempDir::new().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        git_ok(&repo, &["init", "-b", "integration/m11"]);
+        git_ok(&repo, &["config", "user.name", "tests"]);
+        git_ok(&repo, &["config", "user.email", "tests@example.invalid"]);
+        git_ok(&repo, &["config", "commit.gpgsign", "false"]);
+        commit_file(&repo, "seed.txt");
+        git_ok(&repo, &["checkout", "-b", "task"]);
+        // A task that declared some other folder changes a file outside it.
+        commit_file(&repo, "elsewhere.txt");
+        let diff = diff_against_merge_base(&repo, "integration/m11", "task").unwrap();
+        assert!(diff.contains("elsewhere.txt"), "{diff}");
     }
 }

@@ -1,0 +1,11 @@
+# Paths a task should not change unless it says so. A diff touching one is
+# flagged "Touches protected paths" where the person decides.
+high_risk_paths:
+  - .github/
+  - docs/
+  - assets/
+  - LICENSE
+  - README.md
+  - AGENTS.md
+  - data/skills/compat.toml
+  - rust-toolchain.toml

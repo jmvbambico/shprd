@@ -118,7 +118,15 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
     match cli.command {
         None => view::status(&ctx, cli.global.home.as_deref()),
         Some(Command::Run { cmd }) => match cmd {
-            RunCommand::Start(args) => run::start(&ctx, &args),
+            RunCommand::Start(args) => {
+                run::start(&ctx, &args)?;
+                if !cli.global.json {
+                    for warning in doctor::start_warnings(cli.global.home.as_deref()) {
+                        eprintln!("warning: {warning}");
+                    }
+                }
+                Ok(())
+            }
             RunCommand::Finish(args) => run::finish_verb(&ctx, &args, cli.global.home.as_deref()),
         },
         Some(Command::Agent { cmd }) => agent::dispatch(&ctx, cmd, cli.global.home.as_deref()),
@@ -267,6 +275,7 @@ pub fn kind_name(kind: &EventKind) -> &'static str {
         EventKind::WatchLaunched { .. } => "watch_launched",
         EventKind::OrchestratorNotified { .. } => "orchestrator_notified",
         EventKind::BaseSynced { .. } => "base_synced",
+        EventKind::GateBaselined { .. } => "gate_baselined",
         EventKind::Nudged { .. } => "nudged",
         EventKind::Backup { .. } => "backup",
         EventKind::ProviderGaveUp { .. } => "provider_gave_up",

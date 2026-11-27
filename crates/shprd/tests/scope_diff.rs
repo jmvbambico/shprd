@@ -1,7 +1,6 @@
-//! A task's scope is judged on its real diff, not on the paths the worker
-//! listed in its hand-in: a hand-in whose `--changed` omits an out-of-scope file
-//! is stopped before a review starts and again at landing, and an in-scope
-//! hand-in still reviews and lands.
+//! A task's declared scope is a hint, not a limit: a hand-in whose real diff
+//! leaves it (even one whose `--changed` list omits the file) lands like any
+//! other once its review passes, and an in-scope hand-in still lands.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -312,48 +311,9 @@ impl Fixture {
 }
 
 #[test]
-fn a_stray_file_missing_from_the_hand_in_list_stops_the_review_and_the_landing() {
+fn a_file_outside_the_declared_scope_lands_once_reviewed() {
     let fixture = Fixture::new();
     fixture.start();
-    let before = fixture.integration_head();
-    fixture.hand_in_with(
-        "T1",
-        "integration/m9",
-        "a.txt",
-        "work\n",
-        Some("stray.txt"),
-        false,
-    );
-
-    // The review is refused before any packet is written.
-    let dir = fixture.home.join(".config").join("shprd");
-    std::fs::create_dir_all(&dir).expect("mkdir the settings dir");
-    std::fs::write(
-        dir.join("settings.toml"),
-        "version = 1\n\n[roles.reviewer]\nagent = \"codex\"\nmodel = \"gpt-5\"\n",
-    )
-    .expect("write the settings");
-    let output = fixture.run(&["agent", "review", "--task", "T1", "--degraded"]);
-    assert_eq!(output.status.code(), Some(2), "{output:?}");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("stray.txt"), "{stderr}");
-    let packet = fixture
-        .home
-        .join(".shprd")
-        .join("reviews")
-        .join("r1")
-        .join("T1-a1");
-    assert!(!packet.join("diff.patch").exists(), "no packet was written");
-    // The person gets the refused-hand-in card, offering to widen the scope.
-    let asks = std::fs::read_to_string(fixture.root.join(".shprd").join("events.jsonl"))
-        .expect("read the log");
-    assert!(
-        asks.contains("hand-in-refused-1-1") && asks.contains("widen the scope to stray.txt"),
-        "{asks}"
-    );
-
-    // Landing re-checks the real diff, so the stray file never reaches the base
-    // even when the review was passed.
     fixture.hand_in_with(
         "T2",
         "integration/m9",
@@ -363,10 +323,18 @@ fn a_stray_file_missing_from_the_hand_in_list_stops_the_review_and_the_landing()
         true,
     );
     let output = fixture.run(&["land", "T2"]);
-    assert_eq!(output.status.code(), Some(2), "{output:?}");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("stray2.txt"), "{stderr}");
-    assert_eq!(fixture.integration_head(), before, "nothing landed");
+    assert!(output.status.success(), "{output:?}");
+    let head = fixture.integration_head();
+    assert_eq!(fixture.git(&["show", &format!("{head}:b.txt")]), "work");
+    assert!(
+        !fixture
+            .git(&["show", &format!("{head}:stray2.txt")])
+            .is_empty(),
+        "the file outside the declared scope landed too"
+    );
+    let log = std::fs::read_to_string(fixture.root.join(".shprd").join("events.jsonl"))
+        .expect("read the log");
+    assert!(!log.contains("hand-in-refused"), "no scope card: {log}");
 }
 
 #[test]

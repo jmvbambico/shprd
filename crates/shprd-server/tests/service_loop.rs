@@ -188,6 +188,7 @@ impl Fixture {
                 command: String::from("cargo test"),
                 exit_code: Some(0),
                 output_tail: String::from("ok"),
+                pre_existing: None,
             }],
             changed_paths: vec![name],
             commit: Some(head),

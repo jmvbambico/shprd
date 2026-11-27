@@ -409,6 +409,9 @@ pub struct TaskSignal {
     /// Agent stopped*, not a failed attempt's own words (M7a §5, `agents.py:170`):
     /// nothing the attempt said is the reason, the person's own stop is.
     pub stopped: bool,
+    /// True when a person accepted the newest failure
+    /// (`shprd_core::rules::accepted_after_failure`): the task then reads Ready.
+    pub accepted_failure: bool,
     /// Why a person dropped it, when one did.
     pub dropped_reason: Option<String>,
     /// Asks still waiting for the person, oldest first.
@@ -454,6 +457,7 @@ impl Default for TaskSignal {
             merge: MergeFacts::default(),
             failure: None,
             stopped: false,
+            accepted_failure: false,
             dropped_reason: None,
             open_asks: Vec::new(),
             cards: Vec::new(),
@@ -483,15 +487,14 @@ impl TaskSignal {
             wait: reported_wait(task),
             failure: failure_reason(task),
             stopped: task.latest_attempt().is_some_and(|attempt| attempt.stopped),
+            accepted_failure: shprd_core::rules::accepted_after_failure(task),
             dropped_reason: task.dropped_reason.clone(),
             open_asks: state
                 .asks
                 .values()
                 .filter(|ask| ask.task == id && ask.answer.is_none())
                 .filter(|ask| !ask.is_retired_by_newer_attempt(task))
-                .filter(|ask| {
-                    !shprd_core::ask::is_moot_scope_card(id, &ask.id, &ask.options, &task.scope)
-                })
+                .filter(|ask| !shprd_core::ask::is_scope_card(&ask.id))
                 .map(|ask| AskFacts {
                     kind: ask.kind,
                     text: ask.text.clone(),
@@ -827,6 +830,11 @@ fn parked(signal: &TaskSignal) -> Derived {
             if signal.stopped {
                 return Derived::needs(Need::Stopped, STOPPED);
             }
+            // A person said "take it as it is": the failure is decided and what
+            // is left is their Accept, so it reads Ready like a passed task.
+            if signal.accepted_failure {
+                return Derived::new(DerivedStatus::Ready, None, None);
+            }
             Derived::needs(Need::Attention, signal.failure.as_deref().unwrap_or(FAILED))
         }
         TaskStatus::Dropped => {
@@ -1107,6 +1115,18 @@ mod tests {
         signal.stopped = true;
         signal.failure = Some("the agent said it gave up".to_string());
         signal
+    }
+
+    #[test]
+    fn a_failure_a_person_accepted_reads_ready() {
+        let mut signal = task(TaskStatus::Failed);
+        signal.failure = Some("a gate failed".to_string());
+        assert_eq!(
+            derive_from_fold(&signal, NOW).status,
+            DerivedStatus::NeedsYou
+        );
+        signal.accepted_failure = true;
+        assert_eq!(derive_from_fold(&signal, NOW).status, DerivedStatus::Ready);
     }
 
     /// A task in the given state with a worker that has been idle since well
@@ -1742,10 +1762,11 @@ mod tests {
             Some(signal) => derive_status(&signal, &LiveAgents::default(), fixture::NOW),
             None => panic!("the fixture has {id}"),
         };
-        // The folded fixture: landed, failed at a gate, and waiting its turn.
+        // The folded fixture: landed, failed at a gate but accepted by a person
+        // (its override), and waiting its turn.
         assert_eq!(read("M1.1").status, DerivedStatus::Done);
-        assert_eq!(read("M1.2").status, DerivedStatus::NeedsYou);
-        assert_eq!(read("M1.2").needs, Some(Need::Attention));
+        assert_eq!(read("M1.2").status, DerivedStatus::Ready);
+        assert_eq!(read("M1.2").needs, None);
         assert_eq!(read("M1.3"), Derived::new(DerivedStatus::ToDo, None, None));
         assert_eq!(TaskSignal::from_state(&state, "M9.9"), None);
     }
@@ -1959,8 +1980,8 @@ mod tests {
 
     #[test]
     #[allow(clippy::expect_used)]
-    fn a_widened_scope_leaves_no_open_scope_card_offering_only_scoped_paths() {
-        use shprd_core::ask::{AskKind, scope_widen_options};
+    fn an_open_scope_card_from_an_old_log_is_not_drawn() {
+        use shprd_core::ask::AskKind;
         let at = |seq: u64, kind: EventKind| Event {
             seq,
             at_ms: NOW + seq,
@@ -1981,14 +2002,13 @@ mod tests {
                 },
             )
         };
-        // The refused-hand-in card offers two widen choices; the person's
-        // question is not a scope card and stays whatever the scope.
-        let mut options = scope_widen_options(&[String::from("docs/a.md")]);
-        options.insert(
-            1,
-            scope_widen_options(&[String::from("docs/b.md")])[0].clone(),
-        );
-        let mut events = vec![
+        // The cards an older build raised, with its old choices.
+        let options = vec![
+            String::from("widen the scope to docs/a.md"),
+            String::from("widen the scope to docs/b.md"),
+            String::from("send it back to a new attempt"),
+        ];
+        let events = vec![
             at(
                 1,
                 EventKind::RunStarted {
@@ -2014,7 +2034,10 @@ mod tests {
             ask(
                 4,
                 "scope-widen-1",
-                scope_widen_options(&[String::from("docs/a.md")]),
+                vec![
+                    String::from("widen the scope to docs/a.md"),
+                    String::from("keep the scope"),
+                ],
             ),
             ask(5, "ask-1", vec![]),
         ];
@@ -2025,24 +2048,8 @@ mod tests {
                 .open_asks
                 .len()
         };
-        assert_eq!(open(&events), 3);
-        // docs/a.md is widened: the widen card is moot, but the refused card
-        // still offers docs/b.md.
-        events.push(at(
-            6,
-            EventKind::ScopeWidened {
-                task: String::from("T1"),
-                paths: vec![String::from("docs/a.md")],
-            },
-        ));
-        assert_eq!(open(&events), 2);
-        events.push(at(
-            7,
-            EventKind::ScopeWidened {
-                task: String::from("T1"),
-                paths: vec![String::from("docs/b.md")],
-            },
-        ));
+        // Declared paths are a hint now: every scope card a log still holds
+        // open is moot, and only the person's own question is left.
         assert_eq!(open(&events), 1, "only the person's own question is left");
     }
 

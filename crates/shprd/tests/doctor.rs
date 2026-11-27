@@ -522,8 +522,8 @@ fn names_the_host_a_run_would_drive_and_why() {
         "the chosen host is named: {line}"
     );
     assert!(
-        line.contains("auto picked herdr"),
-        "and that auto chose it: {line}"
+        line.contains("auto found no running host") && line.contains("no herdr server"),
+        "and that auto found nothing running rather than guessing: {line}"
     );
     assert!(
         line.contains("no Herdr window is attached"),

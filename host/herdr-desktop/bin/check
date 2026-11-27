@@ -115,7 +115,7 @@ if command -v bun >/dev/null 2>&1; then
   bun test --preload ./test/boot-bun.mjs test/
 elif command -v node >/dev/null 2>&1; then
   echo "   (node)"
-  node --import ./test/boot.mjs --test test/
+  node --import ./test/boot.mjs --test 'test/*.test.mjs'
 else
   echo "neither node nor bun is on PATH: the client's tests cannot run" >&2
   exit 1

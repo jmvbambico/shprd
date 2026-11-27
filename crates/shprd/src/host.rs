@@ -38,6 +38,7 @@
 
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use shprd_core::settings::{HostChoice, Loaded};
@@ -55,6 +56,13 @@ pub const HERDR_APP_ENV: &str = "SHPRD_HERDR_APP";
 /// A core answers `hello` in 15–25 ms once it is up (M7ef §2.3); the margin is
 /// for the first call of a session, which starts one.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long the one retry of a core probe may take.
+///
+/// A probe that fails while several builds are running is retried once with a
+/// longer wait before the machine is declared to have no desktop: a busy core
+/// answers late, and "late" must not read as "not there".
+const PROBE_RETRY_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// The hosts shprd has an adapter for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,6 +118,9 @@ pub struct Probe {
     pub herdr: bool,
     /// Whether the `tuios` binary is on `PATH`.
     pub tuios: bool,
+    /// Whether a herdr server is running: the herdr CLI got an answer from it. `auto` falls
+    /// back to the herdr TUI only when this is true.
+    pub herdr_running: bool,
 }
 
 impl Probe {
@@ -132,6 +143,10 @@ pub struct Resolution {
     /// True when the setting named a host the machine could not give, and the
     /// run fell back to another.
     pub fell_back: bool,
+    /// False when `auto` found no host that is running — no desktop and no herdr
+    /// server. The run is then not on a host at all: `kind` is the adapter whose
+    /// calls will report the error, and `why` says plainly that nothing runs.
+    pub running: bool,
     /// The facts the choice was made from.
     pub probe: Probe,
 }
@@ -156,6 +171,7 @@ pub fn choose(setting: HostChoice, probe: Probe) -> Resolution {
                     kind: HostKind::HerdrDesktop,
                     why: desktop_why(&probe),
                     fell_back: false,
+                    running: true,
                     probe,
                 }
             } else {
@@ -173,6 +189,7 @@ pub fn choose(setting: HostChoice, probe: Probe) -> Resolution {
                     kind,
                     why,
                     fell_back: true,
+                    running: true,
                     probe,
                 }
             }
@@ -188,6 +205,7 @@ pub fn choose(setting: HostChoice, probe: Probe) -> Resolution {
                 kind: HostKind::Herdr,
                 why,
                 fell_back: false,
+                running: true,
                 probe,
             }
         }
@@ -203,6 +221,7 @@ pub fn choose(setting: HostChoice, probe: Probe) -> Resolution {
                 kind: HostKind::Tuios,
                 why,
                 fell_back: false,
+                running: true,
                 probe,
             }
         }
@@ -213,9 +232,10 @@ pub fn choose(setting: HostChoice, probe: Probe) -> Resolution {
                     kind: HostKind::HerdrDesktop,
                     why: format!("auto picked Herdr desktop: {}", desktop_why(&probe)),
                     fell_back: false,
+                    running: true,
                     probe,
                 }
-            } else {
+            } else if probe.herdr_running {
                 // `auto` never falls back: it asked the machine and was told.
                 // Only a named host the machine could not give is a fallback a
                 // person should hear about.
@@ -225,6 +245,23 @@ pub fn choose(setting: HostChoice, probe: Probe) -> Resolution {
                     kind,
                     why: format!("auto picked {kind}: {}", desktop_problem(&probe)),
                     fell_back: false,
+                    running: true,
+                    probe,
+                }
+            } else {
+                // Neither host is running. Picking the herdr TUI would only
+                // postpone the failure to the first call that needs it (and
+                // look like a choice), so say it plainly instead.
+                let kind = HostKind::Herdr;
+                Resolution {
+                    setting,
+                    kind,
+                    why: format!(
+                        "auto found no running host: {}, and no herdr server is running",
+                        desktop_problem(&probe)
+                    ),
+                    fell_back: false,
+                    running: false,
                     probe,
                 }
             }
@@ -265,10 +302,13 @@ fn desktop_problem(probe: &Probe) -> String {
 
 /// Resolve the host for this machine, without opening it.
 ///
+/// Private on purpose: every production caller goes through [`select`], which
+/// keeps the choice sticky.
+///
 /// The settings are read for this home and repository — `host` is a machine
 /// setting, so the repository's committed file cannot set it — and the machine
 /// is asked only as much as the setting needs.
-pub fn resolve() -> Resolution {
+fn resolve() -> Resolution {
     let home = crate::ctx::resolve_home(None);
     let repo = crate::ctx::resolve_root(None).ok();
     let setting = home
@@ -283,10 +323,131 @@ pub fn resolve() -> Resolution {
 ///
 /// It answers the [`Resolution`] beside the host, so the service's banner and
 /// `shprd doctor` can say which host a run is on without probing a second time.
+///
+/// # The choice is sticky
+///
+/// The first healthy resolution of this process is kept, and every later call
+/// reuses it without probing: a probe that fails while the machine is busy must
+/// not turn a service that found the desktop into one that drives a herdr that
+/// is not running. It is dropped when the host it names stops opening, so the
+/// next call resolves afresh — that is the "connection lost, and comes back"
+/// case. A resolution that found no running host is never kept.
 pub fn select() -> (Resolution, Box<dyn Host>) {
-    let mut resolution = resolve();
+    #[cfg(test)]
+    if let Some(result) = test_select::run() {
+        return result;
+    }
+    select_in(&STICKY, resolve, open)
+}
+
+/// A test's own slot, resolver and opener in place of the machine's, so a test
+/// can drive a verb that calls [`select`] and count what it asked.
+#[cfg(test)]
+pub(crate) mod test_select {
+    use super::*;
+    use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
+
+    /// What the fake machine was asked.
+    #[derive(Default)]
+    pub(crate) struct Counts {
+        /// Times the machine was probed.
+        pub resolves: Cell<u32>,
+        /// Times a host was opened.
+        pub opens: Cell<u32>,
+    }
+
+    struct Installed {
+        slot: Mutex<Option<Resolution>>,
+        counts: Rc<Counts>,
+        probe: Probe,
+    }
+
+    thread_local! {
+        static INSTALLED: RefCell<Option<Installed>> = const { RefCell::new(None) };
+    }
+
+    /// Replace the machine, on this thread, with a desktop that answers; the
+    /// returned counts say how often it was probed and opened.
+    pub(crate) fn install(probe: Probe) -> Rc<Counts> {
+        let counts = Rc::new(Counts::default());
+        INSTALLED.with(|cell| {
+            *cell.borrow_mut() = Some(Installed {
+                slot: Mutex::new(None),
+                counts: counts.clone(),
+                probe,
+            });
+        });
+        counts
+    }
+
+    /// Put the real machine back.
+    pub(crate) fn uninstall() {
+        INSTALLED.with(|cell| *cell.borrow_mut() = None);
+    }
+
+    pub(super) fn run() -> Option<(Resolution, Box<dyn Host>)> {
+        INSTALLED.with(|cell| {
+            let cell = cell.borrow();
+            let installed = cell.as_ref()?;
+            Some(select_in(
+                &installed.slot,
+                || {
+                    installed
+                        .counts
+                        .resolves
+                        .set(installed.counts.resolves.get() + 1);
+                    choose(HostChoice::Auto, installed.probe.clone())
+                },
+                |_| {
+                    installed.counts.opens.set(installed.counts.opens.get() + 1);
+                    Box::new(shprd_mux_herdr::HerdrMux::with_bin("/usr/bin/true"))
+                },
+            ))
+        })
+    }
+}
+
+/// [`select`] over a slot, a resolver and an opener, so the keeping can be
+/// tested without a machine: `resolve` is called only when the slot is empty.
+fn select_in(
+    slot: &Mutex<Option<Resolution>>,
+    resolve: impl FnOnce() -> Resolution,
+    open: impl FnOnce(&mut Resolution) -> Box<dyn Host>,
+) -> (Resolution, Box<dyn Host>) {
+    // One select at a time: two callers in the same tick must not both probe.
+    let _one_at_a_time = SELECTING.lock().unwrap_or_else(|p| p.into_inner());
+    let kept = kept_slot(slot).clone();
+    let mut resolution = kept.clone().unwrap_or_else(resolve);
+    if kept.is_none()
+        && !resolution.running
+        && !NOTHING_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed)
+    {
+        eprintln!("warning: {}", resolution.why);
+    }
     let host = open(&mut resolution);
+    let mut held = kept_slot(slot);
+    if resolution.running && !resolution.fell_back {
+        *held = Some(resolution.clone());
+    } else if kept.is_some() {
+        *held = None;
+    }
     (resolution, host)
+}
+
+/// Serialises [`select_in`] so the read-resolve-write is one step.
+static SELECTING: Mutex<()> = Mutex::new(());
+
+/// Set once the "nothing is running" warning has been printed, so a hostless
+/// machine is told once, not on every spawn and review.
+static NOTHING_WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The resolution this process keeps; see [`select`].
+static STICKY: Mutex<Option<Resolution>> = Mutex::new(None);
+
+/// The kept resolution's slot, usable even if a holder panicked.
+fn kept_slot(slot: &Mutex<Option<Resolution>>) -> std::sync::MutexGuard<'_, Option<Resolution>> {
+    slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// Open the host `resolution` names.
@@ -353,12 +514,21 @@ fn probe(setting: HostChoice) -> Probe {
         core_problem: None,
         herdr: on_path("herdr"),
         tuios: on_path("tuios"),
+        herdr_running: on_path("herdr")
+            && herdr_server_answers(shprd_mux_herdr::HerdrMux::new(), HERDR_PROBE_TIMEOUT),
     };
     let ask_core = attached || setting == HostChoice::HerdrDesktop;
     if ask_core {
-        match HcHost::core_version(&endpoint(), PROBE_TIMEOUT) {
+        let endpoint = endpoint();
+        // A core that does not answer in time is asked once more with a longer
+        // wait: a busy machine answers late, and "late" must not read as "not
+        // there". This branch only runs when a window is attached or the desktop
+        // was named, so no ordinary resolve pays for the longer wait.
+        match ask_core_with_retry(|timeout| {
+            HcHost::core_version(&endpoint, timeout).map_err(probe_error)
+        }) {
             Ok(version) => probe.core = Some(version),
-            Err(error) => probe.core_problem = Some(error.to_string()),
+            Err(error) => probe.core_problem = Some(error.message),
         }
     } else {
         probe.core_problem =
@@ -366,6 +536,62 @@ fn probe(setting: HostChoice) -> Probe {
     }
     probe
 }
+
+/// Ask for the core's version, and once more with a longer wait when the first
+/// try fails. `ask` takes the timeout it may use; the retry is the whole reason
+/// this is a function: a probe that fails under load must not decide the host.
+///
+/// Only a timeout is retried: a core that refuses the connection outright is not
+/// there, and waiting longer for it would stall every resolve on a machine
+/// where the desktop is genuinely absent.
+fn ask_core_with_retry(
+    mut ask: impl FnMut(Duration) -> Result<String, ProbeError>,
+) -> Result<String, ProbeError> {
+    match ask(PROBE_TIMEOUT) {
+        Err(error) if error.timed_out => ask(PROBE_RETRY_TIMEOUT),
+        other => other,
+    }
+}
+
+/// Classify a client error: only [`shprd_mux_hc::Error::Timeout`] is "slow".
+fn probe_error(error: shprd_mux_hc::Error) -> ProbeError {
+    ProbeError {
+        timed_out: matches!(error, shprd_mux_hc::Error::Timeout { .. }),
+        message: error.to_string(),
+    }
+}
+
+/// Why a core probe failed, and whether it was only slow.
+#[derive(Debug, PartialEq, Eq)]
+struct ProbeError {
+    /// The core did not answer in time (as opposed to refusing or erroring).
+    timed_out: bool,
+    /// What to tell a person.
+    message: String,
+}
+
+/// Whether a herdr TUI server is running: the `herdr` adapter lists its
+/// workspaces, the very call a spawn or a review makes first.
+///
+/// A socket that merely accepts a connection is not proof: `HERDR_SOCKET_PATH`
+/// in an hc child names the Herdr desktop's own socket, which listens but is not
+/// a herdr server, and a leftover socket file from a herdr that exited is not one
+/// either. Only a server that answers the herdr CLI counts.
+///
+/// The herdr CLI is asked on its own thread and given `timeout`: a socket that
+/// accepts and never answers would otherwise hold the serialized [`select`], and
+/// with it every spawn and review. A call that does not answer in time counts as
+/// "not running".
+fn herdr_server_answers(mux: shprd_mux_herdr::HerdrMux, timeout: Duration) -> bool {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(mux.list_spaces().is_ok());
+    });
+    rx.recv_timeout(timeout).unwrap_or(false)
+}
+
+/// How long the herdr CLI may take to answer the "is a server running" probe.
+const HERDR_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Whether a program is on `PATH`.
 fn on_path(binary: &str) -> bool {
@@ -424,8 +650,10 @@ pub fn window() -> Window {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    use super::{HostKind, Probe, choose};
+    use super::{Host, HostKind, Probe, Resolution, choose};
     use shprd_core::settings::HostChoice;
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
 
     /// A machine with nothing on it.
     fn nothing() -> Probe {
@@ -436,6 +664,7 @@ mod tests {
             window_problem: Some("no Herdr window at /tmp/none: No such file or directory".into()),
             herdr: true,
             tuios: false,
+            herdr_running: true,
         }
     }
 
@@ -448,6 +677,7 @@ mod tests {
             window_problem: None,
             herdr: true,
             tuios: true,
+            herdr_running: true,
         }
     }
 
@@ -483,6 +713,250 @@ mod tests {
             chosen.why
         );
         assert!(chosen.why.contains("/tmp/none"), "{}", chosen.why);
+    }
+
+    #[test]
+    fn auto_never_picks_a_herdr_that_is_not_running() {
+        let mut probe = nothing();
+        probe.herdr_running = false;
+        let chosen = choose(HostChoice::Auto, probe);
+        assert!(!chosen.running, "nothing runs, and it says so");
+        assert!(
+            chosen.why.contains("no running host") && chosen.why.contains("no herdr server"),
+            "{}",
+            chosen.why
+        );
+        assert!(!chosen.why.starts_with("auto picked"), "{}", chosen.why);
+        let chosen = choose(HostChoice::Auto, nothing());
+        assert!(chosen.running, "a running herdr is still the answer");
+    }
+
+    #[test]
+    fn spawns_and_reviews_reuse_the_service_resolution() {
+        let counts = super::test_select::install(desktop());
+        // The service resolves at start; spawns start later through `spawn::real_mux`, and
+        // none probes again; the review path is tested in `cmd::review`.
+        let (first, _) = super::select();
+        assert_eq!(first.kind, HostKind::HerdrDesktop);
+        let _spawn = crate::cmd::spawn::real_mux();
+        let _spawn_again = crate::cmd::spawn::real_mux();
+        super::test_select::uninstall();
+        assert_eq!(counts.resolves.get(), 1, "the machine was probed once");
+        assert_eq!(counts.opens.get(), 3, "every caller still gets a host");
+    }
+
+    #[test]
+    fn a_herdr_that_never_answers_counts_as_not_running() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("shprd-fake-herdr-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("herdr");
+        std::fs::write(&bin, "#!/bin/sh\nexec sleep 3\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let started = std::time::Instant::now();
+        let answered = super::herdr_server_answers(
+            shprd_mux_herdr::HerdrMux::with_bin(&bin),
+            std::time::Duration::from_millis(300),
+        );
+        assert!(!answered, "a silent herdr is not a running one");
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_a_timeout_is_classified_as_slow() {
+        let slow = super::probe_error(shprd_mux_hc::Error::Timeout {
+            method: "core.version".into(),
+            after: std::time::Duration::from_secs(1),
+        });
+        assert!(slow.timed_out);
+        let refused = super::probe_error(shprd_mux_hc::Error::Unreachable("no core".into()));
+        assert!(!refused.timed_out);
+    }
+
+    #[test]
+    fn a_desktop_probe_that_times_out_once_still_uses_the_desktop() {
+        let mut asked = Vec::new();
+        let answer = super::ask_core_with_retry(|timeout| {
+            asked.push(timeout);
+            if asked.len() == 1 {
+                Err(super::ProbeError {
+                    timed_out: true,
+                    message: "timed out".to_string(),
+                })
+            } else {
+                Ok("0.1.22".to_string())
+            }
+        });
+        assert_eq!(answer.as_deref(), Ok("0.1.22"));
+        assert_eq!(asked.len(), 2);
+        assert!(asked[1] > asked[0], "the retry waits longer: {asked:?}");
+        let mut probe = desktop();
+        probe.core = answer.ok();
+        assert_eq!(choose(HostChoice::Auto, probe).kind, HostKind::HerdrDesktop);
+        // A core that keeps timing out is asked twice, then reported.
+        let mut calls = 0;
+        let failed = super::ask_core_with_retry(|_| {
+            calls += 1;
+            Err(super::ProbeError {
+                timed_out: true,
+                message: "no".to_string(),
+            })
+        });
+        assert!(failed.is_err());
+        assert_eq!(calls, 2);
+        // A core that refuses outright is not waited for.
+        let mut calls = 0;
+        let refused = super::ask_core_with_retry(|_| {
+            calls += 1;
+            Err(super::ProbeError {
+                timed_out: false,
+                message: "refused".to_string(),
+            })
+        });
+        assert!(refused.is_err());
+        assert_eq!(calls, 1);
+    }
+
+    /// A host that does nothing: the tests below care about the keeping.
+    fn inert(_: &mut Resolution) -> Box<dyn Host> {
+        Box::new(shprd_mux_herdr::HerdrMux::with_bin("/usr/bin/true"))
+    }
+
+    #[test]
+    fn a_service_that_found_the_desktop_resolves_once() {
+        let slot = Mutex::new(None);
+        let mut resolved = 0;
+        for _ in 0..3 {
+            let (resolution, _) = super::select_in(
+                &slot,
+                || {
+                    resolved += 1;
+                    choose(HostChoice::Auto, desktop())
+                },
+                inert,
+            );
+            assert_eq!(resolution.kind, HostKind::HerdrDesktop);
+        }
+        assert_eq!(
+            resolved, 1,
+            "later reviews and spawns reuse the first answer"
+        );
+    }
+
+    #[test]
+    fn a_host_that_stops_opening_is_resolved_afresh() {
+        let slot = Mutex::new(None);
+        let _ = super::select_in(&slot, || choose(HostChoice::Auto, desktop()), inert);
+        // The desktop is lost: opening falls back, so the kept answer is dropped.
+        let _ = super::select_in(
+            &slot,
+            || unreachable!("the kept answer is used first"),
+            |resolution| {
+                resolution.fell_back = true;
+                inert(resolution)
+            },
+        );
+        assert!(slot.lock().unwrap().is_none());
+        let mut resolved = 0;
+        let _ = super::select_in(
+            &slot,
+            || {
+                resolved += 1;
+                choose(HostChoice::Auto, desktop())
+            },
+            inert,
+        );
+        assert_eq!(resolved, 1, "it comes back and is kept again");
+        assert!(slot.lock().unwrap().is_some());
+    }
+
+    #[test]
+    fn a_resolution_with_no_running_host_is_never_kept() {
+        let slot = Mutex::new(None);
+        let mut probe = nothing();
+        probe.herdr_running = false;
+        let mut resolved = 0;
+        for _ in 0..2 {
+            let _ = super::select_in(
+                &slot,
+                || {
+                    resolved += 1;
+                    choose(HostChoice::Auto, probe.clone())
+                },
+                inert,
+            );
+        }
+        assert_eq!(
+            resolved, 2,
+            "nothing runs, so each call asks the machine again"
+        );
+        assert!(slot.lock().unwrap().is_none());
+    }
+
+    /// A `herdr` stand-in that answers `workspace list` as the real CLI does: a
+    /// result from a herdr server's socket (`herdr.sock`), `server_not_running`
+    /// from anything else, and from no listener at all.
+    fn fake_herdr(dir: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = dir.join("herdr");
+        std::fs::write(
+            &bin,
+            r#"#!/bin/sh
+case "$HERDR_SOCKET_PATH" in
+  */herdr.sock) [ -S "$HERDR_SOCKET_PATH" ] && python3 -c 'import socket,sys; socket.socket(socket.AF_UNIX).connect(sys.argv[1])' "$HERDR_SOCKET_PATH" 2>/dev/null && { echo '{"id":"cli:workspace:list","result":{"type":"workspace_list","workspaces":[]}}'; exit 0; } ;;
+esac
+echo '{"id":"cli:workspace:list","error":{"code":"server_not_running","message":"no herdr server is running"}}'
+exit 1
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        bin
+    }
+
+    #[test]
+    fn herdr_running_is_true_only_for_a_live_herdr_server_socket() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = fake_herdr(dir.path());
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let mux = |socket: &Path| {
+            shprd_mux_herdr::HerdrMux::with_bin(&bin).with_environment(socket, &home)
+        };
+
+        // The desktop's socket, as an hc child sees it in HERDR_SOCKET_PATH: it
+        // listens, so the old "does it accept a connection" check said running.
+        let desktop = dir.path().join("desktop-core.sock");
+        let _desktop = std::os::unix::net::UnixListener::bind(&desktop).unwrap();
+        assert!(
+            std::os::unix::net::UnixStream::connect(&desktop).is_ok(),
+            "the desktop socket accepts connections"
+        );
+        assert!(
+            !super::herdr_server_answers(mux(&desktop), std::time::Duration::from_secs(5)),
+            "a listening desktop socket is not a herdr server"
+        );
+
+        // A leftover herdr.sock whose server exited.
+        let tui = dir.path().join("herdr.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&tui).unwrap();
+        assert!(
+            super::herdr_server_answers(mux(&tui), std::time::Duration::from_secs(5)),
+            "a live herdr server"
+        );
+        drop(listener);
+        assert!(tui.exists());
+        assert!(
+            !super::herdr_server_answers(mux(&tui), std::time::Duration::from_secs(5)),
+            "a stale socket file is not a server"
+        );
+        // And no herdr binary at all.
+        let missing = shprd_mux_herdr::HerdrMux::with_bin(dir.path().join("none"));
+        assert!(!super::herdr_server_answers(
+            missing,
+            std::time::Duration::from_secs(5)
+        ));
     }
 
     #[test]

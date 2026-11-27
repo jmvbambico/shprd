@@ -319,6 +319,7 @@ fn ready_task(
                     command: String::from("cargo test"),
                     exit_code: Some(0),
                     output_tail: String::new(),
+                    pre_existing: None,
                 }],
                 changed_paths: Vec::new(),
                 commit: Some(commit.to_string()),
@@ -704,6 +705,7 @@ fn handed_in_attempt(seq: u64, attempt: u32) -> Vec<Event> {
                     command: String::from("cargo test"),
                     exit_code: Some(0),
                     output_tail: String::new(),
+                    pre_existing: None,
                 }],
                 changed_paths: Vec::new(),
                 commit: Some(String::from("abc123")),
@@ -1072,6 +1074,7 @@ fn a_failed_review_is_sent_back_and_the_second_round_lands() {
                 command: String::from("true"),
                 exit_code: Some(0),
                 output_tail: String::new(),
+                pre_existing: None,
             }],
             changed_paths: vec![String::from("task-A.txt")],
             commit: Some(head),
@@ -1178,6 +1181,7 @@ fn a_failed_review_is_sent_back_and_the_second_round_lands() {
                 command: String::from("true"),
                 exit_code: Some(0),
                 output_tail: String::new(),
+                pre_existing: None,
             }],
             changed_paths: vec![String::from("task-A.txt")],
             commit: Some(fixed),
@@ -2256,6 +2260,7 @@ fn a_review_verdict_that_spends_the_rounds_leaves_one_card() {
                 command: String::from("cargo test"),
                 exit_code: Some(0),
                 output_tail: String::new(),
+                pre_existing: None,
             }],
             changed_paths: Vec::new(),
             commit: Some(String::from("abc123")),
@@ -2852,54 +2857,50 @@ fn spawned_ev(seq: u64, id: &str) -> Event {
 }
 
 #[test]
-fn a_task_waiting_for_a_running_tasks_scope_is_queued_never_failing() {
-    // Bug 7 of SHPR-54's QA: T4 shares a path with the running T1. Its start was
-    // planned, refused by the spawn rule, and on the third pass became a card.
-    // It waits instead: no start is tried, no step fails, no card is written,
-    // and its status line says what it waits for.
+fn a_task_sharing_a_running_tasks_paths_starts_and_its_old_wait_line_clears() {
+    // Declared paths are a hint, not a lock: T4 names the file the running T1
+    // names, and starts. The "in use by" line an older build left on its card
+    // is cleared on the pass.
     let fixture = Fixture::new(vec![
         started(),
         added_scoped(2, "T1", "calc/ops.py"),
         spawned_ev(3, "T1"),
         added_scoped(4, "T4", "calc/ops.py"),
+        added_scoped(5, "T5", "calc"),
+        ev(
+            6,
+            EventKind::TaskStatus {
+                task: "T5".to_string(),
+                message: "Waiting: calc is in use by T1".to_string(),
+                progress: None,
+            },
+        ),
     ]);
     let calls = Arc::new(Mutex::new(Vec::new()));
+    let mut cfg = config(shprd_core::config::MergePolicy::Auto);
+    // One slot (T1 has no live agent here, so it holds none): T4 takes it, and
+    // T5 stays queued at the cap.
+    cfg.tick.max_running = 1;
     let worker = fixture.worker(
         Arc::new(Scripted::default()),
         Arc::new(NoForge),
-        config(shprd_core::config::MergePolicy::Auto),
+        cfg,
         recording_start(Arc::clone(&calls)),
     );
-    for pass in 1..=5 {
-        let report = worker.tick().expect("the pass ran");
-        assert!(
-            report.ok(),
-            "pass {pass} must not fail a step: {:?}",
-            report.steps
-        );
-    }
-    assert!(
-        calls.lock().expect("calls").is_empty(),
-        "T4 is never started"
-    );
+    let report = worker.tick().expect("the pass ran");
+    assert!(report.ok(), "{:?}", report.steps);
+    assert_eq!(*calls.lock().expect("calls"), vec![String::from("T4")]);
     let state = fixture.state();
     assert!(state.escalations.is_empty(), "{:?}", state.escalations);
-    let status = state.tasks["T4"]
+    let status = state.tasks["T5"]
         .last_status
         .as_ref()
         .expect("a status line");
-    assert_eq!(status.message, "Waiting: calc/ops.py is in use by T1");
-    assert_eq!(
-        state.tasks["T4"].status,
-        shprd_core::state::TaskStatus::Queued
-    );
+    assert_eq!(status.message, "No longer waiting");
 }
 
 #[test]
-fn an_overlapping_task_at_the_head_does_not_hold_back_disjoint_ones() {
-    // Bug 8: T4 waits on T1's scope; T5 and T6 are disjoint and start in the
-    // same pass, T4 first in the queue notwithstanding. T7 shares a path with
-    // T5, which this very pass starts, so it waits rather than failing.
+fn overlapping_tasks_all_start_in_one_pass() {
     let fixture = Fixture::new(vec![
         started(),
         added_scoped(2, "T1", "calc/ops.py"),
@@ -2911,7 +2912,7 @@ fn an_overlapping_task_at_the_head_does_not_hold_back_disjoint_ones() {
     ]);
     let calls = Arc::new(Mutex::new(Vec::new()));
     let mut cfg = config(shprd_core::config::MergePolicy::Auto);
-    cfg.tick.max_running = 4;
+    cfg.tick.max_running = 5;
     let worker = fixture.worker(
         Arc::new(Scripted::default()),
         Arc::new(NoForge),
@@ -2922,7 +2923,12 @@ fn an_overlapping_task_at_the_head_does_not_hold_back_disjoint_ones() {
     assert!(report.ok(), "{:?}", report.steps);
     assert_eq!(
         *calls.lock().expect("calls"),
-        vec![String::from("T5"), String::from("T6")]
+        vec![
+            String::from("T4"),
+            String::from("T5"),
+            String::from("T6"),
+            String::from("T7")
+        ]
     );
 }
 
@@ -2972,6 +2978,95 @@ fn clashing_and_clean(fixture: &Fixture) -> [(PathBuf, String); 2] {
     let b = out.pop().expect("b");
     let a = out.pop().expect("a");
     [a, b]
+}
+
+#[test]
+fn a_hand_in_that_clashes_goes_back_before_its_review_and_spends_no_round() {
+    // clash-early: A's branch edits proof.log, which the integration branch has
+    // since deleted. The pass finds that before it starts a reviewer: A gets
+    // the landing's failed integrate gate, no reviewer runs, and the next pass
+    // redoes it without counting a review round.
+    let fixture = Fixture::new(vec![started()]);
+    let [(tree_a, _), _] = clashing_and_clean(&fixture);
+    git_in(&fixture.repo, &["branch", "integration/m8", "main"]);
+    for event in [
+        added(2, "A"),
+        ev(
+            3,
+            EventKind::Spawned {
+                task: String::from("A"),
+                attempt: 1,
+                agent: String::from("claude"),
+                model: None,
+                worktree: tree_a.display().to_string(),
+                branch: String::from("shprd/r1/A"),
+            },
+        ),
+        ev(
+            4,
+            EventKind::Reported {
+                task: String::from("A"),
+                attempt: 1,
+                status: ReportStatus::Completed,
+                summary: String::from("done"),
+                tests: Vec::new(),
+                checks: vec![CheckReport {
+                    gate: String::from("tests"),
+                    command: String::from("cargo test"),
+                    exit_code: Some(0),
+                    output_tail: String::new(),
+                    pre_existing: None,
+                }],
+                changed_paths: Vec::new(),
+                commit: None,
+                skills_used: Vec::new(),
+                proofs: Vec::new(),
+            },
+        ),
+    ] {
+        append(&fixture, event.actor, event.kind);
+    }
+    fixture
+        .settings("version = 1\n\n[roles.reviewer]\nagent = \"codex\"\nmodel = \"gpt-5-codex\"\n");
+    let reviewed = Arc::new(Mutex::new(Vec::new()));
+    let recorded = Arc::clone(&reviewed);
+    let review: shprd_server::Reviewer = Arc::new(move |_repo: &Path, task: &str| {
+        recorded
+            .lock()
+            .map_err(|_| String::from("the call log is poisoned"))?
+            .push(task.to_string());
+        Ok(format!("started a reviewer on {task}"))
+    });
+    let mut worker = fixture.worker(
+        Arc::new(Scripted::default()),
+        Arc::new(NoForge),
+        config(shprd_core::config::MergePolicy::Ask),
+        recording_start(Arc::new(Mutex::new(Vec::new()))),
+    );
+    worker.review = Some(review);
+    let report = worker.tick().expect("the pass ran");
+    assert!(report.ok(), "{:?}", report.steps);
+    assert!(
+        reviewed.lock().expect("calls").is_empty(),
+        "no reviewer is started on work that cannot land"
+    );
+    let state = fixture.state();
+    let task = &state.tasks["A"];
+    assert!(
+        shprd_core::rules::landing_conflict(task),
+        "{:?}",
+        task.attempts
+    );
+    assert!(
+        task.attempts[0].reviews.is_empty(),
+        "no review round was requested"
+    );
+    let finding = &task.attempts[0].gates.last().expect("the gate").findings[0];
+    assert!(
+        finding.detail.contains("latest integration/m8"),
+        "the redo is told which tip to bring its work onto: {}",
+        finding.detail
+    );
 }
 
 /// A forge that holds one open pull request per task, each at its branch tip.
