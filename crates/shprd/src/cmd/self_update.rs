@@ -27,6 +27,20 @@ use shprd_server::self_update::{Dirs, Job, Outcome, Pipeline, Steps};
 use crate::cli::SelfUpdateArgs;
 use crate::ctx::{CliError, Ctx};
 
+/// The kept herdr-core terminal the service runs in; the window's footer uses
+/// the same name (`SERVICE_TERMINAL` in `host/herdr-desktop/mods/lib/client.js`).
+const SERVICE_TERMINAL: &str = "shprd-service";
+
+/// The file in the state directory that says a self-update is replacing the
+/// service; the footer does not start one while it is fresh.
+const RESTARTING: &str = "restarting";
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
 /// How long the old service has to exit after it is asked to.
 const STOP_WAIT: Duration = Duration::from_secs(20);
 
@@ -420,8 +434,123 @@ fn health(port: u16) -> Option<String> {
 }
 
 impl Machine<'_> {
+    /// Stops the recorded service; false when there was no record. Leaves the
+    /// `restarting` mark up, which the health wait takes down.
+    fn stop_service(&self) -> Result<bool, String> {
+        let Some(record) = self.record() else {
+            return Ok(false);
+        };
+        *self.old_id.borrow_mut() = Some(record.id.clone());
+        // The window's footer starts a service that is not there: this file
+        // tells it that this helper is replacing it, so the two never both start.
+        let _ = fs::write(self.args.state_dir.join(RESTARTING), unix_now().to_string());
+        if let Err(why) = self.stop_recorded(&record) {
+            let _ = fs::remove_file(self.args.state_dir.join(RESTARTING));
+            return Err(why);
+        }
+        Ok(true)
+    }
+
+    /// Starts `shprd serve` as the footer does: a kept herdr-core terminal named
+    /// `shprd-service`, in the state directory, with this process's `PATH`. When
+    /// `hc` cannot do it the service is started detached instead, so it comes up
+    /// either way.
+    fn start_service(&self) -> Result<(), String> {
+        let hc = std::env::var("SHPRD_HC").unwrap_or_else(|_| "hc".to_string());
+        let path = std::env::var("PATH").unwrap_or_default();
+        self.start_service_with(&hc, &path)
+    }
+
+    fn start_service_with(&self, hc: &str, path: &str) -> Result<(), String> {
+        let _ = Command::new(hc)
+            .args(["kill", SERVICE_TERMINAL])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        let ran = Command::new(hc)
+            .args([
+                "run",
+                "--bg",
+                "--keep",
+                "--no-parent",
+                "--name",
+                SERVICE_TERMINAL,
+            ])
+            .arg("--cwd")
+            .arg(&self.args.state_dir)
+            .args(["--", "/usr/bin/env"])
+            .arg(format!("PATH={path}"))
+            .arg(&self.args.install_path)
+            .arg("serve")
+            .stdin(Stdio::null())
+            .output();
+        match ran {
+            Ok(output) if output.status.success() => Ok(()),
+            other => {
+                let why = match other {
+                    Ok(output) => tail(&output.stderr, &output.stdout),
+                    Err(err) => err.to_string(),
+                };
+                use std::os::unix::process::CommandExt;
+                let log = fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(self.work().join("service.log"))
+                    .map_err(|err| format!("hc could not start it ({why}); no log: {err}"))?;
+                let err_log = log.try_clone().map_err(|err| err.to_string())?;
+                Command::new(&self.args.install_path)
+                    .arg("serve")
+                    .current_dir(&self.args.state_dir)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::from(log))
+                    .stderr(Stdio::from(err_log))
+                    .process_group(0)
+                    .spawn()
+                    .map(|_| ())
+                    .map_err(|err| format!("hc could not start it ({why}); {err}"))
+            }
+        }
+    }
+
+    /// Stops the service `record` names, by its recorded pid.
+    fn stop_recorded(&self, record: &ServiceRecord) -> Result<(), String> {
+        if !alive(record.pid) {
+            return Ok(());
+        }
+        if !looks_like_service(record.pid) {
+            return Err(format!(
+                "pid {} no longer looks like shprd, so it was not stopped",
+                record.pid
+            ));
+        }
+        signal("-TERM", record.pid);
+        let deadline = Instant::now() + STOP_WAIT;
+        while alive(record.pid) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        if alive(record.pid) {
+            // It was asked, politely, and did not go: the same pid is stopped.
+            signal("-KILL", record.pid);
+            std::thread::sleep(Duration::from_millis(300));
+        }
+        if alive(record.pid) {
+            return Err(format!(
+                "the running service (pid {}) did not stop",
+                record.pid
+            ));
+        }
+        Ok(())
+    }
+
     /// Waits for a service other than the one that was asked to stop to answer.
     fn wait_for_new_service(&self) -> Result<String, String> {
+        let result = self.wait_inner();
+        let _ = fs::remove_file(self.args.state_dir.join(RESTARTING));
+        result
+    }
+
+    fn wait_inner(&self) -> Result<String, String> {
         let old = self.old_id.borrow().clone();
         let deadline = Instant::now() + Duration::from_secs(self.args.health_timeout_secs);
         loop {
@@ -593,38 +722,14 @@ impl Steps for Machine<'_> {
     }
 
     fn restart(&self) -> Result<(), String> {
-        let Some(record) = self.record() else {
+        if !self.stop_service()? {
             // No service is running, so nothing stops; whatever starts one gets
             // the new binary.
             return Ok(());
-        };
-        *self.old_id.borrow_mut() = Some(record.id.clone());
-        if !alive(record.pid) {
-            return Ok(());
         }
-        if !looks_like_service(record.pid) {
-            return Err(format!(
-                "pid {} no longer looks like shprd, so it was not stopped",
-                record.pid
-            ));
-        }
-        signal("-TERM", record.pid);
-        let deadline = Instant::now() + STOP_WAIT;
-        while alive(record.pid) && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        if alive(record.pid) {
-            // It was asked, politely, and did not go: the same pid is stopped.
-            signal("-KILL", record.pid);
-            std::thread::sleep(Duration::from_millis(300));
-        }
-        if alive(record.pid) {
-            return Err(format!(
-                "the running service (pid {}) did not stop",
-                record.pid
-            ));
-        }
-        Ok(())
+        // The helper starts the new service itself, the way the footer does, so
+        // the service is back whether or not the Herdr window is in front.
+        self.start_service()
     }
 
     fn healthy(&self) -> Result<String, String> {
@@ -640,14 +745,21 @@ impl Steps for Machine<'_> {
         }
         // Whatever service is up now runs the bad binary: it is stopped by its
         // recorded pid first, then the old file goes back.
-        self.restart()?;
+        self.stop_service()?;
         if live.exists() {
             fs::rename(live, &bad).map_err(|err| format!("{}: {err}", bad.display()))?;
         }
         fs::rename(&prev, live).map_err(|err| format!("{}: {err}", live.display()))?;
         let _ = fs::remove_file(&bad);
         let installed = self.install_desktop();
-        let up = self.wait_for_new_service();
+        let started = self.start_service();
+        let up = match started {
+            Ok(()) => self.wait_for_new_service(),
+            Err(why) => {
+                let _ = fs::remove_file(self.args.state_dir.join(RESTARTING));
+                Err(why)
+            }
+        };
         installed?;
         up.map(|_| ())
     }
@@ -658,6 +770,92 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use std::os::unix::fs::symlink;
+
+    fn args_in(root: &Path, install: &Path) -> SelfUpdateArgs {
+        fs::create_dir_all(root.join("state")).unwrap();
+        SelfUpdateArgs {
+            work_dir: root.join("work"),
+            state_dir: root.join("state"),
+            repo: root.join("repo"),
+            base: "main".into(),
+            local: true,
+            install_path: install.to_path_buf(),
+            home_dir: root.join("home"),
+            app_home: None,
+            health_timeout_secs: 1,
+            no_news: true,
+            build: Vec::new(),
+        }
+    }
+
+    fn script(path: &Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    fn the_update_starts_the_service_itself_in_the_footers_kept_terminal() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let log = root.join("hc.log");
+        let hc = root.join("hc");
+        script(&hc, &format!("echo \"$@\" >> {}", log.display()));
+        let install = root.join("shprd");
+        script(&install, "exit 0");
+        let args = args_in(&root, &install);
+        let machine = Machine::new(&args);
+        machine
+            .start_service_with(hc.to_str().unwrap(), "/usr/bin:/bin")
+            .unwrap();
+        let said = fs::read_to_string(&log).unwrap();
+        assert!(said.contains("kill shprd-service"), "{said}");
+        assert!(
+            said.contains(&format!(
+                "run --bg --keep --no-parent --name shprd-service --cwd {} -- /usr/bin/env PATH=/usr/bin:/bin {} serve",
+                root.join("state").display(),
+                install.display()
+            )),
+            "{said}"
+        );
+    }
+
+    #[test]
+    fn when_hc_cannot_start_it_the_service_is_started_detached() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let hc = root.join("hc");
+        script(&hc, "echo no core >&2; exit 1");
+        let install = root.join("shprd");
+        let started = root.join("started");
+        script(&install, &format!("echo up > {}", started.display()));
+        let args = args_in(&root, &install);
+        fs::create_dir_all(&args.work_dir).unwrap();
+        let machine = Machine::new(&args);
+        machine
+            .start_service_with(hc.to_str().unwrap(), "/usr/bin:/bin")
+            .unwrap();
+        for _ in 0..50 {
+            if started.exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(started.exists(), "the fallback never ran serve");
+    }
+
+    #[test]
+    fn a_wait_takes_the_restarting_mark_down() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let install = root.join("shprd");
+        script(&install, "exit 0");
+        let args = args_in(&root, &install);
+        fs::write(root.join("state").join(RESTARTING), "1").unwrap();
+        let machine = Machine::new(&args);
+        assert!(machine.wait_for_new_service().is_err());
+        assert!(!root.join("state").join(RESTARTING).exists());
+    }
 
     fn touch(path: &Path) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();

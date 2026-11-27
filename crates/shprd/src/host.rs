@@ -1063,3 +1063,197 @@ exit 1
         assert_eq!(HostKind::HerdrDesktop.to_string(), "herdr-desktop");
     }
 }
+
+/// How long a host that was not running is trusted before the service probes
+/// for a running one again.
+const RESELECT_AFTER: Duration = Duration::from_secs(5);
+
+type Picker = Box<dyn Fn() -> (Resolution, std::sync::Arc<dyn Host>) + Send + Sync>;
+
+/// The host a long-lived service holds.
+///
+/// A service that came up while the Herdr window did not answer (it was in the
+/// background, or not open yet) resolved to a host that is not running, and used
+/// to keep that adapter for its whole life: a spawn, a review, a review again and
+/// a stop then failed until it was restarted. This one keeps the adapter it was
+/// given while that adapter is a running one, and asks [`select`] again (at most
+/// every few seconds) whenever the one it holds is not, so the first call after a
+/// desktop comes up reaches it.
+pub struct Reselecting {
+    pick: Picker,
+    slot: Mutex<Option<(std::sync::Arc<dyn Host>, bool, std::time::Instant)>>,
+    retry: Duration,
+}
+
+impl Reselecting {
+    /// Holds `host` (whose resolution said `running`), and picks again with `pick`.
+    pub fn new(
+        resolution: &Resolution,
+        host: std::sync::Arc<dyn Host>,
+        pick: Picker,
+        retry: Duration,
+    ) -> Self {
+        let good = resolution.running && !resolution.fell_back;
+        Self {
+            pick,
+            slot: Mutex::new(Some((host, good, std::time::Instant::now()))),
+            retry,
+        }
+    }
+
+    /// The service's host: the machine's own [`select`], asked again when needed.
+    pub fn of_machine(resolution: &Resolution, host: std::sync::Arc<dyn Host>) -> Self {
+        let pick: Picker = Box::new(|| {
+            let (resolution, host) = select();
+            (resolution, std::sync::Arc::from(host))
+        });
+        Self::new(resolution, host, pick, RESELECT_AFTER)
+    }
+
+    /// The adapter to use for this call.
+    fn current(&self) -> std::sync::Arc<dyn Host> {
+        let mut slot = self.slot.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some((host, good, at)) = slot.as_ref()
+            && (*good || at.elapsed() < self.retry)
+        {
+            return host.clone();
+        }
+        let (resolution, host) = (self.pick)();
+        let good = resolution.running && !resolution.fell_back;
+        *slot = Some((host.clone(), good, std::time::Instant::now()));
+        host
+    }
+}
+
+macro_rules! forward {
+    ($($name:ident(&self $(, $arg:ident: $ty:ty)*) -> $ret:ty;)*) => {
+        $(fn $name(&self $(, $arg: $ty)*) -> $ret {
+            self.current().$name($($arg),*)
+        })*
+    };
+}
+
+impl Host for Reselecting {
+    forward! {
+        capabilities(&self) -> shprd_mux::Capabilities;
+        find_space(&self, name: &str) -> shprd_mux::Result<Option<shprd_mux::Space>>;
+        marked_space(&self, mark: &str) -> shprd_mux::Result<Option<shprd_mux::Space>>;
+        mark_space(&self, space: &shprd_mux::SpaceId, mark: &str) -> shprd_mux::Result<()>;
+        rename_space(&self, space: &shprd_mux::SpaceId, name: &str) -> shprd_mux::Result<()>;
+        spaces_in_folder(&self, folder: &Path) -> shprd_mux::Result<Vec<shprd_mux::Space>>;
+        list_coordinators(&self) -> shprd_mux::Result<Vec<shprd_mux::LiveAgent>>;
+        is_foreign_agent(&self, pane: &shprd_mux::PaneId) -> bool;
+        foreign_agent_tabs(&self) -> Vec<shprd_mux::TabId>;
+        list_spaces(&self) -> shprd_mux::Result<Vec<shprd_mux::Space>>;
+        ensure_space(&self, name: &str, cwd: &Path) -> shprd_mux::Result<shprd_mux::Space>;
+        create_space(&self, name: &str, cwd: &Path) -> shprd_mux::Result<shprd_mux::Space>;
+        close_space(&self, space: &shprd_mux::SpaceId) -> shprd_mux::Result<()>;
+        focus_space(&self, space: &shprd_mux::SpaceId) -> shprd_mux::Result<()>;
+        list_tabs(&self, space: &shprd_mux::SpaceId) -> shprd_mux::Result<Vec<shprd_mux::Tab>>;
+        rename_tab(&self, tab: &shprd_mux::TabId, title: &str) -> shprd_mux::Result<()>;
+        focus_tab(&self, tab: &shprd_mux::TabId) -> shprd_mux::Result<()>;
+        close_tab(&self, tab: &shprd_mux::TabId) -> shprd_mux::Result<()>;
+        spawn(
+            &self,
+            space: &shprd_mux::SpaceId,
+            title: &str,
+            argv: &[String],
+            env: &[(String, Option<String>)],
+            cwd: &Path
+        ) -> shprd_mux::Result<shprd_mux::Tab>;
+        spawn_agent(&self, launch: &shprd_mux::AgentLaunch<'_>) -> shprd_mux::Result<shprd_mux::Tab>;
+        list_agents(&self) -> shprd_mux::Result<Vec<shprd_mux::LiveAgent>>;
+        split(
+            &self,
+            pane: &shprd_mux::PaneId,
+            direction: shprd_mux::Direction,
+            ratio: f32,
+            cwd: &Path
+        ) -> shprd_mux::Result<shprd_mux::PaneId>;
+        close_pane(&self, pane: &shprd_mux::PaneId) -> shprd_mux::Result<()>;
+        tab_names(&self, space: &shprd_mux::SpaceId) -> shprd_mux::Result<Vec<(shprd_mux::TabId, String)>>;
+        show_chat(&self, pane: &shprd_mux::PaneId, chat_space: &str) -> shprd_mux::Result<()>;
+        write(&self, pane: &shprd_mux::PaneId, text: &str, submit: bool) -> shprd_mux::Result<()>;
+        keys(&self, pane: &shprd_mux::PaneId, keys: &[shprd_mux::Key]) -> shprd_mux::Result<()>;
+        read(&self, pane: &shprd_mux::PaneId, lines: usize) -> shprd_mux::Result<String>;
+        wait(
+            &self,
+            pane: &shprd_mux::PaneId,
+            wanted: &shprd_mux::Waited,
+            timeout: Duration
+        ) -> shprd_mux::Result<shprd_mux::Outcome>;
+        kill(&self, pane: &shprd_mux::PaneId) -> shprd_mux::Result<()>;
+        agent_state(&self, pane: &shprd_mux::PaneId) -> shprd_mux::Result<shprd_mux::AgentState>;
+        exit_of(&self, pane: &shprd_mux::PaneId) -> shprd_mux::Result<Option<shprd_mux::Outcome>>;
+        pane_process_group(&self, pane: &shprd_mux::PaneId) -> shprd_mux::Result<Option<u32>>;
+        subscribe(&self, timeout: Duration) -> shprd_mux::Result<Vec<shprd_mux::MuxEvent>>;
+        doc(&self, space: &shprd_mux::SpaceId, name: &str, body: &str) -> shprd_mux::Result<String>;
+        exec(&self, argv: &[String], cwd: &Path) -> shprd_mux::Result<shprd_mux::Outcome>;
+    }
+}
+
+#[cfg(test)]
+mod reselect_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+    use shprd_mux::fake::FakeMux;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    fn res(running: bool) -> Resolution {
+        Resolution {
+            setting: HostChoice::default(),
+            kind: HostKind::Herdr,
+            why: String::new(),
+            fell_back: !running,
+            running,
+            probe: Probe::default(),
+        }
+    }
+
+    #[test]
+    fn a_hostless_service_probes_again_and_a_running_host_is_kept() {
+        let picks = Arc::new(AtomicU32::new(0));
+        let seen = picks.clone();
+        let pick: Picker = Box::new(move || {
+            seen.fetch_add(1, Ordering::Relaxed);
+            (
+                res(true),
+                Arc::new(FakeMux::new(shprd_mux::Capabilities::minimal())) as Arc<dyn Host>,
+            )
+        });
+        // Started hostless: the first call after the retry window picks again.
+        let held = Reselecting::new(
+            &res(false),
+            Arc::new(FakeMux::new(shprd_mux::Capabilities::minimal())),
+            pick,
+            Duration::ZERO,
+        );
+        let _ = held.capabilities();
+        assert_eq!(picks.load(Ordering::Relaxed), 1, "probed for a host again");
+        let _ = held.capabilities();
+        let _ = held.capabilities();
+        assert_eq!(picks.load(Ordering::Relaxed), 1, "a running host is kept");
+    }
+
+    #[test]
+    fn a_host_that_was_running_at_start_is_never_probed_again() {
+        let picks = Arc::new(AtomicU32::new(0));
+        let seen = picks.clone();
+        let pick: Picker = Box::new(move || {
+            seen.fetch_add(1, Ordering::Relaxed);
+            (
+                res(true),
+                Arc::new(FakeMux::new(shprd_mux::Capabilities::minimal())) as Arc<dyn Host>,
+            )
+        });
+        let held = Reselecting::new(
+            &res(true),
+            Arc::new(FakeMux::new(shprd_mux::Capabilities::minimal())),
+            pick,
+            Duration::ZERO,
+        );
+        let _ = held.capabilities();
+        assert_eq!(picks.load(Ordering::Relaxed), 0);
+    }
+}

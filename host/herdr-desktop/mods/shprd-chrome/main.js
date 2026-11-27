@@ -40,7 +40,7 @@
 
 import { View, div } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { exec, hc, home, run, setShared, shared, spaces, theme } from "herdr";
+import { exec, hc, home, readTextFile, run, setShared, shared, spaces, theme } from "herdr";
 
 import {
   Client,
@@ -71,6 +71,8 @@ const WATCH_MS = 1200;
 const RETRY_MS = 60_000;
 /** How long a start waits for the service to write its record, ms. */
 const UP_WAIT_MS = 12_000;
+/** How long a self-update's `restarting` mark holds the footer's start back, s. */
+const RESTARTING_FRESH_S = 150;
 
 export default class Chrome extends View {
   init(_props, cx) {
@@ -78,6 +80,7 @@ export default class Chrome extends View {
     this.service = null;
     this.failure = null;
     this.starting = false;
+    this.reconnecting = false;
     this.failedAt = null;
     this.folder = activeFolder();
     this.synced = "";
@@ -125,26 +128,53 @@ export default class Chrome extends View {
   async inspect(cx) {
     this.folder = activeFolder();
     const before = this.service?.record.id ?? null;
-    this.service = await discover({ wait: (ms) => cx.sleep(ms) });
-    if (this.service) {
+    const found = await discover({ wait: (ms) => cx.sleep(ms) });
+    this.reconnecting = false;
+    if (found) {
+      this.service = found;
       this.failure = null;
       this.failedAt = null;
+    } else if (!this.starting && (await this.alive() || (await this.replacing()))) {
+      // One look missed (a window in the background answers late) or a
+      // self-update is replacing the service: the recorded process is alive, or
+      // being replaced, so the service is not down. The footer keeps what it
+      // showed, or says "reconnecting", and neither starts nor kills anything.
+      this.reconnecting = true;
+      this.failure = null;
+    } else {
+      this.service = null;
     }
     if (this.service && this.service.record.id !== before) this.synced = "";
     this.publish();
     cx.notify();
-    if (this.service === null && !this.starting) {
+    if (this.service === null && !this.reconnecting && !this.starting) {
       if (this.failedAt == null || Date.now() - this.failedAt > RETRY_MS) await this.start();
     }
     if (this.service && spaceFolders().join("\n") !== this.synced) await this.sync();
   }
 
-  /** Whether the recorded service's process is still running. */
+  /**
+   * Whether the recorded service's process is still running. A probe that could
+   * not be run says nothing about the process, so it counts as running: only a
+   * pid that is really gone starts a new service.
+   */
   async alive() {
     const record = await readServiceRecord(serviceFile(stateDir(home(), await stateHome())));
     if (!record || !record.pid) return false;
     const probe = await exec("kill", ["-0", String(record.pid)]).catch(() => null);
-    return probe?.code === 0;
+    return probe === null || probe === undefined ? true : probe.code === 0;
+  }
+
+  /**
+   * Whether a self-update is replacing the service right now (it leaves a fresh
+   * `restarting` file in the state directory and starts the new service itself),
+   * so the footer must not start one too.
+   */
+  async replacing() {
+    const dir = stateDir(home(), await stateHome());
+    const text = await readTextFile(`${dir}/restarting`).catch(() => null);
+    const at = Number.parseInt(String(text ?? "").trim(), 10);
+    return Number.isFinite(at) && Date.now() / 1000 - at < RESTARTING_FRESH_S;
   }
 
   /**
@@ -168,7 +198,7 @@ export default class Chrome extends View {
   /** Tells the other panels how the service is doing. */
   publish() {
     const folder = this.folder;
-    const phase = this.service ? "up" : this.starting ? "starting" : this.failure ? "failed" : "none";
+    const phase = this.service ? "up" : this.reconnecting ? "reconnecting" : this.starting ? "starting" : this.failure ? "failed" : "none";
     setShared(SERVICE_STATUS, {
       folder,
       repo: repoName(folder ?? ""),
@@ -205,7 +235,7 @@ export default class Chrome extends View {
       // A record whose process is alive is a service that did not answer in time
       // (busy), not one that is gone: it is left running, never killed — it
       // serves every repository, so ending it would stop them all.
-      if (await this.alive()) {
+      if ((await this.alive()) || (await this.replacing())) {
         this.starting = false;
         this.failure = null;
         this.publish();
@@ -292,7 +322,9 @@ export default class Chrome extends View {
       ? name
         ? `shprd: service up · ${name}`
         : "shprd: service up"
-      : this.starting
+      : this.reconnecting
+        ? "shprd: reconnecting…"
+        : this.starting
         ? "shprd: starting the service…"
         : this.failure
           ? `shprd: ${this.failure}`
@@ -312,8 +344,8 @@ export default class Chrome extends View {
         id: "service",
         word: stuck ? `${name || "shprd"}: ${stuck}` : word,
         icon: "plug",
-        color: stuck ? colors.red : online ? colors.green : this.starting ? colors.amber : colors.red,
-        onClick: online || this.starting ? null : () => this.start(),
+        color: stuck ? colors.red : online ? colors.green : this.reconnecting ? t.muted : this.starting ? colors.amber : colors.red,
+        onClick: online || this.starting || this.reconnecting ? null : () => this.start(),
       },
     ];
   }
