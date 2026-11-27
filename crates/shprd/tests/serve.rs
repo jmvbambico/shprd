@@ -1097,7 +1097,6 @@ fn the_service_touches_a_change_file_a_herdr_mod_can_watch() {
     let (repo, state, home) = repo_with_a_run();
     // Held for the whole test: its `Drop` is what stops the service.
     let _service = Service::start(repo.path(), state.path(), home.path());
-    let change = repo_dir(state.path()).join("changes");
 
     // It is there as soon as the service is: a window that starts first has a
     // real answer rather than a missing file.
@@ -1111,6 +1110,7 @@ fn the_service_touches_a_change_file_a_herdr_mod_can_watch() {
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
+    let change = repo_dir(state.path()).join("changes");
     let first: Value = serde_json::from_str(&text.expect("the change file is written at start"))
         .expect("the change file is JSON");
     let start_seq = first["seq"].as_u64().expect("a sequence");
