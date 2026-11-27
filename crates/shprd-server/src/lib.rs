@@ -63,6 +63,7 @@ pub mod attachments;
 pub mod bindings;
 pub mod changes;
 pub mod chat;
+pub mod clean;
 pub mod dto;
 pub mod engine;
 pub mod error;

@@ -526,7 +526,7 @@ pub fn remove_worktree_only(
             root: layout.root.clone(),
         });
     }
-    if path.exists() && !Git::new(path).is_clean()? && !force {
+    if !force && path.exists() && !Git::new(path).is_clean()? {
         return Err(WorktreeError::Dirty {
             path: path.to_path_buf(),
         });
@@ -538,7 +538,23 @@ pub fn remove_worktree_only(
         args.push("--force");
     }
     args.push(&path_text);
-    git.run(&args)?;
+    if let Err(err) = git.run(&args) {
+        // `git worktree remove` fails half-way when something is still writing
+        // into the tree (a build's output, a process that has not quit) and says
+        // the directory is not empty, or when the directory is already gone and
+        // only git's record is left. Both are finished by hand: a forced removal
+        // deletes the folder itself, and either way git's record is pruned.
+        if !force && path.exists() {
+            return Err(err.into());
+        }
+        if path.exists() && std::fs::remove_dir_all(path).is_err() {
+            return Err(err.into());
+        }
+        git.run(&["worktree", "prune"])?;
+        if path.exists() {
+            return Err(err.into());
+        }
+    }
     Ok(())
 }
 

@@ -58,6 +58,7 @@ use shprd_watch::fallback::{
 };
 use shprd_watch::records::ErrorKind as CutKind;
 
+use crate::clean;
 use crate::error::ServerError;
 use crate::hub::Hub;
 use crate::ledger;
@@ -561,6 +562,10 @@ impl Worker {
             self.release_idle_integration(&state);
             self.realign_integration(&state);
         }
+        // Finished tasks give their worktrees back after the steps, so a task
+        // this pass just landed has its windows closed now and is cleaned on the
+        // next pass, once those windows are gone.
+        self.auto_clean(&facts.live, &mut report);
         // The ladder runs after the advance steps so a task this pass just
         // started is looked at on the next one, with its record already open.
         for action in &ladder.actions {
@@ -580,6 +585,137 @@ impl Worker {
             SystemClock.now_ms(),
         ));
         Ok(report)
+    }
+
+    /// Cleans up the worktrees, branches and windows of tasks that landed or were
+    /// dropped, and the review packets nobody needs any more.
+    ///
+    /// `tasks.auto_clean` (on unless the person turned it off) gates the whole
+    /// sweep. A task is cleaned only when [`clean::eligible`] says so: finished,
+    /// nothing of it running, no open card. A finished task that still has a
+    /// worker or reviewer window gets that window closed and waits for the next
+    /// pass. The removals are the janitor's own plan, taken under the run's
+    /// integration lock without waiting; one that fails is tried again on every
+    /// later pass and, after [`clean::FAILURES_BEFORE_A_CARD`] passes in a row, is
+    /// one run-wide card for the coordinator naming the path and git's error.
+    fn auto_clean(&self, live: &BTreeSet<String>, report: &mut TickReport) {
+        use shprd_core::settings::Loaded;
+
+        let Ok(loaded) = Loaded::read(&self.home, Some(&self.repo)) else {
+            return;
+        };
+        let tasks = loaded.resolve(None).tasks();
+        if !tasks.auto_clean {
+            return;
+        }
+        let Ok((state, events)) = ledger::load(&self.repo) else {
+            return;
+        };
+        let Some(run) = state.run.clone() else {
+            return;
+        };
+        let now_ms = SystemClock.now_ms();
+        for task in clean::lingering(&state, live) {
+            self.close_worker_task(&task);
+            // A reviewer tab keeps the task live as much as its worker's does,
+            // so every attempt's reviewer is closed too.
+            if let Some(entry) = state.tasks.get(&task) {
+                for attempt in &entry.attempts {
+                    self.close_reviewer_task(&task, attempt.n);
+                }
+            }
+        }
+        let layout = Layout::from_settings(&self.home, &self.repo);
+        let ready = clean::eligible(&state, live, now_ms);
+        let mut failed: Vec<(String, String, String)> = Vec::new();
+        let previous = clean::CleanFailures::read(&self.state_dir, &self.repo);
+        let actions = clean::only_for(
+            shprd_git::janitor::plan(&state, &events, &layout, now_ms, u32::MAX),
+            &ready,
+        );
+        let repo_name = self
+            .repo
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned());
+        // Another verb holds the lock: leave everything, and the failure record,
+        // exactly as they were, and look again next pass.
+        let lock = match repo_name
+            .as_deref()
+            .map(|name| integrate::try_lock_run(&self.home, name, &run.run_id))
+        {
+            Some(Ok(Some(lock))) => Some(lock),
+            Some(Ok(None)) | None => return,
+            Some(Err(err)) => {
+                tracing::warn!(%err, "could not take the integration lock for the cleanup");
+                return;
+            }
+        };
+        if !actions.is_empty() {
+            for outcome in shprd_git::janitor::execute(&self.repo, &layout, &actions) {
+                let task = outcome.action.task().cloned().unwrap_or_default();
+                match outcome.result {
+                    Ok(kinds) => {
+                        for kind in kinds {
+                            if let Err(err) = self.commit(kind) {
+                                tracing::warn!(%task, %err, "could not record a cleanup");
+                            }
+                        }
+                        report.steps.push(StepReport::ok(
+                            "clean",
+                            &task,
+                            outcome.action.describe(),
+                            self.last_seq(),
+                        ));
+                    }
+                    Err(error) => {
+                        tracing::warn!(%task, step = %outcome.action.describe(), %error, "a cleanup failed; it is tried again");
+                        failed.push((task, outcome.action.describe(), error));
+                    }
+                }
+            }
+        }
+        drop(lock);
+        let record = previous.next(&self.repo, &failed);
+        for failure in record.reached_the_count() {
+            self.raise_clean_card(failure);
+        }
+        if record != previous
+            && let Err(err) = record.write(&self.state_dir)
+        {
+            tracing::warn!(%err, "could not write the cleanup failure record");
+        }
+        let keep: BTreeSet<String> = if state.finished {
+            BTreeSet::new()
+        } else {
+            BTreeSet::from([run.run_id])
+        };
+        let reviews = self.home.join(".shprd").join("reviews");
+        for dir in clean::expire_review_packets(
+            &reviews,
+            std::time::SystemTime::now(),
+            tasks.archive_after,
+            &keep,
+        ) {
+            tracing::info!(dir = %dir.display(), "removed old review packets");
+        }
+    }
+
+    /// One run-wide card for the coordinator about a removal that kept failing.
+    ///
+    /// It is the engine's own, so it is operational (the coordinator settles it)
+    /// and never "For you". It hangs on the run rather than the task, because a
+    /// finished task draws no card of its own.
+    fn raise_clean_card(&self, failure: &clean::CleanFailure) {
+        let body = clean::card_body(failure);
+        if let Err(err) = self.commit(EventKind::Escalated {
+            task: None,
+            body,
+            default_action: String::from(
+                "shprd tries the cleanup again on every pass; free the path (stop what holds it) or remove it by hand, then `shprd janitor --apply`",
+            ),
+        }) {
+            tracing::warn!(%err, "the card for a failed cleanup could not be recorded");
+        }
     }
 
     /// With a forge, brings the local copy of the run's target branch back to
