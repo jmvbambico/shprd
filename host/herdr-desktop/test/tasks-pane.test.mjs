@@ -10,10 +10,10 @@ import assert from "node:assert/strict";
 
 import * as herdr from "herdr";
 import { record, walk } from "gpui-kit";
-import { click, inputState } from "./stub-gpui.js";
+import { ScrollHandle, click, inputState } from "./stub-gpui.js";
 import Tasks from "../mods/shprd-tasks/main.js";
 import Chat from "../mods/shprd-chat/main.js";
-import { cards as cardsOf } from "../mods/lib/asks.js";
+import { empty as emptyChat } from "../mods/lib/chat.js";
 import { RepoCache } from "../mods/lib/client.js";
 import { paneState } from "../mods/lib/board.js";
 
@@ -173,22 +173,47 @@ test("the Tasks pane draws an old review-out task and its Needs you badge counts
     root = view.render();
     nodes = walk(root);
     // The row of a task with an open ask offers Answer (the card's choices) and Drop.
-    const opened = [];
-    view.open = (task) => opened.push(task.id);
     assert.ok(nodes.some((n) => n.idv === "task-OUT-answer"), "the asking row draws its Answer pill");
     assert.ok(nodes.some((n) => n.idv === "task-OUT-drop"), "the asking row draws its Drop pill");
+    // A click on Answer runs the pane's own handler (no stub): it opens the task's
+    // thread, which is how the person reaches the card.
+    herdr.RUNS.length = 0;
     click(root, "task-OUT-answer");
-    assert.deepEqual(opened, ["OUT"], "Answer opens the task's card, where its three choices are drawn");
-    // The card Answer opens: made from the board this pane holds and drawn by
-    // the chat pane's own card renderer, choices and all.
+    assert.equal(herdr.shared("tasks.thread")?.task, "OUT", "Answer opens the task's thread");
+    assert.ok(
+      herdr.RUNS.some((run) => run.name === "layout.select" && run.args?.child === "tasks-thread-chat"),
+      "and shows its chat",
+    );
+    // The thread's chat follows what the pane shared and draws the card the open
+    // ask makes, choices and all, through its own render (not `cardsOf` by hand).
     const board = view.cache.get("/work/shop");
-    const [made] = cardsOf(board, { asks: board.asks }).filter((card) => card.task === "OUT");
-    assert.ok(made, "the pane's open ask makes a card");
     const chat = new Chat();
     chat.cx = { notify() {}, timer: { after() {} } };
+    chat.thread = true;
+    chat.client = { folder: "/work/shop", id: () => "abc", state: async () => board, asks: async () => ({ asks: board.asks }), call: async () => ({}) };
+    chat.state = board;
+    chat.asks = { asks: board.asks };
+    chat.chat = emptyChat();
+    chat.failure = null;
+    chat.refusal = null;
+    chat.sending = false;
+    chat.watching = true;
+    chat.opened = new Set();
+    chat.scroll = ScrollHandle.new();
+    chat.drawn = { rows: 0, cards: 0 };
+    chat.pinned = null;
     chat.answering = null;
     chat.answerRefusal = null;
-    const drawnCard = walk(chat.card(herdr.theme(), { red: "#f00", amber: "#fa0", green: "#0f0" }, made));
+    chat.typing = null;
+    chat.draft = null;
+    chat.input = inputState({ placeholder: "Message the agent" });
+    chat.space = chat.wanted();
+    assert.equal(chat.space, "OUT", "the thread follows the task the pane opened");
+    chat.render();
+    const drawn = chat.shown ?? [];
+    assert.ok(drawn.some((card) => card.task === "OUT"), "the thread shows the open ask's card");
+    const opened = drawn.find((card) => card.task === "OUT");
+    const drawnCard = walk(chat.card(herdr.theme(), { red: "#f00", amber: "#fa0", green: "#0f0" }, opened));
     const cardWords = drawnCard.flatMap((n) => n.kids.filter((kid) => typeof kid === "string")).join("\n");
     for (const choice of ["retry with another round", "take it as it is", "drop it"]) {
       assert.ok(cardWords.includes(choice), `the opened card offers "${choice}"`);
