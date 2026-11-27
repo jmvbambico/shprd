@@ -549,7 +549,7 @@ fn label_pre_existing(
             if check.exit_code != Some(0) {
                 check.pre_existing =
                     shprd_core::baseline::excuse(baselines, &check.command, &check.output_tail);
-                if baselines.stale && baselines.find(&check.command).is_some() {
+                if baselines.stale {
                     check.output_tail = format!(
                         "{}\n[{}]",
                         check.output_tail.trim_end(),
@@ -1008,6 +1008,26 @@ mod tests {
         assert!(worse[0].pre_existing.is_none());
         let none = label_pre_existing(&Baselines::default(), vec![failing("62 errors")]);
         assert!(none[0].pre_existing.is_none());
+    }
+
+    #[test]
+    fn a_stale_baseline_explains_itself_on_a_new_gate_command_too() {
+        use super::{CheckReport, label_pre_existing};
+        use shprd_core::baseline::{Baselines, STALE_NOTE};
+        let stale = Baselines {
+            stale: true,
+            ..Default::default()
+        };
+        let new_gate = CheckReport {
+            gate: "extra".into(),
+            command: "brand new gate".into(),
+            exit_code: Some(1),
+            output_tail: "boom".into(),
+            pre_existing: None,
+        };
+        let out = label_pre_existing(&stale, vec![new_gate]);
+        assert!(out[0].output_tail.contains(STALE_NOTE));
+        assert!(out[0].pre_existing.is_none());
     }
 
     #[test]
