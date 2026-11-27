@@ -19,6 +19,11 @@ use std::path::Path;
 
 use crate::tick::{Starter, WorkerCloser};
 
+/// Reads the review report written for a task's attempt.
+pub type ReportReader = std::sync::Arc<
+    dyn Fn(&Path, &str, u32) -> Option<shprd_core::review::ReviewReport> + Send + Sync,
+>;
+
 /// Types a task's latest brief into its agent again; answers one line.
 pub type Resender = std::sync::Arc<dyn Fn(&Path, &str) -> Result<String, String> + Send + Sync>;
 
@@ -38,6 +43,8 @@ pub struct Engine {
     /// Closes a task's reviewer and starts a new review, when the caller has
     /// a host.
     review_again: Option<Resender>,
+    /// Reads a reviewer's report, when the caller has a host.
+    report: Option<ReportReader>,
 }
 
 impl Engine {
@@ -51,6 +58,7 @@ impl Engine {
             stop: None,
             resend: None,
             review_again: None,
+            report: None,
         }
     }
 
@@ -70,6 +78,24 @@ impl Engine {
     pub fn with_review_again(mut self, review_again: Resender) -> Self {
         self.review_again = Some(review_again);
         self
+    }
+
+    /// The same engine, also able to read a reviewer's report.
+    pub fn with_report_reader(mut self, report: ReportReader) -> Self {
+        self.report = Some(report);
+        self
+    }
+
+    /// The report `task`'s reviewer wrote for `attempt`, when it can be read.
+    pub fn report(
+        &self,
+        repo: &Path,
+        task: &str,
+        attempt: u32,
+    ) -> Option<shprd_core::review::ReviewReport> {
+        self.report
+            .as_ref()
+            .and_then(|read| read(repo, task, attempt))
     }
 
     /// Whether this engine can start a review again.

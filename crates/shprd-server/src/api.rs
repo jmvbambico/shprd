@@ -756,6 +756,8 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/api/graph/run", get(graph_run))
         .route("/api/tasks", post(add_task))
         .route("/api/tasks/{id}/changes", get(task_changes))
+        .route("/api/tasks/{id}/decisions", get(task_decisions))
+        .route("/api/tasks/{id}/remarks/answer", post(answer_remark))
         .route("/api/settings", get(settings).put(put_settings))
         .route("/api/coordinator/restart", post(restart_coordinator))
         .route("/api/roster", get(roster))
@@ -916,6 +918,56 @@ async fn answer(State(state): State<AppState>, body: Bytes) -> Result<Json<AskRe
             merge: None,
         };
         actions::answer_ask(&ctx, &body.task, &body.ask, &body.answer)
+    })
+    .await?;
+    Ok(Json(reply?))
+}
+
+/// The query `GET /api/tasks/{id}/decisions` takes.
+#[derive(Debug, Deserialize)]
+struct DecisionsQuery {
+    /// The attempt; absent means the task's latest.
+    attempt: Option<u32>,
+}
+
+/// `GET /api/tasks/{id}/decisions`: the choices the worker disclosed that the
+/// review lists for the person to confirm, with the answers so far.
+async fn task_decisions(
+    State(state): State<AppState>,
+    UrlPath(id): UrlPath<String>,
+    axum::extract::Query(query): axum::extract::Query<DecisionsQuery>,
+) -> Result<Json<crate::dto::DecisionsDto>, ApiReject> {
+    let repo = state.repo.clone();
+    let engine = state.engine.clone();
+    let list =
+        blocking(move || actions::decisions_of(&repo, engine.as_ref(), &id, query.attempt)).await?;
+    Ok(Json(list?))
+}
+
+/// `POST /api/tasks/{id}/remarks/answer`: answer one finding or decision of a
+/// task's review (accepted as is, fix it, follow-up task), as an event.
+async fn answer_remark(
+    State(state): State<AppState>,
+    UrlPath(id): UrlPath<String>,
+    body: Bytes,
+) -> Result<Json<AskReply>, ApiReject> {
+    let body: crate::dto::AnswerRemarkRequest = serde_json::from_slice(&body)
+        .map_err(|err| ApiReject::bad_request(format!("the body is not an answer: {err}")))?;
+    let repo = state.repo.clone();
+    let actor = state.actor.clone();
+    let hub = state.hub.clone();
+    let after_write = state.after_write.clone();
+    let engine = state.engine.clone();
+    let reply = blocking(move || {
+        let ctx = actions::Context {
+            repo: &repo,
+            actor: &actor,
+            hub: &hub,
+            after_write: after_write.as_ref(),
+            engine: engine.as_ref(),
+            merge: None,
+        };
+        actions::answer_remark(&ctx, &id, &body)
     })
     .await?;
     Ok(Json(reply?))
@@ -1189,7 +1241,7 @@ async fn open_agent(
 /// `GET /api/agents/{id}/output?lines=N`: one agent's recent screen.
 async fn agent_output(
     State(state): State<AppState>,
-    axum::extract::Path(id): axum::extract::Path<String>,
+    UrlPath(id): UrlPath<String>,
     axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<crate::dto::AgentOutputDto>, ApiReject> {
     let lines = query
@@ -1203,7 +1255,7 @@ async fn agent_output(
 /// `POST /api/agents/{id}/attach`: what to bind a real terminal to.
 async fn agent_attach(
     State(state): State<AppState>,
-    axum::extract::Path(id): axum::extract::Path<String>,
+    UrlPath(id): UrlPath<String>,
 ) -> Result<Json<crate::dto::AgentAttachDto>, ApiReject> {
     let live = state.live.clone();
     Ok(Json(blocking(move || live.attach(&id)).await??))
