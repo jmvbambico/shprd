@@ -50,7 +50,7 @@ describe("TasksScreen states", () => {
 
 describe("TasksScreen with data", () => {
   const state = snapshot([
-    task("T1", "needs_you", { derived: { status: "needs_you", need: "asks" } }),
+    task("T1", "needs_you", { derived: { status: "needs_you", need: "asks", for_you: true } }),
     task("T2", "ready"),
     task("T3", "working"),
     task("T4", "to_do"),

@@ -16,7 +16,7 @@ describe("newsItems", () => {
   const state = snapshot(
     [
       task("T1", "done", { title: "Land me" }),
-      task("T2", "needs_you", { derived: { status: "needs_you", reason: "Wants a yes" } }),
+      task("T2", "needs_you", { derived: { status: "needs_you", reason: "Wants a yes", for_you: true } }),
       task("T3", "queued", { attempts: [failedAttempt] }),
     ],
     { needs: [{ task: "T2", body: "Pick a branch", default_action: "drop", seq: 3, kind: "decision", actions: [], key: "" }] },

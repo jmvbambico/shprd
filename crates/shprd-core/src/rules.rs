@@ -421,6 +421,18 @@ pub enum RuleError {
         /// When it stopped being answerable.
         expires_at_ms: u64,
     },
+    /// The ask offers choices and the answer is none of them.
+    #[error("{answer:?} is not one of the choices for ask {ask:?} of task {task:?}: {}", .options.join(", "))]
+    AskNotAChoice {
+        /// The task.
+        task: TaskId,
+        /// The ask.
+        ask: crate::ask::AskId,
+        /// What was answered.
+        answer: String,
+        /// The choices that were offered.
+        options: Vec<String>,
+    },
     /// An ask with that id was already raised for the task.
     #[error("ask {ask:?} of task {task:?} was already raised")]
     AskAlreadyRaised {
@@ -1600,6 +1612,21 @@ fn check_ask_answered(
     if answer.trim().is_empty() {
         return Err(RuleError::EmptyAsk {
             task: task.to_string(),
+        });
+    }
+    // An ask with choices takes one of them (trimmed, any case); free text is
+    // for asks without choices. This holds for every writer of the ledger.
+    if !record.options.is_empty()
+        && !record
+            .options
+            .iter()
+            .any(|option| option.trim().eq_ignore_ascii_case(answer.trim()))
+    {
+        return Err(RuleError::AskNotAChoice {
+            task: task.to_string(),
+            ask: ask.to_string(),
+            answer: answer.to_string(),
+            options: record.options.clone(),
         });
     }
     Ok(())

@@ -294,9 +294,13 @@ export function panelButtons(state, shown = "tasks") {
   const tally = { needs: 0, ready: 0 };
   for (const task of state?.tasks ?? []) {
     if (task?.status === "dropped") continue;
-    if (task?.derived?.status === "needs_you") tally.needs += 1;
+    if (task?.derived?.status === "needs_you") {
+      // What the coordinator settles itself is not counted as the person's.
+      if (task?.derived?.for_you !== false) tally.needs += 1;
+    }
     else if (task?.derived?.status === "ready") tally.ready += 1;
   }
+  if (state?.integration_pr) tally.needs += 1;
   return PANELS.map((panel) => ({
     ...panel,
     active: panel.id === shown,

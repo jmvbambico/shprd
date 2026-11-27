@@ -192,6 +192,18 @@ pub enum AskError {
         /// When it stopped being answerable.
         expires_at_ms: u64,
     },
+    /// The ask offers choices and the answer is none of them.
+    #[error("{answer:?} is not one of the choices for ask {ask:?} of task {task:?}: {}", .options.join(", "))]
+    NotAChoice {
+        /// The task.
+        task: TaskId,
+        /// The ask.
+        ask: AskId,
+        /// What was answered.
+        answer: String,
+        /// The choices the card offers.
+        options: Vec<String>,
+    },
     /// A task or ask id may not be used as a file name.
     #[error("{field} {value:?} is not usable as an ask file name")]
     InvalidName {
@@ -273,6 +285,21 @@ impl AskQueue {
                 task: task.to_string(),
                 ask: ask.to_string(),
                 expires_at_ms: until,
+            });
+        }
+        // An ask with choices takes one of them (trimmed, any case); a
+        // free-text ask takes anything.
+        if !raised.options.is_empty()
+            && !raised
+                .options
+                .iter()
+                .any(|option| option.trim().eq_ignore_ascii_case(text.trim()))
+        {
+            return Err(AskError::NotAChoice {
+                task: task.to_string(),
+                ask: ask.to_string(),
+                answer: text.to_string(),
+                options: raised.options.clone(),
             });
         }
         let path = self.answer_path(task, ask)?;
@@ -825,6 +852,44 @@ mod tests {
         assert_eq!(refused, 1, "{results:?}");
         let read = queue.read("T1", "a1").expect("read");
         assert_eq!(read.answer.expect("answered").at_ms, 2_000);
+    }
+
+    #[test]
+    fn an_answer_must_be_one_of_the_choices_when_there_are_some() {
+        let (_dir, queue) = queue();
+        let card = ask("a1").with_options(vec![
+            "confirm override integrate_after_failed_gate".to_string(),
+            "leave it".to_string(),
+        ]);
+        queue.raise(&card).expect("raise");
+        match queue.answer("T1", "a1", "confirm override", 2_000) {
+            Err(AskError::NotAChoice { options, .. }) => assert_eq!(options.len(), 2),
+            other => panic!("expected NotAChoice, got {other:?}"),
+        }
+        // Refused, so the card is still open.
+        assert!(queue.answer_of("T1", "a1").expect("read").is_none());
+        let done = queue
+            .answer("T1", "a1", "  Leave It ", 2_001)
+            .expect("a trimmed, any-case choice is accepted");
+        assert!(done.answer.is_some());
+    }
+
+    #[test]
+    fn exact_choice_is_accepted() {
+        let (_dir, queue) = queue();
+        queue
+            .raise(&ask("a1").with_options(vec!["leave it".to_string()]))
+            .expect("raise");
+        queue.answer("T1", "a1", "leave it", 2_000).expect("answer");
+    }
+
+    #[test]
+    fn a_free_text_ask_takes_any_answer() {
+        let (_dir, queue) = queue();
+        queue.raise(&ask("a1")).expect("raise");
+        queue
+            .answer("T1", "a1", "anything at all", 2_000)
+            .expect("answer");
     }
 
     #[test]

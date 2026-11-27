@@ -327,6 +327,12 @@ export default class Tasks extends View {
    * keeping a copy that a reload can lose.
    */
   open(task, view = "chat") {
+    // The integration pull request is no task: it opens the coordinator's chat.
+    if (task?.synthetic) {
+      openThread({ task: null, title: "" }, view);
+      this.cx.notify();
+      return;
+    }
     openThread({ task: task?.id ?? null, title: task?.title ?? "" }, view);
     this.cx.notify();
   }

@@ -13,7 +13,7 @@
 // - Commit: `a3f327a` (tag `v3.1.34`)
 // - License: MIT — Copyright (c) 2026 Elias Stravik
 
-import type { AttemptDto, DerivedStatusDto, NeedKindDto, ReviewDto, SnapshotDto, TaskDto } from "../gen";
+import type { AttemptDto, DerivedStatusDto, IntegrationPrDto, NeedKindDto, ReviewDto, SnapshotDto, TaskDto } from "../gen";
 
 /** The tone a status is drawn in. */
 export type Tone = "dim" | "amber" | "red" | "green";
@@ -137,10 +137,16 @@ export function counts(state: SnapshotDto | null): { needs: number; ready: numbe
     }
     tally.total += 1;
     if (task.derived.status === "needs_you") {
-      tally.needs += 1;
+      // A card the coordinator settles itself shows on the row but is not the person's.
+      if (task.derived.for_you) {
+        tally.needs += 1;
+      }
     } else if (task.derived.status === "ready") {
       tally.ready += 1;
     }
+  }
+  if (state?.integration_pr) {
+    tally.needs += 1;
   }
   return tally;
 }
@@ -218,6 +224,8 @@ export interface Group {
   cut: number;
   more: boolean;
   flat?: boolean;
+  /** The integration pull request, drawn as the last row of "For you". */
+  integration?: IntegrationPrDto;
 }
 
 /** What the list takes besides the board. */
@@ -268,9 +276,24 @@ export function listView(
     };
   }
   const groups: Group[] = [];
-  const you = [...live.filter((t) => word(t) === "needs_you"), ...live.filter((t) => word(t) === "ready")];
-  if (you.length > 0) {
-    groups.push(make("you", "For you", you));
+  const mine = (t: TaskDto): boolean => t.derived.for_you !== false;
+  const you = [
+    ...live.filter((t) => word(t) === "needs_you" && mine(t)),
+    ...live.filter((t) => word(t) === "ready"),
+  ];
+  const pr = !searching ? (state?.integration_pr ?? null) : null;
+  if (you.length > 0 || pr) {
+    const group = make("you", "For you", you);
+    if (pr) {
+      group.integration = pr;
+      group.count += 1;
+    }
+    groups.push(group);
+  }
+  // What the coordinator settles itself stays visible, under its own heading.
+  const theirs = live.filter((t) => word(t) === "needs_you" && !mine(t));
+  if (theirs.length > 0) {
+    groups.push(make("coordinator", "With the coordinator", theirs));
   }
   let doneLine: { count: number; label: string } | null = null;
   for (const w of STATUS_ORDER) {
