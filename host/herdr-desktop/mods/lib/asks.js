@@ -128,6 +128,7 @@ export const ACTION_LABEL = {
   reopen: "Reopen",
   override: "Override",
   sync: "Sync",
+  readmit: "Readmit",
 };
 
 /** What a button says while its press is in flight, by action id. */
@@ -143,6 +144,7 @@ export const ACTION_BUSY = {
   reopen: "Reopening\u2026",
   override: "Overriding\u2026",
   sync: "Syncing\u2026",
+  readmit: "Readmitting\u2026",
 };
 
 /** The busy word of a button that answers an ask. */
@@ -210,6 +212,8 @@ function payloadOf(id, need) {
       return need.task ? { kind: "task.override", task: need.task, reason: "overridden from its card" } : null;
     case "sync":
       return { kind: "run.sync" };
+    case "readmit":
+      return need.agent ? { kind: "agent.readmit", agent: need.agent, reason: "readmitted from its card" } : null;
     case "dismiss":
       return { kind: "need.dismiss", seq: need.seq };
     default:
@@ -382,6 +386,33 @@ function fromNeed(need) {
   };
 }
 
+/** A task's escalation card also offers Readmit for each agent of the task that the run marks dry. */
+function withReadmits(card, state) {
+  if (card.notice || !card.task) return card;
+  const task = (state?.tasks ?? []).find((t) => t?.id === card.task);
+  const dry = new Set((state?.agents ?? []).filter((a) => a?.dry).map((a) => a.id));
+  const seen = new Set();
+  const buttons = [...card.buttons];
+  for (const attempt of task?.attempts ?? []) {
+    const id = attempt?.agent;
+    if (!id || seen.has(id) || !dry.has(id)) continue;
+    seen.add(id);
+    buttons.push({
+      id: `action:readmit-${id}:${card.seq}`,
+      label: `Readmit ${id}`,
+      busy: ACTION_BUSY.readmit,
+      chose: `Readmit ${id}`,
+      kind: "action",
+      action: "readmit",
+      task: card.task,
+      seq: card.seq,
+      payload: payloadOf("readmit", { agent: id }),
+      confirm: false,
+    });
+  }
+  return { ...card, buttons };
+}
+
 /**
  * Whether an escalation names an ask that is still open.
  *
@@ -434,7 +465,7 @@ export function cards(state, asks) {
   const ids = new Set(open.map((card) => card.ask));
   const needs = (state?.needs ?? [])
     .filter((need) => !namesOpenAsk(need.body, ids))
-    .map(fromNeed);
+    .map((need) => withReadmits(fromNeed(need), state));
   const out = [];
   for (const card of [...open, ...needs]) {
     const at = out.findIndex((have) => have.key === card.key);

@@ -363,3 +363,16 @@ test("every applicable extra act shows together, and Readmit names a dry agent",
   assert.deepEqual(actionBody(acts[0], task), { kind: "task.reopen", task: "T1" });
   assert.ok(!extraActions(task, { agents: [] }).some((a) => a.action === "agent.readmit"));
 });
+
+test("a task's decision card offers Readmit for each dry agent, sending its agent and a reason", () => {
+  const state = {
+    agents: [{ id: "codex", dry: true }, { id: "pi", dry: false }],
+    tasks: [{ id: "T1", attempts: [{ agent: "codex" }, { agent: "pi" }] }],
+    needs: [{ seq: 5, task: "T1", kind: "escalation", body: "stuck", actions: ["drop"] }],
+  };
+  const card = cards(state, { asks: [] }).find((c) => c.task === "T1");
+  const read = card.buttons.filter((b) => b.action === "readmit");
+  assert.equal(read.length, 1);
+  assert.equal(read[0].label, "Readmit codex");
+  assert.deepEqual(read[0].payload, { kind: "agent.readmit", agent: "codex", reason: "readmitted from its card" });
+});
