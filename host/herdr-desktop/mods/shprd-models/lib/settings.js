@@ -932,6 +932,12 @@ export const WORKFLOW = [
     kind: "switch",
   },
   {
+    key: "tasks.auto_clean",
+    title: "Clean up finished tasks",
+    about: "Once a task has landed or been dropped and its windows are closed, shprd removes its worktree and branch by itself (the branch is archived first, so it can be restored).",
+    kind: "switch",
+  },
+  {
     key: "tasks.gh_user",
     title: "GitHub account",
     about: "The gh account landing and every forge call use for this repository (also written land.gh_user); empty uses whichever account gh has active.",
