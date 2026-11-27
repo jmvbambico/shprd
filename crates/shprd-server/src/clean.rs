@@ -196,9 +196,9 @@ pub fn expire_review_packets(
         if !meta.is_dir() || keep.contains(&name) {
             continue;
         }
-        let old = meta
-            .modified()
-            .ok()
+        // The newest touch anywhere inside, so a run that is still writing
+        // packets (even another run's) is never taken for an old one.
+        let old = newest_touch(&path, meta.modified().ok())
             .and_then(|modified| now.duration_since(modified).ok())
             .is_some_and(|age| age > window);
         if old && std::fs::remove_dir_all(&path).is_ok() {
@@ -206,6 +206,29 @@ pub fn expire_review_packets(
         }
     }
     removed
+}
+
+/// The most recent modification time of `dir` or anything inside it (symlinks
+/// are not followed). `None` when no time can be read.
+fn newest_touch(dir: &Path, own: Option<SystemTime>) -> Option<SystemTime> {
+    let mut newest = own;
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return newest;
+    };
+    for entry in entries.flatten() {
+        let Ok(meta) = std::fs::symlink_metadata(entry.path()) else {
+            continue;
+        };
+        let mut time = meta.modified().ok();
+        if meta.is_dir() {
+            time = newest_touch(&entry.path(), time);
+        }
+        newest = match (newest, time) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
+        };
+    }
+    newest
 }
 
 #[cfg(test)]
@@ -241,6 +264,21 @@ mod tests {
     }
 
     #[test]
+    fn a_folder_with_a_recent_packet_inside_stays_though_its_own_time_is_old() {
+        let dir = tempfile::tempdir().unwrap();
+        let day = Duration::from_secs(86_400);
+        let run = dir.path().join("other-run");
+        std::fs::create_dir_all(run.join("T2-a1")).unwrap();
+        std::fs::write(run.join("T2-a1/findings.json"), "{}").unwrap();
+        std::fs::File::open(&run)
+            .unwrap()
+            .set_modified(SystemTime::now() - day * 40)
+            .unwrap();
+        let removed = expire_review_packets(dir.path(), SystemTime::now(), 14, &BTreeSet::new());
+        assert!(removed.is_empty() && run.exists());
+    }
+
+    #[test]
     fn old_review_packets_go_and_recent_or_active_ones_stay() {
         let dir = tempfile::tempdir().unwrap();
         let day = Duration::from_secs(86_400);
@@ -248,9 +286,17 @@ mod tests {
             let path = dir.path().join(name);
             std::fs::create_dir_all(path.join("T1-a1")).unwrap();
             std::fs::write(path.join("T1-a1/findings.json"), "{}").unwrap();
-            let file = std::fs::File::open(&path).unwrap();
-            file.set_modified(SystemTime::now() - day * age_days as u32)
-                .unwrap();
+            let then = SystemTime::now() - day * age_days as u32;
+            for inner in [
+                path.join("T1-a1/findings.json"),
+                path.join("T1-a1"),
+                path.clone(),
+            ] {
+                std::fs::File::open(inner)
+                    .unwrap()
+                    .set_modified(then)
+                    .unwrap();
+            }
             path
         };
         let old = make("old", 40);
