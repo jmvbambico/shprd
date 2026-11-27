@@ -1585,7 +1585,7 @@ fn check_ask_answered(
     ask: &str,
     answer: &str,
     now_ms: u64,
-    _provenance: Provenance,
+    provenance: Provenance,
 ) -> Result<(), RuleError> {
     task_in(state, task)?;
     let Some(record) = state.asks.get(&(task.to_string(), ask.to_string())) else {
@@ -1615,8 +1615,11 @@ fn check_ask_answered(
         });
     }
     // An ask with choices takes one of them (trimmed, any case); free text is
-    // for asks without choices. This holds for every writer of the ledger.
-    if !record.options.is_empty()
+    // for asks without choices. This holds for every writer of the ledger, but
+    // only for a new answer: one already recorded folds as it was written, so a
+    // log made before the check still replays.
+    if provenance == Provenance::Required
+        && !record.options.is_empty()
         && !record
             .options
             .iter()
@@ -5229,6 +5232,66 @@ mod tests {
         assert!(matches!(
             RunState::fold(&log),
             Err(RuleError::AskAlreadyAnswered { .. })
+        ));
+    }
+
+    /// A recorded answer that is off its card's choices still folds, because a
+    /// log written before the choice check must replay; a new off-list answer is
+    /// still refused.
+    #[test]
+    fn a_recorded_off_list_answer_folds_but_a_new_one_is_refused() {
+        let raise = |seq: u64, ask: &str| {
+            ev(
+                seq,
+                EventKind::AskRaised {
+                    task: "a".to_string(),
+                    ask: ask.to_string(),
+                    ask_kind: crate::ask::AskKind::Question,
+                    text: "Confirm the override?".to_string(),
+                    options: vec![
+                        "confirm override integrate_after_failed_gate".to_string(),
+                        "leave it".to_string(),
+                    ],
+                    created_at_ms: 1_000,
+                    expires_at_ms: None,
+                },
+            )
+        };
+        let answer = |seq: u64, ask: &str, text: &str| {
+            ev(
+                seq,
+                EventKind::AskAnswered {
+                    task: "a".to_string(),
+                    ask: ask.to_string(),
+                    answer: text.to_string(),
+                },
+            )
+        };
+        let state = folded(&[
+            started(1),
+            added(2, "a", &["src/a"], &[]),
+            raise(3, "propose-override-1"),
+            answer(4, "propose-override-1", "confirm override"),
+        ]);
+        let recorded = state
+            .asks
+            .get(&("a".to_string(), "propose-override-1".to_string()))
+            .and_then(|record| record.answer.as_ref())
+            .map(|answer| answer.text.as_str());
+        assert_eq!(recorded, Some("confirm override"));
+        let open = folded(&[
+            started(1),
+            added(2, "a", &["src/a"], &[]),
+            raise(3, "propose-override-2"),
+        ]);
+        let kind = EventKind::AskAnswered {
+            task: "a".to_string(),
+            ask: "propose-override-2".to_string(),
+            answer: "confirm override".to_string(),
+        };
+        assert!(matches!(
+            open.check_as(&Actor::Human, &kind, 2_000),
+            Err(RuleError::AskNotAChoice { .. })
         ));
     }
 
