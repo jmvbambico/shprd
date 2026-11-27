@@ -178,6 +178,10 @@ pub struct Replaced {
     /// attempt left nothing of its own (or already landed), so the new one
     /// starts from the base.
     pub carried: Option<String>,
+    /// The earlier attempt's own worktree, kept and brought up to date, when
+    /// the new attempt works in it (and in its `target/`) instead of a fresh
+    /// one. `None` when the worktree was replaced.
+    pub reused: Option<Worktree>,
 }
 
 impl Replaced {
@@ -245,6 +249,13 @@ pub fn spawn(
 ) -> Result<SpawnReport, CliError> {
     let state = env.ctx.state()?;
     let task = task_of(&state, &req.task)?;
+    // The one gate every start passes: a retry action, a review-out answer, a
+    // clash redo and `shprd agent spawn` all end here, so the cap holds even
+    // for a caller that did not ask first. Callers that can answer softly ask
+    // `queued_for_slot` themselves and report the wait instead of an error.
+    if let Some(queued) = queued_for_slot(env, &state, &task.id) {
+        return Err(CliError::Invalid(anyhow!("{queued}")));
+    }
     let role = env.settings.resolve(None).role(BRIEF_ROLE);
     // The worker role's choice comes first, then the configured workers: a
     // person who set `roles.worker.agent` gets that program, and `--agent`
@@ -355,7 +366,9 @@ pub fn spawn(
     let kind = spawned_event(&task.id, attempt, &pick, &worktree, &branch);
     // Refuse before any effect: a refused spawn must leave nothing behind.
     env.ctx.check(&kind)?;
-    if uses_worktrees(env) {
+    // A kept worktree and branch are already in the ledger.
+    let reused = replaced.as_ref().and_then(|earlier| earlier.reused.clone());
+    if uses_worktrees(env) && reused.is_none() {
         for resource in resource_kinds(&task.id, &worktree, &branch) {
             env.ctx.check(&resource)?;
         }
@@ -398,10 +411,20 @@ pub fn spawn(
     let carried = replaced
         .as_ref()
         .and_then(|earlier| earlier.carried.as_deref());
-    let created = create_worktree(env, &task.id, carried)?;
-    if uses_worktrees(env) {
+    let created = match reused.clone() {
+        Some(kept) => kept,
+        None => create_worktree(env, &task.id, carried)?,
+    };
+    if uses_worktrees(env) && reused.is_none() {
         warnings.extend(seed_worktree(env, &created.path, &seeds));
     }
+    // A kept worktree is the earlier attempt's: a failure here must not take it
+    // (and its build) away.
+    let discard = |created: &Worktree| {
+        if reused.is_none() {
+            discard_worktree(env, created);
+        }
+    };
     // The ask hook goes in before the program starts, because a program reads
     // its hooks once at launch. A worktree that cannot take it is a spawn that
     // would promise cards it can never raise, so it fails and undoes itself.
@@ -410,7 +433,7 @@ pub fn spawn(
     if !uses_worktrees(env) {
         // nothing to install into
     } else if let Err(err) = install_ask_hook(env, &pick.agent, &created.path) {
-        discard_worktree(env, &created);
+        discard(&created);
         return Err(err);
     }
     // From here on every failure undoes everything: the tab first, then the
@@ -432,7 +455,7 @@ pub fn spawn(
     let (tab_id, tab, ready) = match opened {
         Ok(opened) => opened,
         Err(err) => {
-            discard_worktree(env, &created);
+            discard(&created);
             return Err(err);
         }
     };
@@ -443,18 +466,18 @@ pub fn spawn(
         &tab_path(&env.briefs_dir, &env.run, &task.id, attempt),
         &tab_id,
     );
-    if let Err(err) = record_attempt(env, &task.id, attempt, &pick, &created) {
+    if let Err(err) = record_attempt(env, &task.id, attempt, &pick, &created, reused.is_none()) {
         // Atomic: the attempt is recorded with the window up, or the window is
         // closed and nothing is left. A window the host will not close is a live
         // worker, so it is recorded (once more) and kept, never orphaned.
         match unwind_unrecorded(
             mux,
             &tab_id,
-            || record_attempt(env, &task.id, attempt, &pick, &created),
+            || record_attempt(env, &task.id, attempt, &pick, &created, reused.is_none()),
             err,
         ) {
             Unwound::Closed(err) => {
-                discard_worktree(env, &created);
+                discard(&created);
                 return Err(err);
             }
             Unwound::Recorded => {}
@@ -469,6 +492,7 @@ pub fn spawn(
             }
         }
     }
+    close_review_out_asks(env, &state, &task.id);
     // What said the program was ready goes beside the tab record, so a person
     // reading the run can tell a host that reported the agent from a program
     // read off its own screen — and a lost delivery from a delivered one. It is
@@ -523,6 +547,40 @@ fn unwind_unrecorded(
                 Ok(()) => Unwound::Recorded,
                 Err(retry) => Unwound::Stranded(retry),
             }
+            }
+        }
+    }
+}
+
+/// Closes the open "review rounds spent" ask of `task`, answered with the
+/// choice that spends one more round, now that a new attempt has started.
+///
+/// A retry or a send-back is that answer in effect: left open, the ask would
+/// read as unanswered to the next review. Both the queued card and the ledger
+/// are closed; a failure to do either is a warning, because the attempt is
+/// already recorded.
+fn close_review_out_asks(env: &SpawnEnv<'_>, state: &RunState, task: &str) {
+    use shprd_core::gate::{RETRY_CHOICE, ROUNDS_SPENT_ASK_PREFIX};
+    use shprd_core::log::{Clock, SystemClock};
+    let open: Vec<String> = state
+        .asks
+        .iter()
+        .filter(|((owner, ask), record)| {
+            owner == task && ask.starts_with(ROUNDS_SPENT_ASK_PREFIX) && record.answer.is_none()
+        })
+        .map(|((_, ask), _)| ask.clone())
+        .collect();
+    let queue = shprd_core::ask::AskQueue::for_repo(&env.ctx.root);
+    for ask in open {
+        // The card may be answered in the queue already (a person's answer the
+        // log has not folded yet): that answer stands.
+        let _ = queue.answer(task, &ask, RETRY_CHOICE, SystemClock.now_ms());
+        if let Err(err) = env.ctx.commit(EventKind::AskAnswered {
+            task: task.to_string(),
+            ask: ask.clone(),
+            answer: RETRY_CHOICE.to_string(),
+        }) {
+            eprintln!("warning: could not close the review-out card {ask} of {task}: {err}");
         }
     }
 }
@@ -577,7 +635,7 @@ fn adopt_live_worker(
     };
     let kind = spawned_event(&task.id, attempt, pick, worktree, branch);
     env.ctx.check(&kind)?;
-    record_attempt(env, &task.id, attempt, pick, &created)?;
+    record_attempt(env, &task.id, attempt, pick, &created, true)?;
     write_tab(&record, &tab.id);
     // Nothing says how this window's brief went, so the spawn record says the
     // host cannot vouch for it, the safe direction for the live set.
@@ -601,6 +659,27 @@ fn adopt_live_worker(
         )],
         replaced: None,
     }))
+}
+
+/// The reason a start waits as queued: `tasks.max_running` workers (other than
+/// `task`) are working already. `None` when a slot is free.
+///
+/// Every way a start begins — the tick, a retry or start action, a review-out
+/// answer, a clash redo, `shprd agent spawn` — ends in a spawn, so this is
+/// asked in front of the spawn and the cap holds whichever path got there.
+pub(crate) fn queued_for_slot(env: &SpawnEnv<'_>, state: &RunState, task: &str) -> Option<String> {
+    let max = env.settings.resolve(None).tasks().max_running.max(1);
+    let running = state
+        .tasks
+        .values()
+        .filter(|other| other.id != task && other.status == TaskStatus::Working)
+        .count();
+    (running >= usize::try_from(max).unwrap_or(usize::MAX)).then(|| {
+        format!(
+            "queued: {running} of {max} workers are running (`tasks.max_running`); {task} starts \
+             when one finishes"
+        )
+    })
 }
 
 /// The effort to pass and the warning when the model cannot use it.
@@ -1652,19 +1731,50 @@ fn replace_previous(
     {
         env.ctx.check(event)?;
     }
+    // The branch's own `Archived` event waits: a worktree that is kept keeps its
+    // branch live.
+    let (ref_events, branch_archived): (Vec<EventKind>, Vec<EventKind>) =
+        archive_events.into_iter().partition(|event| {
+            matches!(
+                event,
+                EventKind::Resource {
+                    kind: ResourceKind::ArchiveRef,
+                    ..
+                }
+            )
+        });
     if branch_exists {
         archive::archive_to(&env.ctx.root, &branch, &ref_name).map_err(|err| {
             plain_failure(&task.id, "the old attempt's work could not be saved", &err)
         })?;
-        for event in archive_events {
+        for event in ref_events {
             env.ctx.commit(event)?;
         }
     }
     // The previous attempt's tab points at a worktree that is about to go, and
     // its worker has already been sent back: leaving the tab open would leave a
-    // pane typing into a directory that no longer exists.
+    // pane typing into a directory that no longer exists (or, when the
+    // worktree is kept, into the new worker's own folder).
     if let Err(err) = close_worker(mux, &env.briefs_dir, &env.run, &task.id) {
         eprintln!("warning: {err}");
+    }
+    // A new attempt takes over the previous attempt's worktree, with its
+    // `target/` and every other build output, unless the worktree is gone or
+    // the task is being redone after a clash, which needs a clean base.
+    if branch_exists
+        && task.status != TaskStatus::Integrated
+        && !shprd_core::rules::landing_conflict(task)
+        && let Some(reused) = reuse_worktree(env, &path, &branch)
+    {
+        return Ok(Some(Replaced {
+            attempt: previous,
+            ref_name,
+            carried,
+            reused: Some(reused),
+        }));
+    }
+    for event in branch_archived {
+        env.ctx.commit(event)?;
     }
     // Git knows the old worktree by the path it was made at, which can be
     // spelled differently from the layout's now (`/tmp` against `/private/tmp`,
@@ -1714,7 +1824,43 @@ fn replace_previous(
         attempt: previous,
         ref_name,
         carried,
+        reused: None,
     }))
+}
+
+/// Brings the previous attempt's worktree up to date with the integration
+/// branch so the next attempt can work in it, or says it cannot.
+///
+/// The worktree must still be there with its branch checked out and no
+/// uncommitted change to tracked files. The branch is rebased onto the freshest
+/// base ([`base_for_new_work`]): the earlier attempt's commits are already kept
+/// under its archive ref, and a rebase that stops is undone, which leaves
+/// the worktree as it was for the clean replacement to remove.
+fn reuse_worktree(env: &SpawnEnv<'_>, path: &Path, branch: &str) -> Option<Worktree> {
+    if !path.is_dir() {
+        return None;
+    }
+    let git = Git::new(path);
+    if git.current_branch().ok().flatten().as_deref() != Some(branch) {
+        return None;
+    }
+    let dirty = git
+        .run(&["status", "--porcelain", "--untracked-files=no"])
+        .ok()?;
+    if !dirty.trim().is_empty() {
+        return None;
+    }
+    let base = base_for_new_work(env);
+    if git.run(&["rebase", &base]).is_err() {
+        let _ = git.run(&["rebase", "--abort"]);
+        return None;
+    }
+    let base_sha = git.rev_parse(&base).ok()?;
+    Some(Worktree {
+        path: path.to_path_buf(),
+        branch: branch.to_string(),
+        base_sha,
+    })
 }
 
 /// The commit a retry should start from: `branch`'s tip, when the attempt
@@ -1917,8 +2063,15 @@ fn record_attempt(
     attempt: u32,
     pick: &Pick,
     created: &Worktree,
+    new_worktree: bool,
 ) -> Result<(), CliError> {
-    let events = attempt_events(task, attempt, pick, created, uses_worktrees(env));
+    let events = attempt_events(
+        task,
+        attempt,
+        pick,
+        created,
+        uses_worktrees(env) && new_worktree,
+    );
     match append_in_order(events, |event| env.ctx.commit(event).map(|_| ())) {
         Ok(()) => Ok(()),
         Err((err, landed)) => {
@@ -6081,6 +6234,10 @@ project_dirs = []
         let first = spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
         assert!(first.replaced.is_none(), "a first attempt replaces nothing");
         let tip = commit_in(&first.worktree, "retry.txt", "attempt one\n");
+        // An uncommitted change to a tracked file is what keeps the worktree
+        // from being reused, so this is the replace path.
+        std::fs::write(first.worktree.join("retry.txt"), "unsaved\n")
+            .unwrap_or_else(|err| panic!("{err}"));
         fail_review(&ctx, 1);
 
         let second = spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
@@ -6091,6 +6248,7 @@ project_dirs = []
             .clone()
             .unwrap_or_else(|| panic!("the retry must name the ref it archived"));
         assert_eq!(replaced.attempt, 1);
+        assert!(replaced.reused.is_none());
         assert_eq!(replaced.ref_name, "refs/shprd/archive/t1/T1-a1");
         assert_eq!(
             replaced.line("janitor-reviews"),
@@ -6184,6 +6342,184 @@ project_dirs = []
             ),
             Some(ResourceStatus::Live)
         );
+    }
+
+    /// A retry works in the worktree the failed attempt had, build output and
+    /// all, brought up to date with the integration branch.
+    #[test]
+    fn a_retry_reuses_the_worktree_and_its_build_and_brings_it_up_to_date() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.spawn_env(&ctx);
+        let mux = host(&scratch);
+        let first = spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
+        let tip = commit_in(&first.worktree, "retry.txt", "attempt one\n");
+        // A build the new attempt should not have to repeat.
+        std::fs::create_dir_all(first.worktree.join("target")).unwrap_or_default();
+        std::fs::write(first.worktree.join("target/built"), "x").unwrap_or_default();
+        // Work lands on the integration branch after the task was cut.
+        git(scratch.root(), &["checkout", "-q", "integration/m4"]);
+        std::fs::write(scratch.root().join("landed.txt"), "landed\n").unwrap_or_default();
+        git(scratch.root(), &["add", "landed.txt"]);
+        git(scratch.root(), &["commit", "-q", "-m", "landed"]);
+        git(scratch.root(), &["checkout", "-q", "main"]);
+        fail_review(&ctx, 1);
+
+        let second = spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
+
+        assert_eq!(second.attempt, 2);
+        assert_eq!(second.worktree, first.worktree, "the worktree is kept");
+        assert!(
+            second.worktree.join("target/built").exists(),
+            "the build output is gone"
+        );
+        assert!(
+            second.worktree.join("landed.txt").exists(),
+            "not up to date"
+        );
+        assert!(second.worktree.join("retry.txt").exists(), "work was lost");
+        // The earlier attempt's commits are still kept under its archive ref.
+        assert_eq!(
+            git_out(
+                scratch.root(),
+                &["rev-parse", "--verify", "refs/shprd/archive/t1/T1-a1"]
+            ),
+            tip
+        );
+        let events = resource_events(&ctx);
+        assert!(
+            !events
+                .iter()
+                .any(|event| event.0 == ResourceAction::Removed),
+            "a kept worktree is not recorded as removed: {events:?}"
+        );
+        let state = ctx.state().unwrap_or_else(|err| panic!("{err}"));
+        let worktree = state
+            .resources
+            .get(&(
+                ResourceKind::Worktree,
+                second.worktree.display().to_string(),
+            ))
+            .map(|record| record.status);
+        assert_eq!(worktree, Some(ResourceStatus::Live));
+    }
+
+    /// A task redone after a clash starts from a clean base: its worktree is
+    /// replaced, not reused.
+    #[test]
+    fn a_redo_after_a_clash_gets_a_fresh_worktree() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.spawn_env(&ctx);
+        let mux = host(&scratch);
+        let first = spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
+        commit_in(&first.worktree, "retry.txt", "attempt one\n");
+        std::fs::create_dir_all(first.worktree.join("target")).unwrap_or_default();
+        std::fs::write(first.worktree.join("target/built"), "x").unwrap_or_default();
+        report_completed(&ctx, 1);
+        Ctx::new(ctx.root.clone(), Actor::Engine, false, true)
+            .commit(EventKind::GateFailed {
+                task: "T1".to_string(),
+                attempt: 1,
+                gate: shprd_core::rules::LANDING_CONFLICT_GATE.to_string(),
+                findings: Vec::new(),
+                source: None,
+            })
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        let second = spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
+
+        let replaced = second
+            .replaced
+            .unwrap_or_else(|| panic!("a replaced attempt"));
+        assert!(replaced.reused.is_none(), "a clash needs a clean base");
+        assert!(!second.worktree.join("target/built").exists());
+    }
+
+    /// Starting past `tasks.max_running` waits as queued, on whichever path.
+    #[test]
+    fn a_start_beyond_max_running_waits_as_queued() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        ctx.commit(EventKind::TaskAdded {
+            task: "T2".to_string(),
+            title: "Second".to_string(),
+            scope: Vec::new(),
+            acceptance: vec!["it runs".to_string()],
+            tags: Vec::new(),
+            skills: Vec::new(),
+            deps: Vec::new(),
+        })
+        .unwrap_or_else(|err| panic!("{err}"));
+        let env = scratch.spawn_env_with(&ctx, "[tasks]\nmax_running = 1\n");
+        let mux = host(&scratch);
+        let state = ctx.state().unwrap_or_else(|err| panic!("{err}"));
+        assert!(
+            queued_for_slot(&env, &state, "T2").is_none(),
+            "a slot is free"
+        );
+        spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
+
+        let state = ctx.state().unwrap_or_else(|err| panic!("{err}"));
+        let queued = queued_for_slot(&env, &state, "T2")
+            .unwrap_or_else(|| panic!("the second start must wait"));
+        assert!(queued.starts_with("queued: 1 of 1"), "{queued}");
+        // A caller that never asked still cannot start past the cap: spawn
+        // itself refuses, and nothing is recorded.
+        let refused = spawn(
+            &mux,
+            &env,
+            &SpawnRequest {
+                task: "T2".to_string(),
+                agent: None,
+                effort: None,
+            },
+        );
+        match refused {
+            Err(err) => assert!(err.to_string().contains("queued: 1 of 1"), "{err}"),
+            Ok(_) => panic!("spawn must refuse a start past the cap"),
+        }
+        let after = ctx.state().unwrap_or_else(|err| panic!("{err}"));
+        assert!(after.tasks["T2"].attempts.is_empty());
+        // The running task's own retry is not counted against itself.
+        assert!(queued_for_slot(&env, &state, "T1").is_none());
+    }
+
+    /// A retry answers the open "review rounds spent" ask, so the next review
+    /// never finds it unanswered.
+    #[test]
+    fn a_retry_closes_the_open_review_out_ask_with_the_retry_answer() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.spawn_env(&ctx);
+        let mux = host(&scratch);
+        spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
+        fail_review(&ctx, 1);
+        let ask = shprd_core::gate::rounds_spent_ask(1);
+        Ctx::new(ctx.root.clone(), Actor::Engine, false, true)
+            .commit(EventKind::AskRaised {
+                task: "T1".to_string(),
+                ask: ask.clone(),
+                ask_kind: shprd_core::ask::AskKind::Question,
+                text: "review rounds spent".to_string(),
+                options: shprd_core::gate::ROUNDS_SPENT_OPTIONS
+                    .iter()
+                    .map(|choice| (*choice).to_string())
+                    .collect(),
+                created_at_ms: 1_000,
+                expires_at_ms: None,
+            })
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
+
+        let state = ctx.state().unwrap_or_else(|err| panic!("{err}"));
+        let record = state
+            .asks
+            .get(&("T1".to_string(), ask))
+            .unwrap_or_else(|| panic!("the ask is in the log"));
+        let answer = record.answer.as_ref().unwrap_or_else(|| panic!("closed"));
+        assert_eq!(answer.text, "retry with another round");
     }
 
     /// A retry's brief, written by the spawn path itself, carries the ask the

@@ -527,12 +527,14 @@ pub enum TaskKey {
     NewsSettleSecs,
     /// Whether shprd rebuilds and restarts itself after a landed task changes it.
     SelfUpdate,
+    /// Whether the engine removes a landed or dropped task's worktree and branch itself.
+    AutoClean,
     /// The `gh` account every forge call uses; empty uses whichever is active.
     GhUser,
 }
 
 /// Every `tasks.*` key, in the order a settings UI lists them.
-pub const TASK_KEYS: [TaskKey; 17] = [
+pub const TASK_KEYS: [TaskKey; 18] = [
     TaskKey::Merge,
     TaskKey::ReviewRounds,
     TaskKey::MustFix,
@@ -549,6 +551,7 @@ pub const TASK_KEYS: [TaskKey; 17] = [
     TaskKey::TickSecs,
     TaskKey::NewsSettleSecs,
     TaskKey::SelfUpdate,
+    TaskKey::AutoClean,
     TaskKey::GhUser,
 ];
 
@@ -572,6 +575,7 @@ impl TaskKey {
             Self::TickSecs => "tick_secs",
             Self::NewsSettleSecs => "news_settle_secs",
             Self::SelfUpdate => "self_update",
+            Self::AutoClean => "auto_clean",
             Self::GhUser => "gh_user",
         }
     }
@@ -760,7 +764,9 @@ impl Key {
                 _ => Kind::Text,
             },
             Self::Task(key) => match key {
-                TaskKey::Proof | TaskKey::Worktrees | TaskKey::SelfUpdate => Kind::Switch,
+                TaskKey::Proof | TaskKey::Worktrees | TaskKey::SelfUpdate | TaskKey::AutoClean => {
+                    Kind::Switch
+                }
                 TaskKey::Merge | TaskKey::MustFix => match key.words() {
                     Some(words) => Kind::OneOf(words),
                     None => Kind::Text,
@@ -1539,6 +1545,7 @@ pub fn builtin() -> Layer {
     );
     layer.set(Key::Task(TaskKey::Worktrees), Value::Switch(true));
     layer.set(Key::Task(TaskKey::SelfUpdate), Value::Switch(false));
+    layer.set(Key::Task(TaskKey::AutoClean), Value::Switch(true));
     layer.set(Key::Task(TaskKey::Base), Value::Text(String::new()));
     layer.set(Key::Task(TaskKey::GhUser), Value::Text(String::new()));
     layer.set(
@@ -2076,6 +2083,8 @@ pub struct Tasks {
     pub worktrees: bool,
     /// Whether shprd rebuilds and restarts itself after a landed task changes it.
     pub self_update: bool,
+    /// Whether the engine removes a landed or dropped task's worktree and branch itself.
+    pub auto_clean: bool,
     /// The branch new tasks start from and merge into.
     pub base: String,
     /// The `gh` account pinned for forge calls; empty means the active one.
@@ -2245,6 +2254,7 @@ impl Resolved {
                 .to_owned(),
             worktrees: self.on(TaskKey::Worktrees, true),
             self_update: self.on(TaskKey::SelfUpdate, false),
+            auto_clean: self.on(TaskKey::AutoClean, true),
             base: self.text(TaskKey::Base).unwrap_or_default().to_owned(),
             gh_user: self
                 .text(TaskKey::GhUser)
