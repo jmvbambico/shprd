@@ -204,11 +204,7 @@ fn hosted_repo(host: &str) -> (Repo, String, String) {
     assert!(out.status.success());
     let url = format!("https://{host}/acme/widgets.git");
     repo.git(&["remote", "add", "origin", &url]);
-    repo.git(&[
-        "config",
-        &format!("url.{}.insteadOf", bare.display()),
-        &url,
-    ]);
+    repo.git(&["config", &format!("url.{}.insteadOf", bare.display()), &url]);
     repo.git(&["push", "-u", "origin", "main"]);
     let (theirs, ours) = diverge(&repo, &bare);
     (repo, theirs, ours)

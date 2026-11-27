@@ -873,6 +873,10 @@ fn settle_choices(task: &str, reading: &Reading, event: NewsEvent) -> Option<Str
         format!(
             "Retry review (the `task.resend_brief` action on {task}) to send the brief again; do not start a new review"
         )
+    } else if reason.contains("no round is left") {
+        // The review has spent its rounds: starting it again is not available,
+        // so the first choice is one the card can run.
+        format!("Send it back with `shprd agent spawn --task {task}` to fix the findings")
     } else if reason.contains("review") || reason.contains("findings") {
         format!("Start its review again with `shprd agent review --task {task}`")
     } else {
@@ -1653,6 +1657,17 @@ mod tests {
         review.reason = Some(String::from("review is stuck"));
         let told = line("T4", &review, NewsEvent::NeedsYou, None);
         assert!(told.contains("shprd agent review --task T4"), "{told}");
+        let mut spent = reading("repo", DerivedStatus::NeedsYou);
+        spent.need = Some(Need::Attention);
+        spent.reason = Some(String::from(
+            "T5: its review of T5·a2 failed 2 time(s) and no round is left",
+        ));
+        let told = line("T5", &spent, NewsEvent::NeedsYou, None);
+        assert!(
+            told.contains("Choices: Send it back with `shprd agent spawn --task T5`"),
+            "{told}"
+        );
+        assert!(!told.contains("shprd agent review --task T5"), "{told}");
         let mut stopped = reading("repo", DerivedStatus::NeedsYou);
         stopped.need = Some(Need::Stopped);
         let told = line("T2", &stopped, NewsEvent::Failed, None);

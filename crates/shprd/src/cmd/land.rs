@@ -22,7 +22,6 @@
 //! nothing and exits 2.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
 use anyhow::anyhow;
 use shprd_core::config::{self, Config, MergePolicy};

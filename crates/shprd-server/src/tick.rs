@@ -611,7 +611,9 @@ impl Worker {
             integrate::Realign::Moved => {
                 tracing::warn!(branch = %run.base_branch, "moved the local branch back to the remote's copy");
             }
-            integrate::Realign::Kept(commits) => self.raise_diverged_card(&run.base_branch, &commits, state),
+            integrate::Realign::Kept(commits) => {
+                self.raise_diverged_card(&run.base_branch, &commits, state)
+            }
             integrate::Realign::Unchanged => {}
         }
     }
