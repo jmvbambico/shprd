@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 
 import * as herdr from "herdr";
 import { record, walk } from "gpui-kit";
-import { inputState } from "./stub-gpui.js";
+import { click, inputState } from "./stub-gpui.js";
 import Tasks from "../mods/shprd-tasks/main.js";
 import { RepoCache } from "../mods/lib/client.js";
 import { paneState } from "../mods/lib/board.js";
@@ -166,12 +166,22 @@ test("the Tasks pane draws an old review-out task and its Needs you badge counts
   view.sync();
   record(true);
   let nodes;
+  let root;
   try {
-    nodes = walk(view.render());
+    root = view.render();
+    nodes = walk(root);
+    // The row of a task with an open ask offers Answer (the card's choices) and Drop.
+    const opened = [];
+    view.open = (task) => opened.push(task.id);
+    assert.ok(nodes.some((n) => n.idv === "task-OUT-answer"), "the asking row draws its Answer pill");
+    assert.ok(nodes.some((n) => n.idv === "task-OUT-drop"), "the asking row draws its Drop pill");
+    click(root, "task-OUT-answer");
+    assert.deepEqual(opened, ["OUT"], "Answer opens the task's card, where its three choices are drawn");
   } finally {
     record(false);
   }
   const words = nodes.flatMap((node) => node.kids.filter((kid) => typeof kid === "string"));
+  assert.ok(words.includes("Answer"), "the pill is labelled Answer");
   assert.ok(words.includes("1"), "the Needs you badge counts the asking task");
   assert.ok(words.some((w) => w.includes("task OUT")), "the asking task's row is drawn");
   assert.ok(!words.some((w) => w.includes("task OLD")), "the unasked old task stays folded away");
