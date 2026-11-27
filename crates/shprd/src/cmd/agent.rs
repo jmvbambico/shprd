@@ -491,6 +491,11 @@ fn report(ctx: &Ctx, args: &ReportArgs) -> Result<(), CliError> {
         .iter()
         .map(|spec| parse_check(spec))
         .collect::<Result<Vec<CheckReport>, CliError>>()?;
+    // Paths read relative to the worker's checkout, as the baseline's do.
+    let checks = match std::env::current_dir() {
+        Ok(here) => relativize_checks(checks, &here),
+        Err(_) => checks,
+    };
     let checks = match ctx.state() {
         Ok(state) => label_pre_existing(&state.gate_baselines, checks),
         Err(_) => checks,
@@ -515,6 +520,20 @@ fn report(ctx: &Ctx, args: &ReportArgs) -> Result<(), CliError> {
     emit(ctx, &event)
 }
 
+/// Strips the worker's checkout folder from each failing check's output, so its
+/// failure fingerprint matches the base's across checkout folders.
+fn relativize_checks(checks: Vec<CheckReport>, root: &std::path::Path) -> Vec<CheckReport> {
+    checks
+        .into_iter()
+        .map(|mut check| {
+            if check.exit_code != Some(0) {
+                check.output_tail = shprd_core::baseline::relativize(&check.output_tail, root);
+            }
+            check
+        })
+        .collect()
+}
+
 /// Labels a failing check that failed no worse on the base as pre-existing.
 ///
 /// The check keeps its real exit code and output; the label is for the card
@@ -530,6 +549,13 @@ fn label_pre_existing(
             if check.exit_code != Some(0) {
                 check.pre_existing =
                     shprd_core::baseline::excuse(baselines, &check.command, &check.output_tail);
+                if baselines.stale && baselines.find(&check.command).is_some() {
+                    check.output_tail = format!(
+                        "{}\n[{}]",
+                        check.output_tail.trim_end(),
+                        shprd_core::baseline::STALE_NOTE
+                    );
+                }
             }
             check
         })
@@ -960,6 +986,7 @@ mod tests {
                 },
                 base_sha: "abcdef123456".into(),
             }],
+            ..Default::default()
         };
         let failing = |tail: &str| CheckReport {
             gate: "lint".into(),
