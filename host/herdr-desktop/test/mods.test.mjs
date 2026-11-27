@@ -1643,3 +1643,52 @@ test("the Drop dialog never draws two Drop task controls, and Enter, Esc and a b
     record(false);
   }
 });
+
+// --- "For you" holds only what is the person's (m11-close T6) -----------------------------
+
+import { counts as boardCounts, forYou, integrationRow, rowActions as boardRowActions } from "../mods/lib/board.js";
+import { panelButtons as stripButtons } from "../mods/lib/tabstrip.js";
+
+const COORD = {
+  tasks: [
+    // The engine's own card: the coordinator settles it, the person only sees it.
+    { id: "T1", title: "stuck", status: "reported", derived: { status: "needs_you", need: "attention", reason: "review brief not delivered", for_you: false } },
+    // An agent's question and a Ready accept are the person's.
+    { id: "T2", title: "asks", status: "working", derived: { status: "needs_you", need: "asks", reason: "Question for you", for_you: true } },
+    { id: "T3", title: "protected", status: "passed", derived: { status: "ready" } },
+    // Under merge=auto the engine lands it: Landing, never For you.
+    { id: "T4", title: "landing", status: "passed", derived: { status: "merging", reason: "Landing", for_you: true } },
+  ],
+  integration_pr: null,
+};
+
+test("an operational card is not counted in For you or the Needs you badge", () => {
+  assert.equal(forYou(COORD.tasks[0]), false);
+  assert.equal(forYou(COORD.tasks[1]), true);
+  const tally = boardCounts(COORD);
+  assert.equal(tally.needs, 1, "only the agent's question");
+  assert.equal(tally.ready, 1);
+  assert.equal(stripButtons(COORD).find((b) => b.id === "tasks").needs, 1);
+  const view = listView(COORD, {});
+  const you = view.groups.find((g) => g.key === "you");
+  assert.deepEqual(you.tasks.map((t) => t.id), ["T2", "T3"]);
+  const theirs = view.groups.find((g) => g.key === "coordinator");
+  assert.deepEqual(theirs.tasks.map((t) => t.id), ["T1"], "still visible on the board");
+  assert.ok(view.groups.some((g) => g.key === "merging" && g.tasks[0].id === "T4"), "Landing is a merge, not For you");
+});
+
+test("a payload from an older service reads a needs-you row as the person's", () => {
+  assert.equal(forYou({ derived: { status: "needs_you" } }), true);
+});
+
+test("the integration pull request is the one card For you adds once every task landed", () => {
+  const state = { ...COORD, tasks: [], integration_pr: { base: "main", branch: "integration/m11", landed: 3 } };
+  const row = integrationRow(state);
+  assert.equal(row.synthetic, "integration_pr");
+  assert.match(row.title, /main/);
+  assert.equal(boardCounts(state).needs, 1);
+  const you = listView(state, {}).groups.find((g) => g.key === "you");
+  assert.equal(you.tasks[0].id, "PR");
+  assert.deepEqual(boardRowActions(row), [], "it opens no task and offers no verb");
+  assert.equal(integrationRow({ ...state, integration_pr: undefined }), null);
+});

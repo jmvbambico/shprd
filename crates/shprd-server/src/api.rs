@@ -840,6 +840,12 @@ async fn snapshot_handler(State(state): State<AppState>) -> Result<Json<Snapshot
     let (folded, _) = folded.map_err(|err| ApiReject::internal(err.to_string()))?;
     let mut snapshot = SnapshotDto::from_state(&folded, SystemClock.now_ms());
     snapshot.last_tick = last.as_ref().map(crate::dto::LastTickDto::from);
+    // A Ready task the engine lands by itself is Landing, never the person's.
+    let landing = {
+        let (repo, home) = (state.repo.clone(), state.home.clone());
+        blocking(move || crate::snapshot::auto_landing(&repo, home.as_deref(), &folded)).await?
+    };
+    crate::snapshot::apply_landing(&mut snapshot, &landing);
     // The host is asked off the runtime: a host call blocks on its own.
     let live = state.live.clone();
     let repo = state.repo.clone();

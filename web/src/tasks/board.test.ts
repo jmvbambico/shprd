@@ -17,7 +17,7 @@ import {
 import { snapshot, task } from "./fixtures";
 
 const mixed = snapshot([
-  task("T1", "needs_you", { derived: { status: "needs_you", need: "asks" } }),
+  task("T1", "needs_you", { derived: { status: "needs_you", need: "asks", for_you: true } }),
   task("T2", "ready"),
   task("T3", "working", { last_status: { message: "wiring the route", progress: 40, seq: 2 } }),
   task("T4", "queued", { last_status: undefined }),
@@ -174,5 +174,25 @@ describe("newTask After", () => {
     const bad = newTask({ title: "a", scope: "x", acceptance: "y", deps: "nope" }, ["T1"]);
     expect(bad.ready).toBe(false);
     expect(bad.why).toBe("No task named nope to wait for");
+  });
+});
+
+describe("what is the person's (For you)", () => {
+  it("leaves an operational card out of For you and the badge, and keeps it visible", () => {
+    const state = snapshot([
+      task("T1", "needs_you", { derived: { status: "needs_you", need: "attention", for_you: false } }),
+      task("T2", "needs_you", { derived: { status: "needs_you", need: "asks", for_you: true } }),
+    ]);
+    expect(counts(state).needs).toBe(1);
+    const view = listView(state, {});
+    expect(view.groups.find((g) => g.key === "you")?.tasks.map((t) => t.id)).toEqual(["T2"]);
+    expect(view.groups.find((g) => g.key === "coordinator")?.tasks.map((t) => t.id)).toEqual(["T1"]);
+  });
+
+  it("counts the integration pull request as the person's", () => {
+    const state = snapshot([task("T1", "done")], {
+      integration_pr: { base: "main", branch: "integration/m11", landed: 1 },
+    });
+    expect(counts(state).needs).toBe(1);
   });
 });

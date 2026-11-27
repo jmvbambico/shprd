@@ -137,10 +137,16 @@ export function counts(state: SnapshotDto | null): { needs: number; ready: numbe
     }
     tally.total += 1;
     if (task.derived.status === "needs_you") {
-      tally.needs += 1;
+      // A card the coordinator settles itself shows on the row but is not the person's.
+      if (task.derived.for_you) {
+        tally.needs += 1;
+      }
     } else if (task.derived.status === "ready") {
       tally.ready += 1;
     }
+  }
+  if (state?.integration_pr) {
+    tally.needs += 1;
   }
   return tally;
 }
@@ -268,9 +274,18 @@ export function listView(
     };
   }
   const groups: Group[] = [];
-  const you = [...live.filter((t) => word(t) === "needs_you"), ...live.filter((t) => word(t) === "ready")];
+  const mine = (t: TaskDto): boolean => t.derived.for_you !== false;
+  const you = [
+    ...live.filter((t) => word(t) === "needs_you" && mine(t)),
+    ...live.filter((t) => word(t) === "ready"),
+  ];
   if (you.length > 0) {
     groups.push(make("you", "For you", you));
+  }
+  // What the coordinator settles itself stays visible, under its own heading.
+  const theirs = live.filter((t) => word(t) === "needs_you" && !mine(t));
+  if (theirs.length > 0) {
+    groups.push(make("coordinator", "With the coordinator", theirs));
   }
   let doneLine: { count: number; label: string } | null = null;
   for (const w of STATUS_ORDER) {

@@ -9,9 +9,9 @@ use shprd_core::state::RunState;
 use shprd_views::status;
 
 use crate::dto::{
-    AgentDto, AskDto, AttemptDto, CardKindDto, DerivedStatusDto, FindingDto, GateDto, NeedDto,
-    NeedKindDto, PrStateDto, ReportDto, ReviewDto, RunDto, SnapshotDto, TaskDerivedDto, TaskDto,
-    TaskPrDto, TaskProgressDto,
+    AgentDto, AskDto, AttemptDto, CardKindDto, DerivedStatusDto, FindingDto, GateDto,
+    IntegrationPrDto, NeedDto, NeedKindDto, PrStateDto, ReportDto, ReviewDto, RunDto, SnapshotDto,
+    TaskDerivedDto, TaskDto, TaskPrDto, TaskProgressDto,
 };
 
 /// What `GET /api/state` answers with when the repository has no run yet.
@@ -68,9 +68,97 @@ pub fn snapshot(state: &RunState, now_ms: u64) -> SnapshotDto {
             .collect(),
         asks: open_asks(state, now_ms),
         finished: state.finished,
+        integration_pr: integration_pr(state),
         spaces: Vec::new(),
         live_agents: Vec::new(),
         role_titles: Default::default(),
+    }
+}
+
+/// The integration pull request, once there is one to review: every task has
+/// landed or been dropped, at least one landed, and the run has not finished.
+///
+/// It is the one thing the person is expected to look at besides a protected-path
+/// accept, so a board draws it under "For you".
+fn integration_pr(state: &RunState) -> Option<IntegrationPrDto> {
+    use shprd_core::state::TaskStatus;
+    let run = state.run.as_ref().filter(|_| !state.finished)?;
+    let landed = state
+        .tasks
+        .values()
+        .filter(|task| task.status == TaskStatus::Integrated)
+        .count();
+    let all_settled = state
+        .tasks
+        .values()
+        .all(|task| matches!(task.status, TaskStatus::Integrated | TaskStatus::Dropped));
+    (landed > 0 && all_settled).then(|| IntegrationPrDto {
+        base: run.base_branch.clone(),
+        branch: run.integration_branch.clone(),
+        landed: u32::try_from(landed).unwrap_or(u32::MAX),
+    })
+}
+
+/// The tasks the engine will land by itself, once they are Ready: the merge
+/// policy that applies to where they land is `auto` and their real diff touches
+/// no protected path they did not declare.
+///
+/// It reads what a tick reads (the settings, then the repository's config; a
+/// repository with no remote lands on its integration branch, any other on its
+/// base), so the board and the engine agree about whose turn it is. Only Ready
+/// tasks are asked about, so git runs for the few at the gate.
+pub(crate) fn auto_landing(
+    repo: &std::path::Path,
+    home: Option<&std::path::Path>,
+    state: &RunState,
+) -> std::collections::BTreeSet<String> {
+    use shprd_core::state::TaskStatus;
+    let Some(run) = state.run.as_ref() else {
+        return Default::default();
+    };
+    let global = home.map(|home| home.join(".config").join("shprd").join("config.toml"));
+    let repo_file = repo.join(".shprd").join("config.toml");
+    let base = shprd_core::config::load(global.as_deref(), Some(&repo_file))
+        .unwrap_or_else(|_| shprd_core::config::from_layers(&[]));
+    let config = match home {
+        Some(home) => crate::tick::pass_config(home, repo, &base).0,
+        None => base,
+    };
+    let local = shprd_git::git::Git::new(repo)
+        .run(&["remote"])
+        .map(|remotes| remotes.trim().is_empty())
+        .unwrap_or(true);
+    let target = if local {
+        &run.integration_branch
+    } else {
+        &run.base_branch
+    };
+    if config.land.policy_for(target) != shprd_core::config::MergePolicy::Auto {
+        return Default::default();
+    }
+    state
+        .tasks
+        .values()
+        .filter(|task| !matches!(task.status, TaskStatus::Integrated | TaskStatus::Dropped))
+        .filter(|task| shprd_core::rules::ready_to_land(task).is_ok())
+        .filter(|task| shprd_git::changed::protected_for_task(repo, state, task).is_empty())
+        .map(|task| task.id.clone())
+        .collect()
+}
+
+/// Reads the tasks the engine lands by itself as Landing.
+///
+/// `ids` are the tasks whose merge policy is automatic and that touch no
+/// protected path: a Ready one is a merge under way, never the person's. A task
+/// that is not Ready (still working, or needing something) is left as it reads.
+pub(crate) fn apply_landing(snapshot: &mut SnapshotDto, ids: &std::collections::BTreeSet<String>) {
+    for task in &mut snapshot.tasks {
+        if task.derived.status == DerivedStatusDto::Ready && ids.contains(&task.id) {
+            task.derived.status = DerivedStatusDto::Merging;
+            task.derived.need = None;
+            task.derived.reason = Some(shprd_views::derived::LANDING.to_string());
+            task.derived.for_you = true;
+        }
     }
 }
 
@@ -154,6 +242,7 @@ pub(crate) fn task_of(state: &RunState, task: &shprd_core::state::Task, now_ms: 
         derived: TaskDerivedDto {
             status: DerivedStatusDto::from(derived.status),
             need: derived.needs.map(NeedKindDto::from),
+            for_you: derived.is_for_you(),
             reason: derived.reason,
         },
         scope: task.scope.clone(),
@@ -934,5 +1023,79 @@ mod tests {
         let snap = snapshot(&state, NOW);
         assert_eq!(snap.tasks[0].derived.status, DerivedStatusDto::Working);
         assert_eq!(snap.tasks[0].derived.need, None);
+    }
+
+    /// The fixture's log with `more` appended after it.
+    fn with(more: Vec<EventKind>) -> RunState {
+        let mut events = task_events();
+        for (at, kind) in more.into_iter().enumerate() {
+            events.push(Event {
+                seq: 3 + at as u64,
+                at_ms: NOW,
+                actor: Actor::Engine,
+                kind,
+            });
+        }
+        RunState::fold(&events).expect("the fixture log folds")
+    }
+
+    #[test]
+    fn the_integration_pr_waits_until_every_task_has_landed_or_dropped() {
+        // A queued task is still to do: no pull request to show yet.
+        assert_eq!(snapshot(&run_with_a_task(), NOW).integration_pr, None);
+        // Landed: the card names where it merges and how many landed.
+        let mut landed = run_with_a_task();
+        landed.tasks.get_mut("T1").expect("T1").status = shprd_core::state::TaskStatus::Integrated;
+        let pr = snapshot(&landed, NOW).integration_pr.expect("shown");
+        assert_eq!(
+            (pr.base.as_str(), pr.branch.as_str(), pr.landed),
+            ("main", "integration/m9", 1)
+        );
+        // A run whose only task was dropped has nothing to merge.
+        let dropped = with(vec![EventKind::TaskDropped {
+            task: "T1".to_string(),
+            reason: "no".to_string(),
+        }]);
+        assert_eq!(snapshot(&dropped, NOW).integration_pr, None);
+    }
+
+    #[test]
+    fn a_ready_task_the_engine_lands_reads_landing_and_not_for_you() {
+        let mut snap = snapshot(&run_with_a_task(), NOW);
+        snap.tasks[0].derived.status = DerivedStatusDto::Ready;
+        let mut ids = std::collections::BTreeSet::new();
+        // Not in the set (protected, or the policy asks): it stays Ready, the person's.
+        crate::snapshot::apply_landing(&mut snap, &ids);
+        assert_eq!(snap.tasks[0].derived.status, DerivedStatusDto::Ready);
+        ids.insert("T1".to_string());
+        crate::snapshot::apply_landing(&mut snap, &ids);
+        assert_eq!(snap.tasks[0].derived.status, DerivedStatusDto::Merging);
+        assert_eq!(
+            snap.tasks[0].derived.reason.as_deref(),
+            Some(shprd_views::derived::LANDING)
+        );
+    }
+
+    #[test]
+    fn an_operational_card_is_visible_but_not_for_you() {
+        use shprd_core::event::EventKind as K;
+        let mut state = with(vec![K::Spawned {
+            task: "T1".to_string(),
+            attempt: 1,
+            agent: "claude".to_string(),
+            model: None,
+            worktree: "/wt".to_string(),
+            branch: "b".to_string(),
+        }]);
+        state.escalations.push(shprd_core::state::Escalation {
+            seq: 90,
+            task: Some("T1".to_string()),
+            body: "review brief not delivered".to_string(),
+            default_action: "ask".to_string(),
+            by_agent: false,
+        });
+        let task = snapshot(&state, NOW).tasks.remove(0);
+        assert_eq!(task.derived.status, DerivedStatusDto::NeedsYou);
+        assert!(!task.derived.for_you, "{:?}", task.derived);
     }
 }

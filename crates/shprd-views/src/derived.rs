@@ -69,6 +69,10 @@ pub const MERGING: &str = "Merging";
 /// What a ready task in the forge's merge queue says (`agents.py:101`).
 pub const IN_QUEUE_LINE: &str = "In GitHub's merge queue";
 
+/// What a ready task that the engine lands by itself says: its merge policy is
+/// `auto` and nothing about it is the person's, so it is not "For you".
+pub const LANDING: &str = "Landing";
+
 /// What a ready task whose merge waits on a review says (`agents.py:102`).
 pub const APPROVAL_LINE: &str = "Merges once it's approved";
 
@@ -142,6 +146,37 @@ impl DerivedStatus {
             Self::Ready => '✓',
             Self::Merging => '↻',
             Self::Done => '✔',
+        }
+    }
+}
+
+impl Derived {
+    /// Whether the person is the one this row waits on.
+    ///
+    /// A row that reads Needs you for something the engine found (a failing
+    /// check, a review that could not start or spent its rounds, a clash, a
+    /// stopped agent, a provider that gave up) is the coordinator's to settle
+    /// with the verbs it has, and says so to the person in a line. It stays on
+    /// the row for them to see but is not counted as theirs. Only an agent's
+    /// question is theirs.
+    pub fn is_for_you(&self) -> bool {
+        match self.status {
+            DerivedStatus::NeedsYou => !matches!(
+                self.needs,
+                Some(Need::Attention | Need::Reply | Need::Stopped | Need::Provider)
+            ),
+            _ => true,
+        }
+    }
+
+    /// This row, read for a task the engine lands by itself: a Ready row is
+    /// Landing (a merge under way), never something for the person.
+    #[must_use]
+    pub fn landing_by_engine(self) -> Self {
+        if self.status == DerivedStatus::Ready {
+            Self::new(DerivedStatus::Merging, None, Some(LANDING.to_string()))
+        } else {
+            self
         }
     }
 }
@@ -2194,5 +2229,25 @@ mod tests {
             expires_at_ms: None,
         });
         assert_eq!(derive_from_fold(&landed, NOW).status, DerivedStatus::Done);
+    }
+
+    #[test]
+    fn only_an_agents_question_is_for_the_person() {
+        let row = |needs| Derived::new(DerivedStatus::NeedsYou, Some(needs), None);
+        assert!(row(Need::Asks).is_for_you());
+        for operational in [Need::Attention, Need::Reply, Need::Stopped, Need::Provider] {
+            assert!(!row(operational).is_for_you(), "{operational:?}");
+        }
+        assert!(Derived::new(DerivedStatus::Ready, None, None).is_for_you());
+    }
+
+    #[test]
+    fn a_ready_row_the_engine_lands_reads_landing() {
+        let landing = Derived::new(DerivedStatus::Ready, None, None).landing_by_engine();
+        assert_eq!(landing.status, DerivedStatus::Merging);
+        assert_eq!(landing.reason.as_deref(), Some(LANDING));
+        // Anything but Ready is left as it reads.
+        let asks = Derived::needs(Need::Asks, QUESTION).landing_by_engine();
+        assert_eq!(asks.status, DerivedStatus::NeedsYou);
     }
 }
