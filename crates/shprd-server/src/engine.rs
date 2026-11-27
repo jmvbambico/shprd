@@ -19,6 +19,11 @@ use std::path::Path;
 
 use crate::tick::{Starter, WorkerCloser};
 
+/// Reads the review report written for a task's attempt.
+pub type ReportReader = std::sync::Arc<
+    dyn Fn(&Path, &str, u32) -> Option<shprd_core::review::ReviewReport> + Send + Sync,
+>;
+
 /// Types a task's latest brief into its agent again; answers one line.
 pub type Resender = std::sync::Arc<dyn Fn(&Path, &str) -> Result<String, String> + Send + Sync>;
 
@@ -46,6 +51,8 @@ pub struct Engine {
     /// writes the event and does the filesystem work. It is one closure for both
     /// so a service and a caller can never wire one and forget the other.
     run_verb: Option<RunVerb>,
+    /// Reads a reviewer's report, when the caller has a host.
+    report: Option<ReportReader>,
 }
 
 /// Runs one of the run's verbs as the person (`run close`, `sync`), by naming it;
@@ -64,6 +71,7 @@ impl Engine {
             resend: None,
             review_again: None,
             run_verb: None,
+            report: None,
         }
     }
 
@@ -105,6 +113,24 @@ impl Engine {
     pub fn with_review_again(mut self, review_again: Resender) -> Self {
         self.review_again = Some(review_again);
         self
+    }
+
+    /// The same engine, also able to read a reviewer's report.
+    pub fn with_report_reader(mut self, report: ReportReader) -> Self {
+        self.report = Some(report);
+        self
+    }
+
+    /// The report `task`'s reviewer wrote for `attempt`, when it can be read.
+    pub fn report(
+        &self,
+        repo: &Path,
+        task: &str,
+        attempt: u32,
+    ) -> Option<shprd_core::review::ReviewReport> {
+        self.report
+            .as_ref()
+            .and_then(|read| read(repo, task, attempt))
     }
 
     /// Whether this engine can start a review again.

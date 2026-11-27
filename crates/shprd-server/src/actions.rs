@@ -749,6 +749,111 @@ fn run_a_verb(ctx: &Context<'_>, verb: &str) -> Result<(), ApiReject> {
     engine.run_verb(ctx.repo, verb).map_err(ApiReject::refused)
 }
 
+/// Answers one finding or decision of a task's review, and records it.
+///
+/// The answer is an event: the remark's own ask is raised in the log, then
+/// answered through [`answer_ask`], so the first answer stands and the log is
+/// the only copy. A finding or decision the review never listed is refused
+/// before anything is written.
+pub(crate) fn answer_remark(
+    ctx: &Context<'_>,
+    task: &str,
+    request: &crate::dto::AnswerRemarkRequest,
+) -> Result<AskReply, ApiReject> {
+    use shprd_core::review::{self, RemarkAnswer};
+    let remark = request.remark();
+    let answer: RemarkAnswer = request.answer.into();
+    let (state, _) = ledger::load(ctx.repo).map_err(read_error)?;
+    if !state.tasks.contains_key(task) {
+        return Err(ApiReject::unknown_task(task));
+    }
+    let report = ctx
+        .engine
+        .and_then(|engine| engine.report(ctx.repo, task, request.attempt))
+        .ok_or_else(|| {
+            ApiReject::refused(format!(
+                "the review of {task} attempt {} has no report to answer",
+                request.attempt
+            ))
+        })?;
+    let title = review::remark_title(&report, request.attempt, remark)
+        .map_err(|err| ApiReject::refused(err.to_string()))?;
+    let id = review::remark_ask(request.attempt, remark);
+    let already = state
+        .asks
+        .values()
+        .find(|ask| ask.task == task && ask.id == id);
+    if already.is_some_and(|ask| ask.answer.is_some()) {
+        return Err(ApiReject::refused(format!(
+            "{task}: that remark was already answered"
+        )));
+    }
+    if already.is_none() {
+        let now_ms = SystemClock.now_ms();
+        let text = review::remark_text(task, remark, &title);
+        let options = review::remark_options();
+        let raised = EventKind::AskRaised {
+            task: task.to_string(),
+            ask: id.clone(),
+            ask_kind: shprd_core::ask::AskKind::Question,
+            text: text.clone(),
+            options: options.clone(),
+            created_at_ms: now_ms,
+            expires_at_ms: None,
+        };
+        state
+            .check_as(ctx.actor, &raised, now_ms)
+            .map_err(|err| ApiReject::refused(err.to_string()))?;
+        let queue = shprd_core::ask::AskQueue::for_repo(ctx.repo);
+        let ask = shprd_core::ask::Ask::new(
+            id.clone(),
+            task.to_string(),
+            shprd_core::ask::AskKind::Question,
+            text,
+            now_ms,
+        )
+        .with_options(options);
+        match queue.raise(&ask) {
+            Ok(()) | Err(shprd_core::ask::AskError::AlreadyRaised { .. }) => {}
+            Err(err) => return Err(ask_error(err)),
+        }
+        let event = ledger::commit(ctx.repo, ctx.actor, raised).map_err(commit_error)?;
+        ctx.hub.publish(event.seq);
+    }
+    answer_ask(ctx, task, &id, answer.text())
+}
+
+/// The decisions the review of `task`'s `attempt` listed, with the answers the
+/// log holds: the data the "ready to land" card shows.
+///
+/// `attempt` defaults to the task's latest. A review with no readable report
+/// lists none.
+pub(crate) fn decisions_of(
+    repo: &Path,
+    engine: Option<&Engine>,
+    task: &str,
+    attempt: Option<u32>,
+) -> Result<crate::dto::DecisionsDto, ApiReject> {
+    let (state, _) = ledger::load(repo).map_err(read_error)?;
+    let found = state
+        .tasks
+        .get(task)
+        .ok_or_else(|| ApiReject::unknown_task(task))?;
+    let attempt = attempt
+        .or_else(|| found.attempts.last().map(|latest| latest.n))
+        .unwrap_or(0);
+    let decisions = engine
+        .and_then(|engine| engine.report(repo, task, attempt))
+        .map(|report| {
+            shprd_core::review::decisions_to_confirm(&state, task, attempt, &report)
+                .into_iter()
+                .map(crate::dto::DecisionDto::from)
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(crate::dto::DecisionsDto { attempt, decisions })
+}
+
 /// Maps an ask-queue failure to the status a client sees.
 fn ask_error(err: shprd_core::ask::AskError) -> ApiReject {
     use shprd_core::ask::AskError;
