@@ -39,8 +39,7 @@ ident = uuid.uuid4().hex
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/api/health/repos":
-            bad = version == "unfoldable"
-            body = json.dumps({"ok": not bad, "checked": 1, "failed": [{"id": "r", "error": "answer is not one of the choices"}] if bad else []}).encode()
+            body = json.dumps({"ok": True, "checked": 0, "failed": []}).encode()
         else:
             body = json.dumps({"ok": True, "id": ident, "version": version}).encode()
         self.send_response(200)
@@ -81,12 +80,24 @@ for a in "$@"; do
 done
 [ "$1" = serve ] || exit 0
 [ "$VERSION" = bad ] && exit 1
-# The unfoldable build comes up once (the check catches it), and a supervisor
+# The unfoldable build is the REAL shprd, serving a repository whose log it
+# cannot fold: it comes up once (its own check catches it), and a supervisor
 # that restarts it before the rollback's file swap finds it gone, as it would a
 # service that cannot start.
 if [ "$VERSION" = unfoldable ]; then
   [ -f "$FAKE_STATE/unfoldable-served" ] && exit 1
   touch "$FAKE_STATE/unfoldable-served"
+  "$FAKE_REAL" --repo "$FAKE_BAD_REPO" --home "$FAKE_HOME" serve --port 0 &
+  real=$!
+  trap 'kill $real 2>/dev/null' TERM INT
+  # The repository was readable when the service started (the real service
+  # refuses a log it cannot read at start-up); its log goes bad once the
+  # service is up, which is what an old log under a newer fold looks like to a
+  # service that already holds the repository. The health check folds it again.
+  until grep -q "$real" "$FAKE_STATE/service.json" 2>/dev/null; do sleep 0.02; done
+  printf '{{"this": "is not an event"}}\n' > "$FAKE_BAD_REPO/.shprd/events.jsonl"
+  wait $real
+  exit $?
 fi
 exec python3 "$FAKE_PY" "$FAKE_STATE" "$VERSION"
 "#
@@ -182,6 +193,7 @@ impl Supervisor {
                         .append(true)
                         .open(&errors)
                         .map_or_else(|_| Stdio::null(), Stdio::from);
+                    support::isolate(&mut command, errors.parent().unwrap_or(Path::new("/")));
                     command
                         .arg("serve")
                         .stdin(Stdio::null())
@@ -254,10 +266,13 @@ impl World {
         let head_sha = git(&repo, &["rev-parse", "HEAD"]);
 
         let bin_dir = root.join("bin");
-        let state = root.join("state");
+        let state_home = root.join("xdg-state");
+        let state = shprd_server::state_dir(&state_home);
         let work = root.join("work");
         let app_home = root.join("app-home");
-        for dir in [&bin_dir, &state, &work, &app_home] {
+        let bad_repo = root.join("bad-repo");
+        fs::create_dir_all(bad_repo.join(".shprd")).unwrap();
+        for dir in [&bin_dir, &state, &work, &app_home, &root.join("fake-home")] {
             fs::create_dir_all(dir).unwrap();
         }
         let install = bin_dir.join("shprd");
@@ -281,6 +296,27 @@ impl World {
                 root.join("shprd_serve.py").display().to_string(),
             ),
             ("FAKE_STATE".to_string(), state.display().to_string()),
+            (
+                "FAKE_REAL".to_string(),
+                env!("CARGO_BIN_EXE_shprd").to_string(),
+            ),
+            ("FAKE_BAD_REPO".to_string(), bad_repo.display().to_string()),
+            (
+                "FAKE_HOME".to_string(),
+                root.join("fake-home").display().to_string(),
+            ),
+            (
+                "XDG_STATE_HOME".to_string(),
+                state_home.display().to_string(),
+            ),
+            (
+                "XDG_CONFIG_HOME".to_string(),
+                root.join("fake-home/.config").display().to_string(),
+            ),
+            (
+                "XDG_DATA_HOME".to_string(),
+                root.join("fake-home/.local/share").display().to_string(),
+            ),
         ];
         let supervisor = Supervisor::start(install.clone(), env, root.join("serve.err"));
         let world = Self {
@@ -626,7 +662,8 @@ fn a_new_binary_that_cannot_fold_a_repository_log_is_rolled_back() {
     if !have_python() {
         return;
     }
-    // The fake "unfoldable" build answers /api/health but fails the fold check.
+    // The "unfoldable" build is the real shprd serving a repository whose log it
+    // cannot fold; its own /api/health/repos says so.
     let world = World::new("crates/x.rs", "unfoldable");
     let out = world.helper("ok", "unfoldable");
     assert!(out.status.success(), "a rollback is reported: {out:?}");
