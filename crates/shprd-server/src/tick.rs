@@ -620,11 +620,11 @@ impl Worker {
                 } => Some(shprd_views::news::run_wide_line(body, default_action)),
                 _ => None,
             };
-            if let Ok(seq) = self.commit(kind) {
-                if let Some(line) = told {
-                    self.notify(Some(seq));
-                    self.tell_coordinator(state, &line);
-                }
+            if let Ok(seq) = self.commit(kind)
+                && let Some(line) = told
+            {
+                self.notify(Some(seq));
+                self.tell_coordinator(state, &line);
             }
         }
     }
