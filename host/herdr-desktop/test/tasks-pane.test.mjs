@@ -149,17 +149,17 @@ test("the Tasks pane draws an old review-out task and its Needs you badge counts
     handle: {},
   });
   const old = Date.now() - 20 * 60 * 60 * 1000;
-  const mk = (id) => ({
+  const mk = (id, word) => ({
     id,
     title: `task ${id}`,
     status: "queued",
-    derived: { status: "needs_you" },
+    derived: { status: word },
     added_at_ms: old,
     touched_at_ms: old,
   });
   view.cache.set("/work/shop", {
     seq: 1,
-    tasks: [mk("OUT"), mk("OLD")],
+    tasks: [mk("OUT", "needs_you"), mk("OLD", "queued")],
     asks: [{ id: "review-out-2", task: "OUT", kind: "question", text: "OUT: review failed", options: ["retry with another round", "take it as it is", "drop it"] }],
     needs: [{ seq: 1, task: "OUT", body: "OUT: review failed", default_action: "x", kind: "decision", actions: ["review", "drop"] }],
   });
