@@ -709,19 +709,27 @@ fn push_integration(git: &Git, branch: &str) {
     let _ = git.run(&["push", &remote, &format!("HEAD:refs/heads/{branch}")]);
 }
 
-/// Whether the repository has a remote at a GitHub host, where a landing must
-/// go through the forge whether or not `gh` answers right now.
+/// Whether the repository has a remote at a GitHub host, or at a host `gh` is
+/// signed in for, where a landing must go through the forge whether or not
+/// `gh` answers right now.
 ///
 /// A landing that cannot reach the forge fails; it never falls back to merging
 /// in a local worktree, which moves the local integration ref apart from the
 /// remote's.
 pub fn forge_expected(git: &Git) -> bool {
+    forge_expected_with(git, |host| gh_authed(git.dir(), host))
+}
+
+/// [`forge_expected`] with the forge-client check given: a GitHub remote always
+/// counts; a remote at any other host counts when `authed` says a forge client
+/// can drive that host. `authed` is never asked for a GitHub host.
+pub fn forge_expected_with(git: &Git, authed: impl Fn(&str) -> bool) -> bool {
     // The configured URL, not `get-url`: a `url.<base>.insteadOf` rewrite is
     // a transport detail, and the remote still names GitHub.
     let Ok(names) = git.run(&["remote"]) else {
         return false;
     };
-    names
+    let hosts: Vec<String> = names
         .lines()
         .map(str::trim)
         .filter(|name| !name.is_empty())
@@ -730,7 +738,26 @@ pub fn forge_expected(git: &Git) -> bool {
                 .ok()
         })
         .filter_map(|url| crate::worktree::host_of_url(&url))
-        .any(|host| host.to_ascii_lowercase().contains("github"))
+        .map(|host| host.to_ascii_lowercase())
+        .collect();
+    hosts.iter().any(|host| host.contains("github")) || hosts.iter().any(|host| authed(host))
+}
+
+/// Whether `gh` is installed and signed in for `host`, asked in `dir`.
+///
+/// `gh auth status` answers from the local configuration, so it makes no
+/// network call; anything it cannot answer counts as "no forge".
+pub fn gh_authed(dir: &Path, host: &str) -> bool {
+    std::process::Command::new("gh")
+        .args(["auth", "status", "--hostname", host])
+        .current_dir(dir)
+        .env("GH_PROMPT_DISABLED", "1")
+        .env("LC_ALL", "C")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 /// Whether landing in `git`'s repository goes through a forge's pull request.

@@ -604,8 +604,41 @@ impl Worker {
         };
         // The idle sweep has just let go of the worktree, so the branch is
         // free to move unless the person has it checked out.
-        if integrate::realign_with_remote(&self.repo, &run.base_branch) {
-            tracing::warn!(branch = %run.base_branch, "moved the local branch back to the remote's copy");
+        let repo = self.repo.clone();
+        match integrate::realign_outcome(&repo, &run.base_branch, |host| {
+            shprd_git::land::gh_authed(&repo, host)
+        }) {
+            integrate::Realign::Moved => {
+                tracing::warn!(branch = %run.base_branch, "moved the local branch back to the remote's copy");
+            }
+            integrate::Realign::Kept(commits) => self.raise_diverged_card(&run.base_branch, &commits, state),
+            integrate::Realign::Unchanged => {}
+        }
+    }
+
+    /// Raises one card naming the local-only commits a local integration branch
+    /// holds that its remote copy does not, told once per distinct set.
+    fn raise_diverged_card(&self, branch: &str, commits: &[String], state: &RunState) {
+        let marker = format!("The local `{branch}` has commits the remote lacks");
+        let body = format!("{marker}: {}", commits.join("; "));
+        if state
+            .escalations
+            .iter()
+            .any(|escalation| escalation.body == body)
+        {
+            return;
+        }
+        let default_action = format!(
+            "push `{branch}` to the remote if those commits should land, or move it back \
+             with `git branch -f {branch} origin/{branch}` if they should not; shprd leaves \
+             the local branch as it is"
+        );
+        if let Ok(seq) = self.commit(EventKind::Escalated {
+            task: None,
+            body,
+            default_action,
+        }) {
+            self.notify(Some(seq));
         }
     }
 
