@@ -399,6 +399,44 @@ pub fn release_if_held(path: &Path) -> bool {
     }
 }
 
+/// Brings the local `branch` back to the remote's copy of it, when the two differ.
+///
+/// With a forge, the remote is where a branch lands, so a local ref that is
+/// ahead of it or apart from it is a landing that never reached the forge. The
+/// remote is fetched first (best effort; offline leaves what is known), and the
+/// ref is then moved with `git branch -f`. The commits stay reachable on the task
+/// branches and in the reflog. A branch that is checked out in a worktree is left
+/// alone, because moving it would change that worktree's files; so is a
+/// repository with no GitHub remote or a branch the remote does not have. Returns
+/// whether the ref moved.
+pub fn realign_with_remote(repo: &Path, branch: &str) -> bool {
+    let git = Git::new(repo);
+    // Only a GitHub remote is a forge a landing goes through; any other
+    // remote's local branch may hold work that is not on it yet.
+    if !crate::land::forge_expected(&git) {
+        return false;
+    }
+    let Some(remote) = crate::worktree::remote_of(&git) else {
+        return false;
+    };
+    let _ = git.run(&["fetch", "--quiet", &remote, branch]);
+    let tracking = format!("refs/remotes/{remote}/{branch}");
+    let local = format!("refs/heads/{branch}");
+    let (Ok(theirs), Ok(ours)) = (git.rev_parse(&tracking), git.rev_parse(&local)) else {
+        return false;
+    };
+    if theirs == ours {
+        return false;
+    }
+    let held = git
+        .run(&["worktree", "list", "--porcelain"])
+        .is_ok_and(|list| list.lines().any(|line| line == format!("branch {local}")));
+    if held {
+        return false;
+    }
+    git.run(&["branch", "-f", branch, &theirs]).is_ok()
+}
+
 /// Creates the directory a worktree will sit in.
 fn create_parent(path: &Path) -> Result<(), IntegrateError> {
     let Some(parent) = path.parent() else {

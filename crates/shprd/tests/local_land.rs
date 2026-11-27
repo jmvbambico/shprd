@@ -628,3 +628,36 @@ fn accepting_lands_when_origin_is_not_a_github_host() {
     let (_fixture, _head) =
         accepted_task_lands_with_origin("ssh://git@git.example.invalid/owner/repo.git");
 }
+
+/// A non-GitHub remote that already has the integration branch, one commit
+/// behind: landing merges locally and the local branch is never reset to the
+/// remote's copy first (only a forge landing realigns).
+#[test]
+fn a_non_forge_remote_never_resets_the_local_integration_branch() {
+    let temp = TempDir::new().expect("temp dir");
+    let bare = temp.path().join("remote.git");
+    let out = Command::new("git")
+        .args(["init", "--bare", "-q"])
+        .arg(&bare)
+        .output()
+        .expect("git runs");
+    assert!(out.status.success());
+    let fixture = Fixture::new();
+    fixture.write_config("ask");
+    fixture.git(&["remote", "add", "origin", bare.to_str().expect("utf8 path")]);
+    fixture.git(&["push", "-q", "origin", "integration/m9"]);
+    // The local branch moves ahead of the remote's copy.
+    fixture.git(&["switch", "-q", "integration/m9"]);
+    fixture.git(&["commit", "-q", "--allow-empty", "-m", "local only"]);
+    let ahead = fixture.git(&["rev-parse", "integration/m9"]);
+    fixture.git(&["switch", "-q", "--detach"]);
+    fixture.start();
+    let head = fixture.hand_in("T1", "integration/m9", "a.txt", "the task's work\n");
+    fixture.tick();
+    fixture.ok(&["approve", "T1", "--yes"]);
+    let steps = fixture.tick();
+    assert_eq!(actions(&steps), vec!["land:T1".to_string()], "{steps:?}");
+    assert_eq!(fixture.integration_head(), head);
+    // The local-only commit survived: the landing sits on top of it.
+    fixture.git(&["merge-base", "--is-ancestor", &ahead, &head]);
+}
