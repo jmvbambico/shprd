@@ -547,7 +547,6 @@ fn unwind_unrecorded(
                 Ok(()) => Unwound::Recorded,
                 Err(retry) => Unwound::Stranded(retry),
             }
-            }
         }
     }
 }
