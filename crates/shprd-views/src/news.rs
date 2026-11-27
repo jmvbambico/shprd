@@ -874,9 +874,21 @@ fn settle_choices(task: &str, reading: &Reading, event: NewsEvent) -> Option<Str
             "Retry review (the `task.resend_brief` action on {task}) to send the brief again; do not start a new review"
         )
     } else if reason.contains("no round is left") {
-        // The review has spent its rounds: starting it again is not available,
-        // so the first choice is one the card can run.
-        format!("Send it back with `shprd agent spawn --task {task}` to fix the findings")
+        // The review has spent its rounds: `agent review` is not available. The
+        // card carries its own choices (`ROUNDS_SPENT_OPTIONS`), answered by
+        // its ask id (`rounds_spent_ask`), so the first choice is one of those.
+        let original = reading.reason.as_deref().unwrap_or_default();
+        match shprd_core::gate::card_attempt(task, original) {
+            Some(attempt) => format!(
+                "Answer the card `{}` on {task} (`POST /api/asks/answer`) with `{}` to spend one more round",
+                shprd_core::gate::rounds_spent_ask(attempt),
+                shprd_core::gate::RETRY_CHOICE
+            ),
+            None => format!(
+                "Answer the review card on {task} (`POST /api/asks/answer`) with `{}`",
+                shprd_core::gate::RETRY_CHOICE
+            ),
+        }
     } else if reason.contains("review") || reason.contains("findings") {
         format!("Start its review again with `shprd agent review --task {task}`")
     } else {
@@ -1664,10 +1676,11 @@ mod tests {
         ));
         let told = line("T5", &spent, NewsEvent::NeedsYou, None);
         assert!(
-            told.contains("Choices: Send it back with `shprd agent spawn --task T5`"),
+            told.contains("Choices: Answer the card `review-out-2` on T5"),
             "{told}"
         );
         assert!(!told.contains("shprd agent review --task T5"), "{told}");
+        assert!(!told.contains("agent spawn --task T5"), "{told}");
         let mut stopped = reading("repo", DerivedStatus::NeedsYou);
         stopped.need = Some(Need::Stopped);
         let told = line("T2", &stopped, NewsEvent::Failed, None);
