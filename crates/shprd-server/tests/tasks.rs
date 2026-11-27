@@ -1343,3 +1343,69 @@ async fn a_tasks_pull_request_reaches_the_board() {
     assert_eq!(pr["url"], json!("https://example.invalid/pr/42"));
     assert_eq!(pr["approved"], json!(false));
 }
+
+#[tokio::test]
+async fn a_disclosed_decision_is_listed_for_the_card_and_answered_once_as_an_event() {
+    // Item 18: a choice the worker disclosed is a decision to confirm, kept apart from
+    // the findings; the person answers each as an event and the first answer stands.
+    let fixture = with_a_working_task();
+    let (engine, _, _) = recording_engine(Ok("x"));
+    let engine = engine.with_report_reader(Arc::new(|_repo: &Path, _task: &str, attempt: u32| {
+        (attempt == 1).then(|| shprd_core::review::ReviewReport {
+            findings: vec![],
+            decisions: vec![shprd_core::review::Decision {
+                title: "Titan card stays dark".to_string(),
+                detail: "disclosed in the summary".to_string(),
+            }],
+        })
+    }));
+    let fixture = Fixture {
+        app: fixture.app.with_engine(engine),
+        ..fixture
+    };
+    let before = fixture
+        .send(Method::GET, "/api/tasks/T1/decisions?attempt=1", None)
+        .await;
+    assert_eq!(before.status, StatusCode::OK, "{:?}", before.body);
+    assert_eq!(
+        before.json()["decisions"][0]["title"],
+        "Titan card stays dark"
+    );
+    assert!(before.json()["decisions"][0].get("answer").is_none());
+
+    let answer = json!({"attempt": 1, "of": "decision", "index": 1, "answer": "follow_up"});
+    let sent = fixture
+        .send(
+            Method::POST,
+            "/api/tasks/T1/remarks/answer",
+            Some(answer.clone()),
+        )
+        .await;
+    assert_eq!(sent.status, StatusCode::OK, "{:?}", sent.body);
+    let after = fixture
+        .send(Method::GET, "/api/tasks/T1/decisions?attempt=1", None)
+        .await;
+    assert_eq!(after.json()["decisions"][0]["answer"], "follow_up");
+    let recorded = fixture
+        .events()
+        .into_iter()
+        .filter(|event| {
+            matches!(&event.kind, EventKind::AskAnswered { ask, answer, .. }
+                if ask == "remark-1-d1" && answer == "follow-up task")
+        })
+        .count();
+    assert_eq!(recorded, 1, "the answer is in the log");
+
+    let again = fixture
+        .send(Method::POST, "/api/tasks/T1/remarks/answer", Some(answer))
+        .await;
+    assert_eq!(again.status, StatusCode::CONFLICT, "{:?}", again.body);
+    let unknown = fixture
+        .send(
+            Method::POST,
+            "/api/tasks/T1/remarks/answer",
+            Some(json!({"attempt": 1, "of": "finding", "index": 1, "answer": "fix_it"})),
+        )
+        .await;
+    assert_eq!(unknown.status, StatusCode::CONFLICT, "{:?}", unknown.body);
+}

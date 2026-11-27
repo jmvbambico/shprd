@@ -301,6 +301,14 @@ pub struct TaskDto {
     /// offered although its status is still failed.
     #[serde(default)]
     pub accepted_failure: bool,
+    /// Why landing would refuse this task right now (`rules::ready_to_land`):
+    /// no passing review, a failing hand-in check, a failed gate. Absent when
+    /// the task would land, or has already landed or been dropped. The Accept
+    /// button is offered disabled with this reason rather than recording an
+    /// approval that landing then refuses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub accept_blocked: Option<String>,
     /// When the task was added, ms since the Unix epoch.
     ///
     /// A board shows the newest work first and folds a run's old leftovers out
@@ -493,6 +501,115 @@ pub struct FindingDto {
     pub location: Option<String>,
     /// The full detail, including what to do about it.
     pub detail: String,
+}
+
+/// What the person may say about one finding or decision of a review.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export_to = "RemarkAnswerDto.ts")]
+pub enum RemarkAnswerDto {
+    /// Seen, and it is what the person wants.
+    AcceptedAsIs,
+    /// The agent should change it.
+    FixIt,
+    /// Not for this task: a new task takes it.
+    FollowUp,
+}
+
+impl From<shprd_core::review::RemarkAnswer> for RemarkAnswerDto {
+    fn from(answer: shprd_core::review::RemarkAnswer) -> Self {
+        use shprd_core::review::RemarkAnswer as A;
+        match answer {
+            A::AcceptedAsIs => Self::AcceptedAsIs,
+            A::FixIt => Self::FixIt,
+            A::FollowUp => Self::FollowUp,
+        }
+    }
+}
+
+impl From<RemarkAnswerDto> for shprd_core::review::RemarkAnswer {
+    fn from(answer: RemarkAnswerDto) -> Self {
+        match answer {
+            RemarkAnswerDto::AcceptedAsIs => Self::AcceptedAsIs,
+            RemarkAnswerDto::FixIt => Self::FixIt,
+            RemarkAnswerDto::FollowUp => Self::FollowUp,
+        }
+    }
+}
+
+/// A choice the worker disclosed, listed for the person to confirm on the
+/// "ready to land" card, apart from the review's findings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "DecisionDto.ts")]
+pub struct DecisionDto {
+    /// Its place in the review, counted from 1; what an answer names.
+    pub index: u32,
+    /// What the worker chose.
+    pub title: String,
+    /// Why it matters.
+    pub detail: String,
+    /// The person's answer, once there is one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub answer: Option<RemarkAnswerDto>,
+}
+
+impl From<shprd_core::review::DecisionToConfirm> for DecisionDto {
+    fn from(decision: shprd_core::review::DecisionToConfirm) -> Self {
+        Self {
+            index: decision.index,
+            title: decision.title,
+            detail: decision.detail,
+            answer: decision.answer.map(RemarkAnswerDto::from),
+        }
+    }
+}
+
+/// The decisions of one attempt's review, for the "ready to land" card.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "DecisionsDto.ts")]
+pub struct DecisionsDto {
+    /// The attempt whose review it is.
+    pub attempt: u32,
+    /// What the worker chose and said so, with the person's answers.
+    pub decisions: Vec<DecisionDto>,
+}
+
+/// Answer one finding or decision of a task's review.
+///
+/// The service records it as an event; the first answer to a remark stands.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "AnswerRemarkRequest.ts")]
+pub struct AnswerRemarkRequest {
+    /// The attempt whose review it is.
+    pub attempt: u32,
+    /// Whether it is a finding or a decision.
+    pub of: RemarkOfDto,
+    /// Which one, counted from 1.
+    pub index: u32,
+    /// What the person says about it.
+    pub answer: RemarkAnswerDto,
+}
+
+/// What kind of remark an answer is about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export_to = "RemarkOfDto.ts")]
+pub enum RemarkOfDto {
+    /// A defect the reviewer found.
+    Finding,
+    /// A choice the worker disclosed.
+    Decision,
+}
+
+impl AnswerRemarkRequest {
+    /// The remark this request names.
+    pub fn remark(&self) -> shprd_core::review::RemarkRef {
+        match self.of {
+            RemarkOfDto::Finding => shprd_core::review::RemarkRef::Finding(self.index),
+            RemarkOfDto::Decision => shprd_core::review::RemarkRef::Decision(self.index),
+        }
+    }
 }
 
 /// A review handed to a reviewer for an attempt.
@@ -1985,6 +2102,11 @@ pub(crate) fn exports() -> Result<Vec<(String, String)>, ts_rs::ExportError> {
         one::<CheckDto>()?,
         one::<GateDto>()?,
         one::<FindingDto>()?,
+        one::<RemarkAnswerDto>()?,
+        one::<RemarkOfDto>()?,
+        one::<DecisionDto>()?,
+        one::<DecisionsDto>()?,
+        one::<AnswerRemarkRequest>()?,
         one::<ReviewDto>()?,
         one::<AgentDto>()?,
         one::<NeedDto>()?,
@@ -2210,6 +2332,20 @@ mod tests {
             }
             other => panic!("expected a task.add, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn an_answer_request_names_a_known_remark_kind_only() {
+        let ok: AnswerRemarkRequest =
+            serde_json::from_str(r#"{"attempt":1,"of":"decision","index":2,"answer":"fix_it"}"#)
+                .unwrap();
+        assert_eq!(ok.remark(), shprd_core::review::RemarkRef::Decision(2));
+        assert!(
+            serde_json::from_str::<AnswerRemarkRequest>(
+                r#"{"attempt":1,"of":"banana","index":2,"answer":"fix_it"}"#
+            )
+            .is_err()
+        );
     }
 }
 

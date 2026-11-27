@@ -90,13 +90,12 @@ export function isLive(task) {
 /** The counts a badge or the status bar shows, over the live tasks. */
 export function counts(state, now = Date.now()) {
   const tally = { needs: 0, ready: 0, working: 0, done: 0, total: 0, open_asks: 0 };
-  const old = staleIds(state, now);
   for (const task of state?.tasks ?? []) {
     if (!isLive(task)) continue;
     tally.total += 1;
     const word = task?.derived?.status;
-    // An old leftover does not make the badge shout: it sits under "Older".
-    if (word === "needs_you") tally.needs += old.has(task.id) ? 0 : 1;
+    // A task that needs the person is always counted, however old (UXC-7).
+    if (word === "needs_you") tally.needs += 1;
     else if (word === "ready") tally.ready += 1;
     else if (word === "working" || word === "merging") tally.working += 1;
     else if (word === "done") tally.done += 1;
@@ -132,11 +131,12 @@ export function grouped(state) {
 export const STALE_MS = 3 * 60 * 60 * 1000;
 
 /** The words of a task that is open and waiting: it needs the person, or has not started. */
-const WAITING_WORDS = ["needs_you", "to_do", "scheduled", "queued"];
+// A task that needs the person is never old: it is waiting on them, not forgotten (UXC-7).
+const WAITING_WORDS = ["to_do", "scheduled", "queued"];
 
 /**
- * The ids of the tasks that are old leftovers: open (Needs you, or Queued and not
- * started) and untouched for [`STALE_MS`], plus a Queued task that waits on one of
+ * The ids of the tasks that are old leftovers: Queued and not started and
+ * untouched for [`STALE_MS`], plus a Queued task that waits on one of
  * them (it can never start while its dependency is stuck).
  *
  * A task with an open ask is never old: the person owes it an answer.
@@ -515,6 +515,39 @@ export function lastFailure(state) {
 }
 
 /**
+ * The newest decision card of a task: the highest `seq` among its cards that ask
+ * the person to choose. A notice only tells them something, so it never speaks
+ * for the task (the sidebar's line, a toast, a row's button). Null when none.
+ */
+export function newestDecision(state, taskId) {
+  let best = null;
+  for (const need of state?.needs ?? []) {
+    if (need?.task !== taskId || need?.kind === "notice") continue;
+    if (best === null || (need.seq ?? 0) >= (best.seq ?? 0)) best = need;
+  }
+  return best;
+}
+
+const CARD_ACTS = {
+  review: { id: "review", label: "Review", action: null },
+  retry: { id: "retry", label: "Retry", action: "task.retry" },
+  retry_review: { id: "retry_review", label: "Retry review", action: "task.review_again" },
+  resend_brief: { id: "resend_brief", label: "Resend brief", action: "task.resend_brief" },
+  drop: { id: "drop", label: "Drop", action: null },
+};
+
+/** A needs-you row's acts from its newest decision card, or null to use the default. */
+function cardActions(task, state) {
+  const drop = CARD_ACTS.drop;
+  const asked = (state?.asks ?? []).some((ask) => ask?.task === task.id && (ask?.options ?? []).length > 0);
+  if (asked) return [{ id: "answer", label: "Answer", action: null }, drop];
+  const card = newestDecision(state, task.id);
+  const primary = CARD_ACTS[(card?.actions ?? [])[0]];
+  if (!primary) return null;
+  return primary.id === "drop" ? [drop] : [{ ...primary }, drop];
+}
+
+/**
  * The one act a row offers, as `{id, label, action}` — or nothing.
  *
  * The verbs are the engine's, and a row offers one only where that verb would
@@ -527,10 +560,14 @@ export function lastFailure(state) {
  * Nothing is offered for a task that is merging, done or dropped: those are the
  * engine's or history's, and a button that always refuses is worse than none.
  */
-export function rowActions(task) {
+export function rowActions(task, state = null) {
   const word = task?.derived?.status;
   const status = task?.status;
   if (!isLive(task)) return [];
+  // A row that needs the person offers what its newest decision card offers: its
+  // primary button, or Answer for an ask with options, and Drop (UXC-7).
+  const card = word === "needs_you" && state ? cardActions(task, state) : null;
+  if (card) return card;
   // A task that is stuck (stopped, failed, waiting on the person) can be given up
   // from its row. Drop needs a reason, so it opens the card on its Drop step.
   const drop = status === "failed" || word === "needs_you" ? [{ id: "drop", label: "Drop", action: null }] : [];

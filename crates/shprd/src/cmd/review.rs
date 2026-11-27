@@ -514,27 +514,11 @@ fn listed(name: &str, items: &[String]) -> String {
 ///
 /// It describes exactly what [`shprd_core::event::Finding`] deserializes, so
 /// findings that satisfy the schema are findings a gate can read unchanged. An
-/// empty array is valid: a review that found nothing is a passing review.
+/// empty array is valid: a review that found nothing is a passing review. The
+/// object `{findings, decisions}` is valid too: decisions are the worker's
+/// disclosed choices, kept apart from the defects.
 pub fn findings_schema() -> Value {
-    json!({
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "title": "shprd review findings",
-        "type": "array",
-        "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["severity", "title", "detail"],
-            "properties": {
-                "severity": {
-                    "type": "string",
-                    "enum": ["critical", "major", "minor", "trivial"]
-                },
-                "title": { "type": "string", "minLength": 1 },
-                "location": { "type": "string" },
-                "detail": { "type": "string", "minLength": 1 }
-            }
-        }
-    })
+    shprd_core::review::report_schema()
 }
 
 /// The diff between `branch` and its merge base with `base`, run in `repo`.
@@ -1772,6 +1756,20 @@ pub fn review_again_for_tick(ctx: &Ctx, home: &Path, task: &str) -> Result<Strin
     start_review(ctx, home, task, true)
 }
 
+/// What the reviewer of `task`'s `attempt` wrote, for the service's answers and
+/// its "ready to land" card data; `None` when the file is absent or unreadable.
+pub fn report_for_service(
+    ctx: &Ctx,
+    home: &Path,
+    task: &str,
+    attempt: u32,
+) -> Option<shprd_core::review::ReviewReport> {
+    let env = ReviewEnv::build(ctx, Some(home)).ok()?;
+    let path = findings_path(&env.reviews_dir, &env.spawn.run, task, attempt);
+    let bytes = std::fs::read(&path).ok()?;
+    shprd_core::review::parse_report(&bytes, &path).ok()
+}
+
 /// One review start for the service: [`review`] with the verb's own arguments.
 fn start_review(ctx: &Ctx, home: &Path, task: &str, again: bool) -> Result<String, String> {
     let mux = spawn::real_mux();
@@ -2452,8 +2450,13 @@ project_dirs = []
         )
         .unwrap_or_else(|err| panic!("{err}"));
         assert_eq!(
-            schema["items"]["properties"]["severity"]["enum"][0],
+            schema["oneOf"][0]["items"]["properties"]["severity"]["enum"][0],
             "critical"
+        );
+        // A reviewer may also write `{findings, decisions}`.
+        assert_eq!(
+            schema["oneOf"][1]["properties"]["decisions"]["items"]["required"][0],
+            "title"
         );
 
         let brief = std::fs::read_to_string(&report.brief).unwrap_or_else(|err| panic!("{err}"));

@@ -206,7 +206,8 @@ test("a task row carries the word, the colour and the reason the service gave it
   assert.equal(t3.glyph, "dot");
   assert.equal(t3.needs, true);
   assert.equal(t3.ready, false);
-  assert.match(t3.sub, /the count badge overflows/);
+  // The newest decision card speaks for the task (UXC-7).
+  assert.match(t3.sub, /sending attempt 1 back/);
   assert.equal(t3.folder, "/tmp/sh55/shop");
 
   const t2 = rows.tasks.find((row) => row.id === "T2");
@@ -314,7 +315,9 @@ test("task looks are the tokens' words", () => {
 });
 
 test("a needs-you row says the card's words when the service has a card", () => {
-  assert.match(needWords(task("T3"), STATE), /the count badge overflows its row at ten/);
+  assert.match(needWords(task("T3"), STATE), /sending attempt 1 back/);
+  const withNotice = { tasks: STATE.tasks, needs: [...STATE.needs, { task: "T3", body: "FYI only", seq: 99, kind: "notice", actions: ["dismiss"] }] };
+  assert.match(needWords(task("T3"), withNotice), /sending attempt 1 back/, "a notice never speaks for the task");
   assert.equal(needWords(task("T1"), STATE), null);
   assert.equal(needWords(task("T3"), { tasks: STATE.tasks, needs: [] }), "the count badge overflows its row at ten");
 });
@@ -517,7 +520,7 @@ test("the news is the events a person acts on, each with the seq that made it", 
   const needs = items[1];
   assert.equal(needs.level, "warning");
   assert.equal(needs.title, "T3 · Needs you");
-  assert.match(needs.body, /the count badge overflows its row at ten/);
+  assert.match(needs.body, /sending attempt 1 back/);
   assert.notEqual(items[1].id, items[3].id, "two cards are two toasts");
 });
 
@@ -1061,6 +1064,16 @@ test("a failed task a person accepted offers Accept", () => {
   assert.equal(verbs(accepted, "checks").accept, false);
 });
 
+test("Accept is offered disabled, with the reason, where landing would refuse", () => {
+  const why = "T2 was handed in but no review was requested";
+  const blocked = { ...boardTask("T2"), accept_blocked: why };
+  const offered = verbs(blocked, "ask");
+  assert.equal(offered.accept, true, "the button is still on the card");
+  assert.equal(offered.acceptBlocked, why);
+  assert.match(offered.note, /Can't accept yet: T2 was handed in/);
+  assert.equal(verbs(boardTask("T2"), "ask").acceptBlocked, null);
+});
+
 test("the card offers Accept only where a merge policy asks", () => {
   const ready = boardTask("T2");
   assert.equal(verbs(ready, "ask").accept, true);
@@ -1099,7 +1112,7 @@ test("the card offers Accept only where a merge policy asks", () => {
   });
   // A landed or dropped task is not a decision any more.
   for (const id of ["T1", "T4"]) {
-    assert.deepEqual(verbs(boardTask(id), "ask"), { accept: false, sendBack: false, drop: false, note: null });
+    assert.deepEqual(verbs(boardTask(id), "ask"), { accept: false, acceptBlocked: null, sendBack: false, drop: false, note: null });
   }
   assert.equal(whereNow(boardTask("T1")), "Landed: its work is in the base branch.");
   assert.equal(whereNow(boardTask("T4")), "Landed: its work is in the base branch.");
@@ -1393,14 +1406,16 @@ const aged = (id, word, hours, extra = {}) => ({
 test("an open task untouched for hours is old; a fresh one, a working one and a done one are not", () => {
   const board = {
     tasks: [
-      aged("OLD1", "needs_you", 9),
+      aged("OLD1", "to_do", 9),
       aged("OLD2", "queued", 5),
       aged("NEW", "needs_you", 0.1),
+      aged("ASKED", "needs_you", 9),
       aged("RUN", "working", 9),
       aged("DONE", "done", 9),
-      { ...aged("NOTIME", "needs_you", 9), touched_at_ms: undefined },
+      { ...aged("NOTIME", "to_do", 9), touched_at_ms: undefined },
     ],
   };
+  // A needs-you task is never old, however long it has waited (UXC-7).
   assert.deepEqual([...staleIds(board, NOW)].sort(), ["OLD1", "OLD2"]);
   assert.equal(STALE_MS, 3 * HOURS);
 });
@@ -1436,7 +1451,7 @@ test("a task with an open review-out ask is never old: it badges, stays on top, 
 test("a queued task waiting on an old task is old with it, however new", () => {
   const board = {
     tasks: [
-      aged("OLD", "needs_you", 9),
+      aged("OLD", "to_do", 9),
       aged("BEHIND", "to_do", 0.1, { deps: ["OLD"] }),
       aged("BEHIND2", "to_do", 0.1, { deps: ["BEHIND"] }),
       aged("FREE", "to_do", 0.1),
@@ -1448,31 +1463,50 @@ test("a queued task waiting on an old task is old with it, however new", () => {
 test("old tasks fold into one Older group at the bottom; new ones are on top, newest first", () => {
   const board = {
     tasks: [
-      aged("OLD1", "needs_you", 9),
+      aged("OLD1", "to_do", 9),
       aged("OLD2", "to_do", 8),
+      aged("ASKED", "needs_you", 9),
       aged("N1", "to_do", 0.5),
       aged("N2", "to_do", 0.1),
       aged("D1", "done", 20),
     ],
   };
   const view = listView(board, { now: NOW });
-  assert.deepEqual(view.groups.map((g) => g.key), ["to_do", "older"]);
-  assert.deepEqual(view.groups[0].tasks.map((t) => t.id), ["N2", "N1"], "newest first");
-  const older = view.groups[1];
+  assert.deepEqual(view.groups.map((g) => g.key), ["you", "to_do", "older"]);
+  assert.deepEqual(view.groups[1].tasks.map((t) => t.id), ["N2", "N1"], "newest first");
+  const older = view.groups[2];
   assert.equal(older.shut, true, "folded until opened");
   assert.equal(older.stale, true);
   assert.deepEqual([...older.ids].sort(), ["OLD1", "OLD2"]);
   assert.equal(view.doneLine.label, "1 done");
-  assert.equal(listView(board, { now: NOW, olderOpen: true }).groups[1].shut, false);
+  assert.equal(listView(board, { now: NOW, olderOpen: true }).groups[2].shut, false);
   // A search still finds an old task in place.
   const found = listView(board, { now: NOW, query: "OLD1" });
   assert.deepEqual(found.groups.flatMap((g) => g.tasks.map((t) => t.id)), ["OLD1"]);
-  assert.equal(found.groups[0].key, "you");
+  assert.equal(found.groups[0].key, "to_do");
 });
 
-test("an old needs-you task does not light the Needs you badge", () => {
+test("an old needs-you task is counted in the badge and never sits under Older", () => {
   const board = { tasks: [aged("OLD", "needs_you", 9), aged("NEW", "needs_you", 0.1)] };
-  assert.equal(counts(board, NOW).needs, 1);
+  assert.equal(counts(board, NOW).needs, 2);
+  const view = listView(board, { now: NOW });
+  assert.deepEqual(view.groups.map((g) => g.key), ["you"]);
+  assert.deepEqual(view.groups[0].tasks.map((t) => t.id).sort(), ["NEW", "OLD"]);
+});
+
+test("UXC-7: a needs-you row offers its newest decision card's button, and Drop", () => {
+  const t = { ...aged("T", "needs_you", 9), status: "failed" };
+  const state = (needs, asks = []) => ({ tasks: [t], needs, asks });
+  const ids = (s) => rowActions(t, s).map((a) => a.id);
+  const card = (seq, actions, kind = "decision") => ({ task: "T", body: "b", seq, kind, actions });
+  assert.deepEqual(ids(state([card(1, ["retry"]), card(2, ["resend_brief"])])), ["resend_brief", "drop"]);
+  assert.equal(rowActions(t, state([card(2, ["resend_brief"])]))[0].action, "task.resend_brief");
+  // A newer notice never speaks for the task.
+  assert.deepEqual(ids(state([card(2, ["resend_brief"]), card(5, ["dismiss"], "notice")])), ["resend_brief", "drop"]);
+  assert.deepEqual(ids(state([card(2, ["drop"])])), ["drop"]);
+  assert.deepEqual(ids(state([card(2, ["retry"])], [{ task: "T", id: 1, options: ["a", "b"] }])), ["answer", "drop"]);
+  // No state, or no card: the default acts.
+  assert.deepEqual(ids(state([])), ["retry", "drop"]);
 });
 
 test("SHPR-69: another product's Assistant tab is not a pill in shprd's tab bar", () => {

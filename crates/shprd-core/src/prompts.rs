@@ -335,8 +335,19 @@ const REVIEWER_M11_SCOPE: &str =
 const REVIEWER_M11_SCOPE_DIGEST: &str =
     "859869ecc557b7a1570bb847b00609aa546b44171a1c88e0a45e04ac91febd7f";
 
+/// The reviewer wording before disclosed worker decisions were kept apart from
+/// the findings: a choice the worker named in its summary was filed as a defect.
+#[cfg(test)]
+const REVIEWER_M11_PRE_DECISIONS: &str =
+    include_str!("../../../data/templates/history/reviewer-m11-pre-decisions.md");
+
+/// The SHA-256 of [`REVIEWER_M11_PRE_DECISIONS`].
+const REVIEWER_M11_PRE_DECISIONS_DIGEST: &str =
+    "b6acca26b2baeaff73d81987fdad635f97b9244494fbd96c0620345be1e81dde";
+
 /// The reviewer's retired defaults.
 const REVIEWER_OLD: &[&str] = &[
+    REVIEWER_M11_PRE_DECISIONS_DIGEST,
     REVIEWER_M9_ASKS_DIGEST,
     REVIEWER_PRE_IDENTITY_DIGEST,
     REVIEWER_M11_LONG_DIGEST,
