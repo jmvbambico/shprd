@@ -324,3 +324,26 @@ test("stripItems has one item per task with Open or the single button", () => {
   assert.deepEqual(items.map((i) => [i.task, i.label]), [["T1", STRIP_OPEN], ["T2", "go"]]);
   assert.equal(items[1].button.answer, "go");
 });
+
+import { proposalLabel } from "../mods/lib/asks.js";
+import { extraActions } from "../mods/lib/board.js";
+
+test("a coordinator proposal's choices read Confirm and Decline, and answer as written", () => {
+  const ask = { id: "propose-drop-1", task: "T1", options: ["confirm drop", "leave it"], kind: "question", text: "x\nreason: y" };
+  assert.equal(proposalLabel(ask, "confirm drop"), "Confirm");
+  assert.equal(proposalLabel(ask, "leave it"), "Decline");
+  const card = cards({ asks: [ask], needs: [] }, { asks: [ask] }).find((c) => c.ask === "propose-drop-1");
+  assert.deepEqual(card?.buttons.map((b) => [b.label, b.answer]), [["Confirm", "confirm drop"], ["Decline", "leave it"]]);
+  // Any other ask keeps its words.
+  assert.equal(proposalLabel({ id: "q1" }, "leave it"), "leave it");
+});
+
+test("the board offers Reopen, Override and Sync only where they apply", () => {
+  const handedIn = { id: "T1", status: "reported", derived: { status: "ready" } };
+  assert.ok(extraActions(handedIn).some((a) => a.id === "reopen" && a.action === "task.reopen"));
+  const gated = { id: "T2", status: "failed", accept_blocked: "gate lint failed", derived: { status: "needs_you" } };
+  assert.ok(extraActions(gated).some((a) => a.id === "override" && a.action === "task.override"));
+  assert.ok(!extraActions({ ...gated, accepted_failure: true }).some((a) => a.id === "override"));
+  assert.deepEqual(extraActions({ id: "T3", status: "working", derived: { status: "working" } }), []);
+  assert.ok(extraActions({ id: "T4", status: "queued", derived: { reason: "behind main: sync" } }).some((a) => a.action === "run.sync"));
+});

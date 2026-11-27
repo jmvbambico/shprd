@@ -575,7 +575,29 @@ const CARD_ACTS = {
   retry_review: { id: "retry_review", label: "Retry review", action: "task.review_again" },
   resend_brief: { id: "resend_brief", label: "Resend brief", action: "task.resend_brief" },
   drop: { id: "drop", label: "Drop", action: null },
+  reopen: { id: "reopen", label: "Reopen", action: "task.reopen" },
+  override: { id: "override", label: "Override", action: "task.override" },
+  sync: { id: "sync", label: "Sync", action: "run.sync" },
 };
+
+/** The reason an Override pressed on the board records: the person's own word. */
+export const OVERRIDE_REASON = "overridden from the board";
+
+/**
+ * The extra acts a task offers where the service would accept them: Reopen for
+ * a handed-in task, Override for one whose failed gate blocks landing, Sync for
+ * one behind its base. Only the ones that apply; Readmit is an agent's, so it is
+ * the proposal card's.
+ */
+export function extraActions(task) {
+  const extra = [];
+  const status = task?.status;
+  if (status === "reported" || status === "passed") extra.push({ ...CARD_ACTS.reopen });
+  const blocked = String(task?.accept_blocked ?? "");
+  if (!task?.accepted_failure && /gate/i.test(blocked)) extra.push({ ...CARD_ACTS.override });
+  if (/behind|out of date|sync/i.test(String(task?.derived?.reason ?? ""))) extra.push({ ...CARD_ACTS.sync });
+  return extra;
+}
 
 /** A needs-you row's acts from its newest decision card, or null to use the default. */
 function cardActions(task, state) {

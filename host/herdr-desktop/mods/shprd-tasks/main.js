@@ -39,6 +39,8 @@ import {
   newTask,
   paneState,
   rowActions,
+  extraActions as more,
+  OVERRIDE_REASON,
   secondLine,
   taskIds,
 } from "./lib/board.js";
@@ -456,7 +458,14 @@ export default class Tasks extends View {
     const sent = await press(this, {
       kind: action,
       tasks: [task.id],
-      send: () => this.client.action({ kind: action, task: task.id }),
+      send: () =>
+        this.client.action(
+          action === "task.override"
+            ? { kind: action, task: task.id, reason: OVERRIDE_REASON }
+            : action === "run.sync"
+              ? { kind: action }
+              : { kind: action, task: task.id },
+        ),
     });
     if (sent.ignored) return;
     if (!sent.ok) this.actionError = sent.error;
@@ -1260,7 +1269,9 @@ export default class Tasks extends View {
         el.child(this.act(t, task, acts[0])),
       )
       // A second act (Drop beside Retry) is a pill of its own.
-      .when(acts.length > 1, (el) => el.child(this.act(t, task, acts[1])));
+      .when(acts.length > 1, (el) => el.child(this.act(t, task, acts[1])))
+      // Reopen, Override and Sync ride in the free slot where they apply.
+      .when(acts.length < 2 && more(task).length > 0, (el) => el.child(this.act(t, task, more(task)[0])));
   }
 
   /**

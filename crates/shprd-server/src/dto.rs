@@ -1288,6 +1288,31 @@ pub enum Action {
         /// The task whose review should start again.
         task: String,
     },
+    /// Override the integrate-after-failed-gate rule for a task, as `shprd override` does.
+    ///
+    /// The person's word that a task whose gate failed may land anyway. The rules
+    /// decide (human only, a known rule, a reason); a refusal is shown on the card.
+    #[serde(rename = "task.override")]
+    TaskOverride {
+        /// The task whose failed gate is overridden.
+        task: String,
+        /// Why the person lets it land.
+        reason: String,
+    },
+    /// Mark an agent usable again after it ran dry, as `shprd readmit` does.
+    #[serde(rename = "agent.readmit")]
+    AgentReadmit {
+        /// The agent (a program, or `program/model`).
+        agent: String,
+        /// Why it can be used again.
+        reason: String,
+    },
+    /// Merge the base branch into the integration worktree, as `shprd sync` does.
+    ///
+    /// It runs the binary's own verb, so a service without one refuses with
+    /// the reason.
+    #[serde(rename = "run.sync")]
+    RunSync {},
 }
 
 impl Action {
@@ -1321,6 +1346,12 @@ impl Action {
         "task_review_again",
         "need.dismiss",
         "need_dismiss",
+        "task.override",
+        "task_override",
+        "agent.readmit",
+        "agent_readmit",
+        "run.sync",
+        "run_sync",
     ];
 
     /// Whether this action undoes something a person cannot get back, or lands
@@ -1353,6 +1384,9 @@ impl Action {
             Self::TaskResendBrief { .. } => "task.resend_brief",
             Self::TaskReviewAgain { .. } => "task.review_again",
             Self::NeedDismiss { .. } => "need.dismiss",
+            Self::TaskOverride { .. } => "task.override",
+            Self::AgentReadmit { .. } => "agent.readmit",
+            Self::RunSync { .. } => "run.sync",
         }
     }
 
@@ -1377,6 +1411,9 @@ impl Action {
                 "task_resend_brief" => Some("task.resend_brief"),
                 "task_review_again" => Some("task.review_again"),
                 "need_dismiss" => Some("need.dismiss"),
+                "task_override" => Some("task.override"),
+                "agent_readmit" => Some("agent.readmit"),
+                "run_sync" => Some("run.sync"),
                 _ => None,
             };
             if let (Some(canonical), Some(object)) = (canonical, value.as_object_mut()) {

@@ -32,6 +32,7 @@ import { closeOverlay, focused, layout, nextCommand, props, run, setShared, shar
 
 import { RepoCache, attach, downNotice, press, reason, singleFlight } from "./lib/client.js";
 import { finishReview, startReview } from "./lib/optimistic.js";
+import { OVERRIDE_REASON, extraActions as more } from "./lib/board.js";
 import {
   WORDS,
   card,
@@ -932,6 +933,15 @@ export default class Accept extends View {
     if (wired.drop) {
       buttons.push(
         this.button(t, "drop", WORDS.dropOpen, false, () => this.openDrop("footer")),
+      );
+    }
+    // Reopen and Override where they apply; a refusal shows on the card as the other verbs' do.
+    for (const act of more(task)) {
+      if (act.action === "run.sync") continue;
+      buttons.push(
+        this.button(t, act.id, this.busy === act.action ? `${act.label}…` : act.label, false, () =>
+          this.verb(act.action, act.action === "task.override" ? { reason: OVERRIDE_REASON } : {}),
+        ),
       );
     }
     if (wired.sendBack) {
