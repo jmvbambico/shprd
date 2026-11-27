@@ -1068,6 +1068,9 @@ exit 1
 /// for a running one again.
 const RESELECT_AFTER: Duration = Duration::from_secs(5);
 
+/// The adapter held, whether it was a running one, and when it was picked.
+type Held = (std::sync::Arc<dyn Host>, bool, std::time::Instant);
+
 type Picker = Box<dyn Fn() -> (Resolution, std::sync::Arc<dyn Host>) + Send + Sync>;
 
 /// The host a long-lived service holds.
@@ -1081,7 +1084,7 @@ type Picker = Box<dyn Fn() -> (Resolution, std::sync::Arc<dyn Host>) + Send + Sy
 /// desktop comes up reaches it.
 pub struct Reselecting {
     pick: Picker,
-    slot: Mutex<Option<(std::sync::Arc<dyn Host>, bool, std::time::Instant)>>,
+    slot: Mutex<Option<Held>>,
     retry: Duration,
 }
 
