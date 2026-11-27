@@ -444,9 +444,30 @@ pub fn spawn(
         &tab_id,
     );
     if let Err(err) = record_attempt(env, &task.id, attempt, &pick, &created) {
-        close_tab(mux, &tab_id);
-        discard_worktree(env, &created);
-        return Err(err);
+        // Atomic: the attempt is recorded with the window up, or the window is
+        // closed and nothing is left. A window the host will not close is a live
+        // worker, so it is recorded (once more) and kept, never orphaned.
+        match unwind_unrecorded(
+            mux,
+            &tab_id,
+            || record_attempt(env, &task.id, attempt, &pick, &created),
+            err,
+        ) {
+            Unwound::Closed(err) => {
+                discard_worktree(env, &created);
+                return Err(err);
+            }
+            Unwound::Recorded => {}
+            Unwound::Stranded(err) => {
+                // The worktree and the tab record stay: the next start finds the
+                // live worker there and records it.
+                return Err(CliError::other(anyhow!(
+                    "the worker window for {} is open but its attempt could not be recorded \
+                     ({err}); it was kept, and the next start records it",
+                    task.id
+                )));
+            }
+        }
     }
     // What said the program was ready goes beside the tab record, so a person
     // reading the run can tell a host that reported the agent from a program
@@ -471,6 +492,39 @@ pub fn spawn(
         warnings,
         replaced,
     })
+}
+
+/// What became of a window whose attempt could not be recorded.
+enum Unwound {
+    /// The window is closed: nothing is left running.
+    Closed(CliError),
+    /// The window would not close, but the attempt was recorded on a retry.
+    Recorded,
+    /// The window would not close and the attempt still cannot be recorded.
+    Stranded(CliError),
+}
+
+/// Undoes a window opened for an attempt that was never recorded.
+///
+/// The window closes first. A host that refuses leaves a live worker, so the
+/// record is tried again, because a worker with an attempt is acceptable and one
+/// without is the stranded start this guards against.
+fn unwind_unrecorded(
+    mux: &dyn Host,
+    tab: &shprd_mux::TabId,
+    mut record: impl FnMut() -> Result<(), CliError>,
+    err: CliError,
+) -> Unwound {
+    match mux.close_tab(tab) {
+        Ok(()) | Err(shprd_mux::MuxError::NotFound(_)) => Unwound::Closed(err),
+        Err(close) => {
+            eprintln!("warning: could not close tab {}: {close}", tab.as_str());
+            match record() {
+                Ok(()) => Unwound::Recorded,
+                Err(retry) => Unwound::Stranded(retry),
+            }
+        }
+    }
 }
 
 /// Records the worker a lost start left running, when there is one.
@@ -4301,6 +4355,38 @@ project_dirs = []
             1,
             "the attempt is recorded"
         );
+    }
+
+    #[test]
+    fn a_window_that_will_not_close_keeps_its_attempt_instead_of_being_orphaned() {
+        let tab = shprd_mux::TabId::new("t1");
+        let fail = || CliError::other(anyhow!("log busy"));
+        // The host closes it: nothing is left, and the original error stands.
+        let mux = FakeMux::default();
+        assert!(matches!(
+            unwind_unrecorded(&mux, &tab, || Ok(()), fail()),
+            Unwound::Closed(_)
+        ));
+        // The host refuses and the retry records: the worker is kept recorded.
+        let mut refusing = FakeMux::default();
+        refusing.failing_tab_closes(None, "held");
+        let mut tries = 0;
+        let out = unwind_unrecorded(
+            &refusing,
+            &tab,
+            || {
+                tries += 1;
+                Ok(())
+            },
+            fail(),
+        );
+        assert!(matches!(out, Unwound::Recorded));
+        assert_eq!(tries, 1);
+        // Neither works: the worker is reported as kept, never silently lost.
+        assert!(matches!(
+            unwind_unrecorded(&refusing, &tab, || Err(fail()), fail()),
+            Unwound::Stranded(_)
+        ));
     }
 
     #[test]
