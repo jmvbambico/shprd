@@ -29,7 +29,7 @@ mods_for() {
     client.js) echo "shprd-models shprd-status shprd-tasks shprd-accept shprd-task-pr shprd-settings shprd-chat shprd-tabs shprd-pane shprd-chrome shprd-toasts shprd-spaces shprd-menu shprd-new-menu shprd-jump shprd-agents shprd-task-view" ;;
     optimistic.js) echo "shprd-models shprd-status shprd-tasks shprd-accept shprd-task-pr shprd-settings shprd-chat shprd-tabs shprd-pane shprd-chrome shprd-toasts shprd-spaces shprd-menu shprd-new-menu shprd-jump shprd-agents shprd-task-view" ;;
     watch.js) echo "shprd-tasks shprd-chat shprd-status shprd-spaces shprd-toasts shprd-accept shprd-task-pr shprd-agents shprd-task-view" ;;
-    spaces.js) echo "shprd-spaces shprd-toasts shprd-jump shprd-tasks shprd-accept shprd-chat shprd-pane" ;;
+    spaces.js) echo "shprd-status shprd-spaces shprd-toasts shprd-jump shprd-tasks shprd-accept shprd-chat shprd-pane" ;;
     newspace.js) echo "shprd-newspace" ;;
     tree.js) echo "shprd-spaces shprd-agents shprd-tasks shprd-accept shprd-toasts shprd-task-view" ;;
     accept.js) echo "shprd-accept shprd-toasts shprd-task-view" ;;
@@ -41,7 +41,7 @@ mods_for() {
     menu.js) echo "shprd-menu shprd-new-menu shprd-pane shprd-tabs shprd-tasks" ;;
     jump.js) echo "shprd-jump" ;;
     keybinds.js) echo "shprd-keybinds" ;;
-    asks.js) echo "shprd-chat" ;;
+    asks.js) echo "shprd-chat shprd-status" ;;
     chat.js) echo "shprd-chat shprd-pane" ;;
     *) echo "no mod list for $1" >&2; exit 2 ;;
   esac

@@ -461,3 +461,44 @@ export function forSpace(list, space) {
   const wanted = space === "coordinator" ? null : space;
   return (list ?? []).filter((card) => (card.task ?? null) === wanted);
 }
+
+/**
+ * The card the status bar's *Needs you* takes a person to: the oldest waiting
+ * item. The service lists asks and escalations oldest first, and [`cards`] keeps
+ * that order (asks, then escalations), so the first card is the oldest; a notice
+ * only tells, so it is taken only when nothing else waits. Null when nothing does.
+ */
+export function oldestCard(state, asks = null) {
+  const list = cards(state, asks ?? { asks: state?.asks ?? [] });
+  return list.find((card) => !card.notice) ?? list[0] ?? null;
+}
+
+/** The words of the strip's button for a card that has no single action. */
+export const STRIP_OPEN = "Open";
+
+/**
+ * The needs-you strip of the coordinator's chat: one item per task that has a
+ * card waiting (a task's first one), each with `Open` or, when the card has
+ * exactly one button, that button. Empty when no task has an ask or a decision.
+ *
+ * `titles` is a `task id -> title` lookup for the line's words.
+ */
+export function stripItems(list, titles = new Map()) {
+  const seen = new Set();
+  const out = [];
+  for (const card of list ?? []) {
+    if (!card.task || card.notice || seen.has(card.task)) continue;
+    seen.add(card.task);
+    const only = (card.buttons ?? []).length === 1 && !card.buttons[0].confirm ? card.buttons[0] : null;
+    out.push({
+      id: card.id,
+      task: card.task,
+      title: titles.get(card.task) ?? "",
+      text: card.text,
+      card,
+      button: only,
+      label: only ? only.label : STRIP_OPEN,
+    });
+  }
+  return out;
+}

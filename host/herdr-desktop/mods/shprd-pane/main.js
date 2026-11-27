@@ -29,9 +29,9 @@
 
 import { View, div, image, svg } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { exec, hc, home, openOverlay, panes, props, run, setShared, spaces, terminals, theme } from "herdr";
+import { exec, hc, home, openOverlay, panes, props, run, setShared, shared, spaces, terminals, theme } from "herdr";
 
-import { CHAT_MOD, PARK_LABEL, agentLabel, chatLabel, endAgent, paneChat } from "./lib/chat.js";
+import { CHAT_MOD, PARK_LABEL, TERMINAL_KEY, agentLabel, chatLabel, endAgent, paneChat } from "./lib/chat.js";
 import { menuHeight, MENU, paneMenu } from "./lib/menu.js";
 import { button, iconFile, segmented } from "./lib/panel.js";
 import { RADIUS, TEXT } from "./lib/tokens.js";
@@ -63,6 +63,26 @@ async function app(name, args) {
 const COMPACT_BELOW = 360;
 
 export default class Pane extends View {
+  init(_props, cx) {
+    this.cx = cx;
+    this.terminalSeen = shared(TERMINAL_KEY)?.at ?? null;
+    // The chat asks for its agent's terminal (`shprd.pane.terminal`, from its "Show
+    // terminal" button); a header has no command of its own to be called, so it looks.
+    cx.timer.every(500, (own) => this.takeTerminalRequest(own));
+  }
+
+  /** Switches this pane to Terminal when its chat asked for it. */
+  takeTerminalRequest(cx) {
+    const want = shared(TERMINAL_KEY);
+    if (!want || want.at === this.terminalSeen) return;
+    this.terminalSeen = want.at;
+    if (Date.now() - want.at > 10_000) return;
+    const wired = props();
+    const self = panes().find((p) => p.pane === wired?.pane);
+    const view = paneChat({ pane: self, terminals: terminals(), spaces: spaces() });
+    if (view.chatMode && (view.space ?? "coordinator") === want.space) this.toTerminal(wired.pane, view, cx);
+  }
+
   /** The folder as a person writes it: `~` for home and `~/a/b` under it. */
   short(folder) {
     if (!folder) return "";
