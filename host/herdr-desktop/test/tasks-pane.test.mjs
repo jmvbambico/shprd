@@ -9,6 +9,8 @@ import test, { afterEach } from "node:test";
 import assert from "node:assert/strict";
 
 import * as herdr from "herdr";
+import { record, walk } from "gpui-kit";
+import { inputState } from "./stub-gpui.js";
 import Tasks from "../mods/shprd-tasks/main.js";
 import { RepoCache } from "../mods/lib/client.js";
 import { paneState } from "../mods/lib/board.js";
@@ -124,5 +126,54 @@ test("a refused verb rolls the row back and says why in one line", async () => {
   assert.equal(view.state.tasks[0].derived.status, "working", "back to the true state");
   assert.equal(view.state.tasks[0].pending, undefined);
   assert.match(view.actionError, /Stop T1: nope/);
+  herdr.SHARED.clear();
+});
+
+test("the Tasks pane draws an old review-out task and its Needs you badge counts the open ask", () => {
+  herdr.SHARED.clear();
+  herdr.setSpaces([{ folder: "/work/shop", active: true }]);
+  const view = pane();
+  Object.assign(view, {
+    shut: new Set(),
+    filter: "all",
+    doneOpen: false,
+    olderOpen: false,
+    allDone: false,
+    groupBy: "you",
+    chips: { primary: [], more: [] },
+    view: "tasks",
+    clearing: null,
+    adding: false,
+    searching: false,
+    query: inputState({ placeholder: "Filter tasks" }),
+    handle: {},
+  });
+  const old = Date.now() - 20 * 60 * 60 * 1000;
+  const mk = (id) => ({
+    id,
+    title: `task ${id}`,
+    status: "queued",
+    derived: { status: "needs_you" },
+    added_at_ms: old,
+    touched_at_ms: old,
+  });
+  view.cache.set("/work/shop", {
+    seq: 1,
+    tasks: [mk("OUT"), mk("OLD")],
+    asks: [{ id: "review-out-2", task: "OUT", kind: "question", text: "OUT: review failed", options: ["retry with another round", "take it as it is", "drop it"] }],
+    needs: [{ seq: 1, task: "OUT", body: "OUT: review failed", default_action: "x", kind: "decision", actions: ["review", "drop"] }],
+  });
+  view.sync();
+  record(true);
+  let nodes;
+  try {
+    nodes = walk(view.render());
+  } finally {
+    record(false);
+  }
+  const words = nodes.flatMap((node) => node.kids.filter((kid) => typeof kid === "string"));
+  assert.ok(words.includes("1"), "the Needs you badge counts the asking task");
+  assert.ok(words.some((w) => w.includes("task OUT")), "the asking task's row is drawn");
+  assert.ok(!words.some((w) => w.includes("task OLD")), "the unasked old task stays folded away");
   herdr.SHARED.clear();
 });

@@ -1017,3 +1017,29 @@ test("a question answered but still pending after the grace comes back", async (
     Date.now = realNow;
   }
 });
+
+test("an open review-out ask draws a card with its three answers, through the chat pane's renderer", async () => {
+  const ask = {
+    id: "review-out-2",
+    task: "OUT",
+    kind: "question",
+    text: "OUT: its review failed; answer the card `review-out-2`",
+    options: ["retry with another round", "take it as it is", "drop it"],
+  };
+  const board = { tasks: [{ id: "OUT", derived: { status: "needs_you" } }], asks: [ask], needs: [] };
+  const [made] = cardsOf(board, { asks: [ask] }).filter((card) => card.task === "OUT");
+  assert.ok(made, "the open ask makes a card");
+  const { view } = panel();
+  record(true);
+  let nodes;
+  try {
+    nodes = walk(view.card(herdr.theme(), { red: "#f00", amber: "#fa0", green: "#0f0" }, made));
+  } finally {
+    record(false);
+  }
+  const words = nodes.flatMap((node) => node.kids.filter((kid) => typeof kid === "string")).join("\n");
+  for (const choice of ["retry with another round", "take it as it is", "drop it"]) {
+    assert.ok(words.includes(choice), `the drawn card offers "${choice}"`);
+  }
+  assert.ok(nodes.some((node) => node.idv === `chat-card-${made.id}`), "the card is drawn");
+});

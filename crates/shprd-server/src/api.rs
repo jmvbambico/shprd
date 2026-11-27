@@ -906,13 +906,16 @@ async fn answer(State(state): State<AppState>, body: Bytes) -> Result<Json<AskRe
     let actor = state.actor.clone();
     let hub = state.hub.clone();
     let after_write = state.after_write.clone();
+    // A stuck review's `review again` runs the engine's closure, so the answer
+    // route carries the service's engine like every other action does.
+    let engine = state.engine.clone();
     let reply = blocking(move || {
         let ctx = actions::Context {
             repo: &repo,
             actor: &actor,
             hub: &hub,
             after_write: after_write.as_ref(),
-            engine: None,
+            engine: engine.as_ref(),
             merge: None,
         };
         actions::answer_ask(&ctx, &body.task, &body.ask, &body.answer)
