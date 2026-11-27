@@ -135,7 +135,8 @@ export const STALE_MS = 3 * 60 * 60 * 1000;
 const WAITING_WORDS = ["to_do", "scheduled", "queued"];
 
 /**
- * The ids of the tasks that are old leftovers: Queued and not started and untouched for [`STALE_MS`], plus a Queued task that waits on one of
+ * The ids of the tasks that are old leftovers: Queued and not started and
+ * untouched for [`STALE_MS`], plus a Queued task that waits on one of
  * them (it can never start while its dependency is stuck).
  *
  * A task the service gave no `touched_at_ms` (an older service) is never old, and
