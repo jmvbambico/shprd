@@ -9,6 +9,11 @@
 //! see a half-merged tree as if it were a result. So they all take this lock:
 //! one run, one writer, at a time. A dry run - `janitor` without `--apply`,
 //! `status`, `brief` - writes nothing and judges nothing, so it takes none.
+//!
+//! The lock's file and its name live in [`shprd_git::integrate`], because the
+//! service's idle sweep takes the same one: a sweep that detached `HEAD` under a
+//! landing holding this lock would land the work on a detached head. One
+//! definition, so a verb and the sweep can never wait on two different files.
 
 use std::path::{Path, PathBuf};
 
@@ -22,8 +27,8 @@ use crate::ctx::CliError;
 /// is held by this process and not by a stray directory or pid file: the OS
 /// drops it when the process exits, however it exits.
 pub struct RunLock {
-    /// The open file the lock sits on. Closing it releases the lock.
-    _file: std::fs::File,
+    /// The lock [`shprd_git::integrate`] took. Closing its file releases it.
+    _held: shprd_git::integrate::RunLock,
 }
 
 /// Takes the run's integration lock, blocking until it is free.
@@ -32,8 +37,20 @@ pub struct RunLock {
 /// same time, and both would see the head the other is about to move. A caller
 /// therefore takes this before it reads the head, so whatever landed while it
 /// waited is part of what it works on.
+///
+/// # Errors
+///
+/// Fails when the lock file cannot be opened or locked.
 pub fn lock_run(home: &Path, repo_name: &str, run: &str) -> Result<RunLock, CliError> {
-    take(lock_path(home, repo_name, run))
+    let held = shprd_git::integrate::lock_run(home, repo_name, run)
+        .with_context(|| {
+            format!(
+                "locking {}",
+                shprd_git::integrate::lock_path(home, repo_name, run).display()
+            )
+        })
+        .map_err(CliError::other)?;
+    Ok(RunLock { _held: held })
 }
 
 /// Takes the run's start lock, blocking until it is free.
@@ -65,17 +82,11 @@ fn take(path: PathBuf) -> Result<RunLock, CliError> {
     file.lock()
         .with_context(|| format!("locking {}", path.display()))
         .map_err(CliError::other)?;
-    Ok(RunLock { _file: file })
-}
-
-/// The file the run's lock sits on.
-///
-/// The repository name and run id are in the name so two repos, or two runs of
-/// one repo, never wait on each other.
-fn lock_path(home: &Path, repo_name: &str, run: &str) -> PathBuf {
-    home.join(".shprd")
-        .join("locks")
-        .join(format!("{repo_name}-{run}-int.lock"))
+    // The start lock is the CLI's own: no verb outside this binary reads it, so
+    // it keeps its own handle rather than borrowing the integration lock's.
+    Ok(RunLock {
+        _held: shprd_git::integrate::RunLock::from_locked(file),
+    })
 }
 
 /// The file the run's start lock sits on.
@@ -107,14 +118,24 @@ mod tests {
     #[test]
     fn the_lock_file_is_named_for_the_repo_and_the_run() {
         let (_temp, home) = home();
-        let first = lock_path(&home, "repo", "r1");
-        let other_run = lock_path(&home, "repo", "r2");
-        let other_repo = lock_path(&home, "other", "r1");
+        let first = shprd_git::integrate::lock_path(&home, "repo", "r1");
+        let other_run = shprd_git::integrate::lock_path(&home, "repo", "r2");
+        let other_repo = shprd_git::integrate::lock_path(&home, "other", "r1");
         assert_ne!(first, other_run, "two runs must not share a lock");
         assert_ne!(first, other_repo, "two repos must not share a lock");
         assert_eq!(
             first,
             home.join(".shprd").join("locks").join("repo-r1-int.lock")
+        );
+    }
+
+    /// The start lock is not the integration lock: a start must not hold up a
+    /// landing.
+    #[test]
+    fn the_start_lock_is_not_the_integration_lock() {
+        assert_ne!(
+            start_lock_path(&PathBuf::from("/home"), "repo", "r1"),
+            shprd_git::integrate::lock_path(&PathBuf::from("/home"), "repo", "r1")
         );
     }
 

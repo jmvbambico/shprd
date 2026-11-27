@@ -352,6 +352,25 @@ pub fn plan(
             });
         }
     }
+    // A run that ended with no merged pull request (its base and integration
+    // branch are one, or it was closed) still holds its integration worktree.
+    // Nothing lands there again, so the janitor lists it and takes it away; the
+    // branch is the person's and stays.
+    // A merged pull request of a branch outside shprd's namespace (the person's
+    // own integration branch) is the same: the worktree goes, the branch stays.
+    // Only a merged run on shprd's own branch has it removed above.
+    let removed_above = actions.iter().any(
+        |action| matches!(action, Action::RemoveWorktree { task, .. } if task == INTEGRATION_TASK),
+    );
+    if state.finished
+        && !removed_above
+        && let Some(path) = integration_worktree(state, layout, &run.run_id)
+    {
+        actions.push(Action::RemoveWorktree {
+            task: INTEGRATION_TASK.to_string(),
+            path,
+        });
+    }
     // A merged pull request releases what it pushed. The ledger must hold the
     // remote branch `Live` and the merge must name that exact branch as its
     // head: a stale or foreign name is never deleted from `origin`.
@@ -734,6 +753,33 @@ mod tests {
             Some(path) => path,
             None => panic!("a plain run id must have an archive folder"),
         }
+    }
+
+    #[test]
+    fn a_merged_run_on_a_persons_branch_still_has_its_int_worktree_removed() {
+        let (_home, layout, _dir) = home_with_packets();
+        let path = layout.path("repo", "r1", "_int");
+        let mut state = a_run(true, true);
+        state.resources.insert(
+            (ResourceKind::Worktree, path.display().to_string()),
+            shprd_core::state::ResourceRecord {
+                task: None,
+                status: ResourceStatus::Live,
+                created_seq: 1,
+            },
+        );
+        let actions = plan(&state, &[], &layout, 1_000, DAYS);
+        let removed = actions
+            .iter()
+            .filter(|a| matches!(a, Action::RemoveWorktree { path: p, .. } if *p == path))
+            .count();
+        assert_eq!(removed, 1, "{actions:?}");
+        assert!(
+            !actions
+                .iter()
+                .any(|a| matches!(a, Action::DeleteBranch { .. })),
+            "the person's branch stays: {actions:?}"
+        );
     }
 
     #[test]

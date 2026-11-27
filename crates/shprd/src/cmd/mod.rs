@@ -128,6 +128,7 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
                 Ok(())
             }
             RunCommand::Finish(args) => run::finish_verb(&ctx, &args, cli.global.home.as_deref()),
+            RunCommand::Close => run::close_verb(&ctx, cli.global.home.as_deref()),
         },
         Some(Command::Agent { cmd }) => agent::dispatch(&ctx, cmd, cli.global.home.as_deref()),
         Some(Command::Task { cmd }) => match cmd {

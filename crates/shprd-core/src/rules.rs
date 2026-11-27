@@ -1988,7 +1988,17 @@ pub fn unfinished_tasks(state: &RunState) -> Vec<TaskId> {
 /// A run with nothing integrated has nothing for a pull request to carry: every
 /// task was dropped or none was planned, and refusing that run would ask for a
 /// merge that `land` refuses to open.
+///
+/// A run whose base and integration branch are one branch has no pull request
+/// to merge, now or later: landing wrote the work straight onto it.
 pub fn unlanded(state: &RunState) -> bool {
+    if state
+        .run
+        .as_ref()
+        .is_some_and(|run| run.base_branch == run.integration_branch)
+    {
+        return false;
+    }
     let integrated = state
         .tasks
         .values()
@@ -4564,6 +4574,34 @@ mod tests {
         state
             .check_as(&Actor::Orchestrator, &finish_kind(), 11_000)
             .unwrap_or_else(|err| panic!("a finish was refused: {err}"));
+    }
+
+    #[test]
+    fn a_run_whose_base_is_its_integration_branch_has_no_pull_request_to_wait_for() {
+        // Landing wrote straight onto the branch the run was cut from: there is
+        // no pull request, now or later, so the landed work is not unlanded.
+        let mut log = vec![ev(
+            1,
+            EventKind::RunStarted {
+                run_id: "r1".to_string(),
+                repo: "/repo".to_string(),
+                base_branch: "prototype".to_string(),
+                integration_branch: "prototype".to_string(),
+            },
+        )];
+        log.extend(landed().into_iter().skip(1).take(5));
+        log.push(integrated(7, "a"));
+        let state = folded(&log);
+        assert!(unfinished_tasks(&state).is_empty());
+        assert!(!unlanded(&state));
+        state
+            .check_as(&Actor::Human, &finish_kind(), 11_000)
+            .unwrap_or_else(|err| panic!("a close was refused: {err}"));
+
+        // With a separate integration branch the same work still waits for it.
+        let mut separate = log.clone();
+        separate[0] = started(1);
+        assert!(unlanded(&folded(&separate)));
     }
 
     #[test]

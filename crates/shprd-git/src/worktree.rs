@@ -560,6 +560,25 @@ pub fn delete_branch(repo: &Path, layout: &Layout, branch: &str) -> Result<(), W
     Ok(())
 }
 
+/// The worktree that has `branch` checked out, when one does.
+///
+/// Git lets a branch be checked out in one worktree at a time, the person's own
+/// checkout included, so this is where shprd looks before it needs the branch
+/// for itself. `None` when no worktree holds it, or when git cannot say.
+pub fn checked_out_at(git: &Git, branch: &str) -> Option<PathBuf> {
+    let listing = git.run(&["worktree", "list", "--porcelain"]).ok()?;
+    let wanted = format!("refs/heads/{branch}");
+    let mut path: Option<PathBuf> = None;
+    for line in listing.lines() {
+        if let Some(found) = line.strip_prefix("worktree ") {
+            path = Some(PathBuf::from(found));
+        } else if line.strip_prefix("branch ") == Some(wanted.as_str()) {
+            return path;
+        }
+    }
+    None
+}
+
 /// Rejects an id that is empty, uses anything but `[A-Za-z0-9._-]`, or
 /// contains `..`.
 fn check_id(what: &'static str, id: &str) -> Result<(), WorktreeError> {
