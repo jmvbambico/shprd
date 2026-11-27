@@ -1644,7 +1644,7 @@ mod tests {
 
     #[test]
     fn the_served_engine_can_start_a_review_again() {
-        let home = TempDir::new().expect("home");
+        let home = TempDir::new().unwrap_or_else(|err| panic!("{err}"));
         let bare = Engine::new(Arc::new(|_: &Path, _: &str| Ok(String::new())));
         assert!(!bare.can_review_again());
         let host: Arc<dyn Host> = Arc::new(FakeMux::default());
