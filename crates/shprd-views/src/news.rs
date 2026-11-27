@@ -869,10 +869,12 @@ fn settle_choices(task: &str, reading: &Reading, event: NewsEvent) -> Option<Str
         return None;
     }
     let reason = reading.reason.as_deref().unwrap_or_default().to_lowercase();
-    let first = if reason.contains("review") || reason.contains("findings") {
+    let first = if reason.contains("brief not delivered") {
+        format!(
+            "Retry review (the `task.resend_brief` action on {task}) to send the brief again; do not start a new review"
+        )
+    } else if reason.contains("review") || reason.contains("findings") {
         format!("Start its review again with `shprd agent review --task {task}`")
-    } else if reason.contains("brief not delivered") {
-        format!("Send the brief again with `shprd agent prompt --task {task} \"<the brief>\"`")
     } else {
         format!("Send it back with `shprd agent spawn --task {task}`")
     };
@@ -1643,8 +1645,14 @@ mod tests {
         stuck.need = Some(Need::Attention);
         stuck.reason = Some(String::from("review brief not delivered"));
         let told = line("T1", &stuck, NewsEvent::NeedsYou, None);
-        assert!(told.contains("shprd agent review --task T1"), "{told}");
+        assert!(told.contains("task.resend_brief"), "{told}");
+        assert!(!told.contains("shprd agent review --task T1"), "{told}");
         assert!(told.contains("tell the person in one line"), "{told}");
+        let mut review = reading("repo", DerivedStatus::NeedsYou);
+        review.need = Some(Need::Attention);
+        review.reason = Some(String::from("review is stuck"));
+        let told = line("T4", &review, NewsEvent::NeedsYou, None);
+        assert!(told.contains("shprd agent review --task T4"), "{told}");
         let mut stopped = reading("repo", DerivedStatus::NeedsYou);
         stopped.need = Some(Need::Stopped);
         let told = line("T2", &stopped, NewsEvent::Failed, None);
