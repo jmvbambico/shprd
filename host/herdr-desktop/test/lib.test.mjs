@@ -823,3 +823,18 @@ test("dropReason trims what was typed and defaults a blank one", async () => {
   assert.equal(dropReason("   "), "No reason given");
   assert.equal(dropReason(undefined), "No reason given");
 });
+
+test("a health answer that takes 2 s (a backgrounded window) still finds the service", async () => {
+  // The window's clock is throttled while it is not frontmost, so a look that
+  // answers in 2-10 ms on the service's side can reach the mod 2 s later. The
+  // old 1.5 s wait turned that into "service not up" while the pid was alive.
+  const dir = stateDir("/home/ana", {});
+  herdr.putFile(serviceFile(dir), '{"port": 7788, "id": "abc", "pid": 1}');
+  herdr.putFile(tokenFile(dir), "token-1\n");
+  const slow = async () => {
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    return { ok: true, json: async () => ({ ok: true, id: "abc", version: "0.0.0" }) };
+  };
+  const found = await discover({ dir, fetch: slow, wait: (ms) => new Promise((resolve) => setTimeout(resolve, ms)) });
+  assert.equal(found?.record.id, "abc");
+});

@@ -72,6 +72,10 @@ pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>, named: bool) -> Res
     // half-happen on one multiplexer and half on another (M10.9).
     let (resolution, host) = crate::host::select();
     let host: Arc<dyn Host> = Arc::from(host);
+    // A service that starts while the window does not answer must not stay
+    // hostless for its life: the host it holds probes again when it is not a
+    // running one, at the next spawn, review, review again or stop.
+    let host: Arc<dyn Host> = Arc::new(crate::host::Reselecting::of_machine(&resolution, host));
     // `select` keeps this resolution for the whole process, and a review or a
     // spawn the service starts later (`spawn::real_mux`) goes through the same
     // `select`, so it gets this answer back without probing under load. It is

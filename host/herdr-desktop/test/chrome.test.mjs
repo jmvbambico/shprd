@@ -314,3 +314,74 @@ test("a look that throws shows a reason in the footer, never silence", async () 
   assert.equal(view.service, null, "a stale service is not shown as up");
   assert.equal(herdr.shared("service.status").phase, "failed");
 });
+
+const STATE = "/home/ana/.local/state/shprd";
+
+/** A footer that last saw a service, whose next look misses (the health answer never comes). */
+async function missedLook({ pid = 4242, alive = true } = {}) {
+  const { view } = await footer();
+  herdr.putFile(`${STATE}/service.json`, JSON.stringify({ port: 7001, id: "x", pid, root: "/repo/demo" }));
+  herdr.putFile(`${STATE}/token`, "t");
+  herdr.setExec(async (command) =>
+    command === "kill" ? { code: alive ? 0 : 1, stdout: "", stderr: "" } : { code: 0, stdout: "", stderr: "" },
+  );
+  globalThis.fetch = async () => {
+    throw new Error("a slow look");
+  };
+  return view;
+}
+
+test("a missed look while the pid is alive keeps showing up, and starts or kills nothing", async () => {
+  const view = await missedLook();
+  const was = { record: { id: "x", port: 7001 }, base: "http://127.0.0.1:7001", token: "t", dir: STATE };
+  view.service = was;
+  view.synced = "x";
+  await view.inspect(view.cx);
+  assert.equal(view.service, was, "the service it had is still shown");
+  assert.equal(herdr.shared("service.status").phase, "up");
+  assert.equal(herdr.HC_CALLS.length, 0, "no kill, no start");
+  const word = view.actions(herdr.theme()).find((action) => action.id === "service").word;
+  assert.match(word, /service up/);
+});
+
+test("a window that never saw the service says reconnecting while its pid is alive, never Starting", async () => {
+  const view = await missedLook();
+  await view.inspect(view.cx);
+  assert.equal(herdr.shared("service.status").phase, "reconnecting");
+  assert.equal(herdr.HC_CALLS.length, 0);
+  const row = view.actions(herdr.theme()).find((action) => action.id === "service");
+  assert.equal(row.word, "shprd: reconnecting…");
+  assert.equal(row.onClick, null);
+});
+
+test("a probe that cannot run does not make a service dead", async () => {
+  const view = await missedLook();
+  herdr.setExec(async () => {
+    throw new Error("exec is slow");
+  });
+  await view.inspect(view.cx);
+  assert.equal(herdr.HC_CALLS.length, 0);
+});
+
+test("a dead pid starts a new service", async () => {
+  const view = await missedLook({ alive: false });
+  herdr.setExec(async (command, args) => {
+    if (command === "kill") return { code: 1, stdout: "", stderr: "" };
+    return shell()(command, args);
+  });
+  await view.inspect(view.cx);
+  assert.ok(herdr.HC_CALLS.some((args) => args[0] === "run"), "the footer starts one");
+});
+
+test("while a self-update is replacing the service the footer starts nothing", async () => {
+  const view = await missedLook({ alive: false });
+  herdr.putFile(`${STATE}/restarting`, String(Math.floor(Date.now() / 1000)));
+  await view.inspect(view.cx);
+  assert.equal(herdr.HC_CALLS.length, 0, "the helper starts it");
+  assert.equal(herdr.shared("service.status").phase, "reconnecting");
+  // A mark that was left behind long ago does not hold the footer back.
+  herdr.putFile(`${STATE}/restarting`, String(Math.floor(Date.now() / 1000) - 3600));
+  herdr.setExec(async (command, args) => (command === "kill" ? { code: 1, stdout: "", stderr: "" } : shell()(command, args)));
+  await view.inspect(view.cx);
+  assert.ok(herdr.HC_CALLS.some((args) => args[0] === "run"), "a stale mark is ignored");
+});
