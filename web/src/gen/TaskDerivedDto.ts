@@ -23,4 +23,11 @@ need?: NeedKindDto,
 /**
  * The row's second line, at most 40 characters.
  */
-reason?: string, };
+reason?: string, 
+/**
+ * Whether the row is the person's. A row the coordinator settles itself
+ * (an operational card, a stopped agent) still reads Needs you, so the
+ * person can see it, but is not counted in For you or the Needs you
+ * badge. A payload without it comes from an old service: read it as true.
+ */
+for_you: boolean, };

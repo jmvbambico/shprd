@@ -559,6 +559,7 @@ impl Worker {
         // branch: a base sync takes it back and nothing else lets it go.
         if !landing {
             self.release_idle_integration(&state);
+            self.realign_integration(&state);
         }
         // The ladder runs after the advance steps so a task this pass just
         // started is looked at on the next one, with its record already open.
@@ -579,6 +580,33 @@ impl Worker {
             SystemClock.now_ms(),
         ));
         Ok(report)
+    }
+
+    /// With a forge, brings the local copy of the run's target branch back to
+    /// origin's, so a landing that once moved it on its own is undone and the
+    /// local ref never stays apart from the remote's.
+    fn realign_integration(&self, state: &RunState) {
+        if self.local {
+            return;
+        }
+        let Some(run) = state.run.as_ref() else {
+            return;
+        };
+        let Some(repo_name) = self
+            .repo
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+        else {
+            return;
+        };
+        let Ok(Some(_lock)) = integrate::try_lock_run(&self.home, &repo_name, &run.run_id) else {
+            return;
+        };
+        // The idle sweep has just let go of the worktree, so the branch is
+        // free to move unless the person has it checked out.
+        if integrate::realign_with_remote(&self.repo, &run.base_branch) {
+            tracing::warn!(branch = %run.base_branch, "moved the local branch back to the remote's copy");
+        }
     }
 
     /// Detaches the run's `_int` worktree when a command left it on the

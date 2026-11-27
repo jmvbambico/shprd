@@ -838,12 +838,49 @@ fn line(task: &str, reading: &Reading, event: NewsEvent, words: Option<&str>) ->
         NewsEvent::WorkingAgain => format!("{task} is working again: {} ({title})", why()),
         NewsEvent::Backup => format!("{task} backup: {} ({title})", why()),
     };
+    let body = match settle_choices(task, reading, event) {
+        Some(choices) => format!(
+            "{body} · yours to settle, then tell the person in one line what you chose. {choices}"
+        ),
+        None => body,
+    };
     let body = body.replace('<', "\u{2039}").replace('>', "\u{203a}");
     format!(
         "<shprd-news task=\"{}\" event=\"{}\">{body}</shprd-news>",
         attribute(task),
         event.name()
     )
+}
+
+/// The choices a card offers the coordinator, when the line is an operational
+/// card it settles itself (a stuck review, a lost brief, a clash, a stopped
+/// agent): the person does not see it under "For you", so the line says what to
+/// run. `None` for anything that is the person's.
+fn settle_choices(task: &str, reading: &Reading, event: NewsEvent) -> Option<String> {
+    if !matches!(event, NewsEvent::NeedsYou | NewsEvent::Failed) {
+        return None;
+    }
+    if reading.status != DerivedStatus::NeedsYou
+        || !matches!(
+            reading.need,
+            Some(Need::Attention | Need::Reply | Need::Stopped | Need::Provider)
+        )
+    {
+        return None;
+    }
+    let reason = reading.reason.as_deref().unwrap_or_default().to_lowercase();
+    let first = if reason.contains("brief not delivered") {
+        format!(
+            "Retry review (the `task.resend_brief` action on {task}) to send the brief again; do not start a new review"
+        )
+    } else if reason.contains("review") || reason.contains("findings") {
+        format!("Start its review again with `shprd agent review --task {task}`")
+    } else {
+        format!("Send it back with `shprd agent spawn --task {task}`")
+    };
+    Some(format!(
+        "Choices: {first}; hand it to another program with `shprd agent handoff --task {task} --reason \"<why>\"`; or propose dropping it with `shprd agent propose drop {task} --reason \"<why>\"`."
+    ))
 }
 
 /// Words on one line, with runs of whitespace collapsed.
@@ -1600,5 +1637,29 @@ mod tests {
         assert_eq!(news.waiting().len(), 1);
         let newer = snapshot(vec![("T1", gone_on(2))]);
         assert!(settled_at(&mut news, NOW + 30_000, &newer).is_empty());
+    }
+
+    #[test]
+    fn an_operational_line_carries_its_choices_and_a_question_does_not() {
+        let mut stuck = reading("repo", DerivedStatus::NeedsYou);
+        stuck.need = Some(Need::Attention);
+        stuck.reason = Some(String::from("review brief not delivered"));
+        let told = line("T1", &stuck, NewsEvent::NeedsYou, None);
+        assert!(told.contains("task.resend_brief"), "{told}");
+        assert!(!told.contains("shprd agent review --task T1"), "{told}");
+        assert!(told.contains("tell the person in one line"), "{told}");
+        let mut review = reading("repo", DerivedStatus::NeedsYou);
+        review.need = Some(Need::Attention);
+        review.reason = Some(String::from("review is stuck"));
+        let told = line("T4", &review, NewsEvent::NeedsYou, None);
+        assert!(told.contains("shprd agent review --task T4"), "{told}");
+        let mut stopped = reading("repo", DerivedStatus::NeedsYou);
+        stopped.need = Some(Need::Stopped);
+        let told = line("T2", &stopped, NewsEvent::Failed, None);
+        assert!(told.contains("shprd agent spawn --task T2"), "{told}");
+        let mut asks = reading("repo", DerivedStatus::NeedsYou);
+        asks.need = Some(Need::Asks);
+        let told = line("T3", &asks, NewsEvent::NeedsYou, None);
+        assert!(!told.contains("Choices"), "{told}");
     }
 }

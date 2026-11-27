@@ -281,6 +281,16 @@ const ASSISTANT_M11_SCOPE: &str =
 const ASSISTANT_M11_SCOPE_DIGEST: &str =
     "e482982fc547944b949a371eb414a6e762aa976996db107ebbcf28f21ece1c23";
 
+/// The coordinator wording that told the person every worker's question and
+/// operational card was theirs, before the coordinator settled those itself.
+#[cfg(test)]
+const ASSISTANT_M11_ASK_PERSON: &str =
+    include_str!("../../../data/templates/history/assistant-m11-ask-person.md");
+
+/// The SHA-256 of [`ASSISTANT_M11_ASK_PERSON`].
+const ASSISTANT_M11_ASK_PERSON_DIGEST: &str =
+    "717c372ab7520dd34e1eb80ab1d54cfba3c28e5df6647a0690aede3fa0baa37a";
+
 /// The coordinator's retired defaults.
 const ASSISTANT_OLD: &[&str] = &[
     ASSISTANT_M9_ASKS_DIGEST,
@@ -292,6 +302,7 @@ const ASSISTANT_OLD: &[&str] = &[
     ASSISTANT_PRE_SHPR83_DIGEST,
     ASSISTANT_M11_LONG_DIGEST,
     ASSISTANT_M11_SCOPE_DIGEST,
+    ASSISTANT_M11_ASK_PERSON_DIGEST,
 ];
 
 /// The reviewer wording M9.6 shipped, which did not name the asks the packet

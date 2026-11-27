@@ -45,6 +45,7 @@ export * from "./FindingDto";
 export * from "./GateDto";
 export * from "./GraphDto";
 export * from "./HealthDto";
+export * from "./IntegrationPrDto";
 export * from "./LastTickDto";
 export * from "./LiveAgentDto";
 export * from "./LoginFailure";

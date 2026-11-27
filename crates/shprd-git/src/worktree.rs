@@ -474,7 +474,9 @@ pub fn fresh_start(git: &Git, base: &str) -> String {
     let behind = git
         .run(&["merge-base", "--is-ancestor", base, &tracking])
         .is_ok();
-    if behind {
+    // With a forge, origin is the truth even when the local ref has commits of
+    // its own: those are a landing that never reached the forge.
+    if behind || crate::land::forge_expected(git) {
         format!("{remote}/{base}")
     } else {
         base.to_string()

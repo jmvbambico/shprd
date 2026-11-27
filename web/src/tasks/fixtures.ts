@@ -26,7 +26,7 @@ export function task(
     id,
     title: `Title of ${id}`,
     status: STORED[word],
-    derived: { status: word },
+    derived: { status: word, for_you: true },
     scope: ["crates/x"],
     acceptance: ["it works"],
     tags: [],
