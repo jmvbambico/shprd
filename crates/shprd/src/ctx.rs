@@ -225,6 +225,33 @@ impl Ctx {
             })?;
         Ok(event)
     }
+
+    /// Appends a `TaskAdded` event, naming it the next free `T<n>` when `task`
+    /// is `None`; the id is picked under the log's lock, so two adders at once
+    /// never share one. `kind` must be a `TaskAdded`; its `task` is replaced.
+    pub fn commit_task_added(
+        &self,
+        task: Option<String>,
+        kind: EventKind,
+    ) -> Result<Event, CliError> {
+        let mut log = EventLog::open(&self.log_path)
+            .map_err(|err| CliError::other(anyhow!(err).context("opening the event log")))?;
+        let actor = self.actor.clone();
+        log.append_built(self.actor.clone(), &SystemClock, move |events| {
+            let mut kind = kind;
+            if let EventKind::TaskAdded { task: slot, .. } = &mut kind {
+                *slot = task.unwrap_or_else(|| shprd_core::event::next_task_id(events));
+            }
+            RunState::fold(events)?.check_as(&actor, &kind, SystemClock.now_ms())?;
+            Ok(kind)
+        })
+        .map_err(|err| match err {
+            AppendError::Refused(refused) => CliError::Refused(refused),
+            AppendError::Log(err) => {
+                CliError::other(anyhow!(err).context("appending to the event log"))
+            }
+        })
+    }
 }
 
 /// Resolves the repo root: `--repo`, then `$SHPRD_REPO`, then the git top level.

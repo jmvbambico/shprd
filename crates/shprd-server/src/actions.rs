@@ -19,7 +19,7 @@
 use std::path::Path;
 
 use shprd_core::config::MergePolicy;
-use shprd_core::event::{Actor, EventKind, ResourceAction, ResourceKind, status_line};
+use shprd_core::event::{Actor, Event, EventKind, ResourceAction, ResourceKind, status_line};
 use shprd_core::log::{Clock, SystemClock};
 use shprd_core::state::Task;
 use shprd_git::git::Git;
@@ -72,7 +72,7 @@ pub(crate) fn run(ctx: &Context<'_>, action: Action) -> Result<ActionReply, ApiR
         } => {
             ensure_run(ctx)?;
             let kind = EventKind::TaskAdded {
-                task,
+                task: task.clone().unwrap_or_default(),
                 title,
                 scope,
                 acceptance,
@@ -80,7 +80,11 @@ pub(crate) fn run(ctx: &Context<'_>, action: Action) -> Result<ActionReply, ApiR
                 skills,
                 deps,
             };
-            commit(ctx, kind)
+            // Without a `task` the id is the next free `T<n>`, picked under the
+            // log's lock so two adders at once never share one.
+            let event =
+                ledger::commit_task_added(ctx.repo, ctx.actor, task, kind).map_err(commit_error)?;
+            published(ctx, &event)
         }
         Action::TaskStatus {
             task,
@@ -880,8 +884,14 @@ fn ask_error(err: shprd_core::ask::AskError) -> ApiReject {
 /// Every arm above ends here, so a new action cannot forget the rule check, the
 /// wake-up, the binary's after-write step, or the fold the reply carries.
 pub(crate) fn commit(ctx: &Context<'_>, kind: EventKind) -> Result<ActionReply, ApiReject> {
-    let task = event_task(&kind);
     let event = ledger::commit(ctx.repo, ctx.actor, kind).map_err(commit_error)?;
+    published(ctx, &event)
+}
+
+/// The steps after an event is written: the wake-up, the binary's after-write
+/// step and the reply carrying the task folded again.
+fn published(ctx: &Context<'_>, event: &Event) -> Result<ActionReply, ApiReject> {
+    let task = event_task(&event.kind);
     ctx.hub.publish(event.seq);
     if let Some(step) = ctx.after_write {
         step.call(ctx.repo);

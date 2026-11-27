@@ -197,7 +197,7 @@ fn an_opencode_worker_on_a_private_desktop_receives_its_brief_with_nobody_typing
     let stdout = String::from_utf8_lossy(&spawned.stdout).to_string();
     let stderr = String::from_utf8_lossy(&spawned.stderr).to_string();
     assert!(spawned.status.success(), "spawn failed: {stderr}");
-    assert!(stdout.contains("ok spawned M4.4 attempt 1"), "{stdout}");
+    assert!(stdout.contains("ok spawned M4.4·a1"), "{stdout}");
     assert!(
         !stderr.contains("brief not delivered"),
         "the brief never reached opencode with nobody typing: {stderr}"

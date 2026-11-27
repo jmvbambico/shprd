@@ -734,8 +734,12 @@ pub fn handoff_verb(ctx: &Ctx, args: &HandoffArgs, home: Option<&Path>) -> Resul
         return Ok(());
     }
     println!(
-        "ok handed {} attempt {} from {} to {} at {} (tab {:?})",
-        report.task, report.attempt, report.from, report.to, report.checkpoint, report.tab
+        "ok handed {} from {} to {} at {} (tab {:?})",
+        shprd_core::event::attempt_label(&report.task, report.attempt),
+        report.from,
+        report.to,
+        report.checkpoint,
+        report.tab
     );
     Ok(())
 }

@@ -434,7 +434,9 @@ fn task_card(task: &shprd_core::state::Task, escalation: &Escalation, now_ms: u6
     if spent_review_attempt(id, body).is_some() {
         return decision(plain_body(body), &[action::REVIEW, action::DROP]);
     }
-    if body.starts_with(&format!("{id}: sending attempt ")) {
+    if body.starts_with(&format!("{id}: sending attempt "))
+        || body.starts_with(&format!("{id}: sending {id}·a"))
+    {
         return decision(plain_body(body), &[send_back, action::DROP]);
     }
     if body.contains(" step has failed the same way ") {
@@ -500,8 +502,12 @@ fn clash_files(task: &str, body: &str) -> Option<String> {
 /// has no ask behind it, so the answer rule never applies to it.
 fn spent_review_attempt(task: &str, body: &str) -> Option<u32> {
     let attempt = gate::card_attempt(task, body)?;
-    let marker = format!("{task}: its review of attempt {attempt} failed ");
-    body.starts_with(&marker).then_some(attempt)
+    let old = format!("{task}: its review of attempt {attempt} failed ");
+    let new = format!(
+        "{task}: its review of {} failed ",
+        shprd_core::event::attempt_label(task, attempt)
+    );
+    (body.starts_with(&old) || body.starts_with(&new)).then_some(attempt)
 }
 
 /// What an answered spent-review card draws now, or `None` once its verb ran.
