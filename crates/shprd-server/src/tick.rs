@@ -594,6 +594,14 @@ impl Worker {
     /// A run whose integration branch is shprd's own `<namespace><run>/int` is
     /// left alone: no person's checkout wants that branch, and the commands
     /// that open it expect it attached.
+    ///
+    /// The sweep takes the run's integration lock without waiting, because the
+    /// worktree it is looking at is the one every other verb writes: a clean
+    /// worktree sitting on the branch is also what a landing looks like between
+    /// its own open and its merge, and detaching `HEAD` then would land the work
+    /// on a detached head while the branch never moved. A landing, a sync, a gate
+    /// or an approval that holds the lock is therefore left alone, and the next
+    /// idle pass releases the branch after it.
     fn release_idle_integration(&self, state: &RunState) {
         let Some(run) = state.run.as_ref() else {
             return;
@@ -609,6 +617,19 @@ impl Worker {
         if run.integration_branch == layout.branch_name(&run.run_id, "int") {
             return;
         }
+        // Held for exactly the detach: a verb that starts between the check and
+        // the switch waits for it, and one already running makes this a no-op.
+        let _lock = match integrate::try_lock_run(&self.home, &repo_name, &run.run_id) {
+            Ok(Some(lock)) => lock,
+            Ok(None) => {
+                tracing::debug!(run = %run.run_id, "a verb holds the integration lock, so the idle sweep left the worktree alone");
+                return;
+            }
+            Err(err) => {
+                tracing::warn!(%err, "could not take the integration lock for the idle sweep");
+                return;
+            }
+        };
         let path = layout.path(&repo_name, &run.run_id, "_int");
         if integrate::release_if_held(&path) {
             tracing::debug!(path = %path.display(), "released the integration worktree");

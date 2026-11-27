@@ -1255,6 +1255,81 @@ fn a_failed_review_is_sent_back_and_the_second_round_lands() {
     assert!(sixth.steps.is_empty(), "{sixth:?}");
 }
 
+/// The idle sweep is a verb like any other over the integration worktree, so it
+/// must not detach the branch while one of them is landing.
+///
+/// A landing holds the run's integration lock from the moment it opens the
+/// worktree to the moment it merges: gate checks, a human's approval and a slow
+/// merge all sit inside that window, and the worktree is clean and on the branch
+/// the whole time. A sweep that did not take the lock would read that as "idle",
+/// detach `HEAD`, and the landing's merge would then land on a detached head
+/// while the branch never moved — a task recorded as landed with its work
+/// missing from the integration branch.
+#[test]
+fn the_idle_sweep_leaves_the_integration_branch_alone_while_a_landing_holds_the_lock() {
+    let fixture = Fixture::new(vec![started(), added(2, "A")]);
+    git_in(&fixture.repo, &["init", "-b", "main"]);
+    std::fs::write(fixture.repo.join("seed.txt"), "the seed\n").expect("write the seed");
+    git_in(&fixture.repo, &["add", "seed.txt"]);
+    git_in(&fixture.repo, &["commit", "-m", "seed"]);
+    git_in(&fixture.repo, &["branch", "integration/m8"]);
+
+    let layout = shprd_git::worktree::Layout::default_for_home(&fixture.home);
+    let repo_name = fixture
+        .repo
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .expect("the repo has a name");
+    let integration = layout.path(&repo_name, "r1", "_int");
+
+    // The worktree a landing leaves behind: on the run's integration branch,
+    // clean, and not detached — exactly what the sweep is for.
+    std::fs::create_dir_all(integration.parent().expect("a parent")).expect("mkdir");
+    git_in(
+        &fixture.repo,
+        &[
+            "worktree",
+            "add",
+            &integration.display().to_string(),
+            "integration/m8",
+        ],
+    );
+
+    let worker = fixture.worker(
+        Arc::new(Scripted::default()),
+        Arc::new(NoForge),
+        config(shprd_core::config::MergePolicy::Auto),
+        recording_start(Arc::new(Mutex::new(Vec::new()))),
+    );
+
+    // A landing (or a sync, a gate, an approval) is in flight: it holds the
+    // run's integration lock while it works.
+    let held = shprd_git::integrate::lock_run(&fixture.home, &repo_name, "r1")
+        .expect("take the run's integration lock");
+    let _ = worker
+        .tick()
+        .expect("the pass ran with a verb holding the lock");
+    assert_eq!(
+        git_in(&integration, &["symbolic-ref", "--short", "HEAD"]),
+        "integration/m8",
+        "the sweep must not detach the branch under a landing"
+    );
+
+    // The same fixture with the lock free: the sweep does its job.
+    drop(held);
+    let _ = worker.tick().expect("the idle pass ran");
+    let head = std::process::Command::new("git")
+        .args(["symbolic-ref", "-q", "HEAD"])
+        .current_dir(&integration)
+        .output()
+        .expect("git runs");
+    assert!(
+        !head.status.success(),
+        "an idle pass releases the branch: {}",
+        String::from_utf8_lossy(&head.stdout)
+    );
+}
+
 #[test]
 fn a_merge_the_forge_made_is_recorded_and_never_repeated() {
     let mut log = vec![started()];
