@@ -512,7 +512,16 @@ fn after_failed_review(
         // A send-back is a spawn, so it takes a slot and an agent that is still
         // live on the task keeps it: the attempt it replaces must be finished.
         Next::SendBack => {
-            if input.facts.is_live(&task.id) || matches!(phase, Phase::Working | Phase::Merging) {
+            //
+            // A clash is the exception to the live-agent rule: the attempt
+            // ended on a hand-in (or a landing) that was judged, and a worker
+            // idle in its pane after handing in stays listed as live until
+            // something closes it. Waiting for it would leave the redo
+            // undone for ever and the task on Needs you. The spawn closes
+            // the old worker as it archives the attempt it replaces.
+            if (input.facts.is_live(&task.id) && !conflict)
+                || matches!(phase, Phase::Working | Phase::Merging)
+            {
                 return None;
             }
             // A send-back that did not start is a person's to start: one card
@@ -2139,6 +2148,45 @@ mod tests {
         );
         assert_eq!(crate::gate::failed_review_rounds(&state.tasks["A"]), 0);
         // Said once: the attempt it started is the next pass's newest.
+    }
+
+    #[test]
+    fn a_clash_is_redone_even_while_the_finished_worker_is_still_listed_live() {
+        // The live bug: a hand-in clashed before its review, and the worker that
+        // handed in sat idle in its pane, so it stayed in the live set. The redo
+        // waited on it for ever and the task stayed on Needs you.
+        let mut log = vec![
+            started(1),
+            added(2, "A", &[]),
+            spawned(3, "A", 1),
+            reported(4, "A", 1),
+        ];
+        log.push(ev(
+            5,
+            EventKind::GateFailed {
+                task: String::from("A"),
+                attempt: 1,
+                gate: String::from("integrate"),
+                findings: Vec::new(),
+                source: None,
+            },
+        ));
+        log.push(escalated(
+            6,
+            "A",
+            "A clashed with work that landed after it; it is being redone on top of the latest",
+        ));
+        let state = folded(&log);
+        let mut facts = Facts::default();
+        facts.live.insert(String::from("A"));
+        let steps = plan_for(&state, &facts, &config(MergePolicy::Auto, 4));
+        assert_eq!(
+            steps,
+            vec![Step::SendBack {
+                task: String::from("A"),
+                attempt: 1
+            }]
+        );
     }
 
     #[test]
