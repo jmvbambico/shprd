@@ -32,7 +32,7 @@ import { closeOverlay, focused, layout, nextCommand, props, run, setShared, shar
 
 import { RepoCache, attach, downNotice, press, reason, singleFlight } from "./lib/client.js";
 import { finishReview, startReview } from "./lib/optimistic.js";
-import { OVERRIDE_REASON, extraActions as more } from "./lib/board.js";
+import { actionBody, extraActions as more } from "./lib/board.js";
 import {
   WORDS,
   card,
@@ -283,7 +283,7 @@ export default class Accept extends View {
   }
 
   /** Posts one verb and says what the engine answered. */
-  async verb(action, extra = {}) {
+  async verb(action, extra = {}, act = null) {
     const task = this.selected();
     if (!this.client || !task || this.busy) return;
     this.busy = action;
@@ -295,7 +295,8 @@ export default class Accept extends View {
     const sent = await press(this, {
       kind: action,
       tasks: [task.id],
-      send: () => this.client.action({ kind: action, task: task.id, ...extra }),
+      send: () =>
+        this.client.action(act ? actionBody(act, task) : { kind: action, task: task.id, ...extra }),
     });
     this.busy = null;
     if (sent.ignored) {
@@ -936,11 +937,10 @@ export default class Accept extends View {
       );
     }
     // Reopen and Override where they apply; a refusal shows on the card as the other verbs' do.
-    for (const act of more(task)) {
-      if (act.action === "run.sync") continue;
+    for (const act of more(task, this.state)) {
       buttons.push(
         this.button(t, act.id, this.busy === act.action ? `${act.label}…` : act.label, false, () =>
-          this.verb(act.action, act.action === "task.override" ? { reason: OVERRIDE_REASON } : {}),
+          this.verb(act.action, {}, act),
         ),
       );
     }

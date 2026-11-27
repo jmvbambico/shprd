@@ -40,7 +40,7 @@ import {
   paneState,
   rowActions,
   extraActions as more,
-  OVERRIDE_REASON,
+  actionBody,
   secondLine,
   taskIds,
 } from "./lib/board.js";
@@ -450,7 +450,7 @@ export default class Tasks extends View {
    * one that did. The board is read again after success, so the row shows the
    * status the engine's own pass would give it.
    */
-  async verb(task, action) {
+  async verb(task, action, act = null) {
     if (!this.client) return;
     this.actionError = null;
     // The row, the Graph, the status bar and the chat change at once (the
@@ -459,13 +459,7 @@ export default class Tasks extends View {
       kind: action,
       tasks: [task.id],
       send: () =>
-        this.client.action(
-          action === "task.override"
-            ? { kind: action, task: task.id, reason: OVERRIDE_REASON }
-            : action === "run.sync"
-              ? { kind: action }
-              : { kind: action, task: task.id },
-        ),
+        this.client.action(actionBody(act ?? { action }, task)),
     });
     if (sent.ignored) return;
     if (!sent.ok) this.actionError = sent.error;
@@ -1271,7 +1265,7 @@ export default class Tasks extends View {
       // A second act (Drop beside Retry) is a pill of its own.
       .when(acts.length > 1, (el) => el.child(this.act(t, task, acts[1])))
       // Reopen, Override and Sync ride in the free slot where they apply.
-      .when(acts.length < 2 && more(task).length > 0, (el) => el.child(this.act(t, task, more(task)[0])));
+      .children(more(task, this.state).map((extra) => this.act(t, task, extra)));
   }
 
   /**
@@ -1317,7 +1311,7 @@ export default class Tasks extends View {
           this.busy.delete(task.id);
           cx.notify();
         });
-      } else this.verb(task, act.action);
+      } else this.verb(task, act.action, act);
     });
   }
 }

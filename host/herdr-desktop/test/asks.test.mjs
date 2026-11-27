@@ -326,7 +326,7 @@ test("stripItems has one item per task with Open or the single button", () => {
 });
 
 import { proposalLabel } from "../mods/lib/asks.js";
-import { extraActions } from "../mods/lib/board.js";
+import { extraActions, actionBody } from "../mods/lib/board.js";
 
 test("a coordinator proposal's choices read Confirm and Decline, and answer as written", () => {
   const ask = { id: "propose-drop-1", task: "T1", options: ["confirm drop", "leave it"], kind: "question", text: "x\nreason: y" };
@@ -346,4 +346,20 @@ test("the board offers Reopen, Override and Sync only where they apply", () => {
   assert.ok(!extraActions({ ...gated, accepted_failure: true }).some((a) => a.id === "override"));
   assert.deepEqual(extraActions({ id: "T3", status: "working", derived: { status: "working" } }), []);
   assert.ok(extraActions({ id: "T4", status: "queued", derived: { reason: "behind main: sync" } }).some((a) => a.action === "run.sync"));
+});
+
+test("every applicable extra act shows together, and Readmit names a dry agent", () => {
+  const task = {
+    id: "T1",
+    status: "reported",
+    derived: { status: "ready", reason: "behind main: sync" },
+    attempts: [{ agent: "codex" }, { agent: "pi" }, { agent: "codex" }],
+  };
+  const state = { agents: [{ id: "codex", dry: true }, { id: "pi", dry: false }] };
+  const acts = extraActions(task, state);
+  assert.deepEqual(acts.map((a) => a.id), ["reopen", "sync", "readmit-codex"]);
+  assert.deepEqual(actionBody(acts[2], task), { kind: "agent.readmit", agent: "codex", reason: "readmitted from the board" });
+  assert.deepEqual(actionBody(acts[1], task), { kind: "run.sync" });
+  assert.deepEqual(actionBody(acts[0], task), { kind: "task.reopen", task: "T1" });
+  assert.ok(!extraActions(task, { agents: [] }).some((a) => a.action === "agent.readmit"));
 });
