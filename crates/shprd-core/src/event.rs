@@ -30,8 +30,15 @@ pub fn next_task_id(events: &[Event]) -> TaskId {
         .filter_map(|id| id.strip_prefix('T')?.parse::<u64>().ok())
         .max()
         .map_or(1, |highest| highest.saturating_add(1));
+    // Past u64::MAX there is no next number: fall back to the first free one
+    // below, and if every number is taken stop rather than loop forever.
     while used.contains(format!("T{n}").as_str()) {
-        n = n.saturating_add(1);
+        n = match n.checked_add(1) {
+            Some(next) => next,
+            None => (1..u64::MAX)
+                .find(|k| !used.contains(format!("T{k}").as_str()))
+                .unwrap_or(1),
+        };
     }
     format!("T{n}")
 }
@@ -1008,6 +1015,12 @@ mod tests {
                 deps: Vec::new(),
             },
         }
+    }
+
+    #[test]
+    fn the_allocator_ends_at_the_u64_limit() {
+        let log = [added(1, "T18446744073709551615")];
+        assert_eq!(next_task_id(&log), "T1");
     }
 
     #[test]
