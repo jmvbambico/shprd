@@ -95,6 +95,16 @@ describe("proof", () => {
 });
 
 describe("verbs", () => {
+  it("offers Accept disabled with the reason where landing would refuse", () => {
+    const blocked = { ...ready, accept_blocked: "no review was requested" };
+    expect(verbs(blocked, "ask")).toMatchObject({
+      accept: true,
+      acceptBlocked: "no review was requested",
+      note: "Can't accept yet: no review was requested",
+    });
+    expect(verbs(ready, "ask").acceptBlocked).toBeNull();
+  });
+
   it("offers Accept for reviewed work where tasks.merge asks", () => {
     expect(verbs(ready, "ask")).toMatchObject({ accept: true, drop: true, sendBack: false });
     expect(verbs(ready, null).accept).toBe(true);

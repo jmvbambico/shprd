@@ -429,7 +429,8 @@ export function AcceptDialog({
                   <button
                     type="button"
                     className="primary-button"
-                    disabled={busy !== null}
+                    disabled={busy !== null || wired.acceptBlocked !== null}
+                    title={wired.acceptBlocked ?? undefined}
                     onClick={() => void send("task.accept")}
                   >
                     {busy === "task.accept" ? WORDS.accepting : WORDS.accept}
