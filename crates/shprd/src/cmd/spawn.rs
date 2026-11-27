@@ -516,7 +516,7 @@ fn unwind_unrecorded(
     err: CliError,
 ) -> Unwound {
     match mux.close_tab(tab) {
-        Ok(()) | Err(shprd_mux::MuxError::NotFound(_)) => Unwound::Closed(err),
+        Ok(()) | Err(shprd_mux::MuxError::NotFound { .. }) => Unwound::Closed(err),
         Err(close) => {
             eprintln!("warning: could not close tab {}: {close}", tab.as_str());
             match record() {
