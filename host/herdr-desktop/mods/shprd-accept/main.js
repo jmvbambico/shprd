@@ -1032,9 +1032,9 @@ export default class Accept extends View {
       .px(12)
       .items_center()
       .rounded(RADIUS.control)
-      .cursor_pointer()
       .text_size(TEXT.label)
-      .when(primary, (el) => el.bg(t.solid).text_color(t.solid_foreground).hover((style) => style.opacity(0.9)))
+      .when(!disabled, (el) => el.cursor_pointer())
+      .when(primary, (el) => el.bg(t.solid).text_color(t.solid_foreground).when(!disabled, (b) => b.hover((style) => style.opacity(0.9))))
       .when(!primary, (el) =>
         el
           .border_1()
@@ -1046,7 +1046,9 @@ export default class Accept extends View {
       // A verb is waiting on the service: its buttons are dimmed (and a second press
       // is ignored in `verb`), the one pressed says what it is doing.
       .when((this.busy !== null && id !== "cancel" && id !== "dropback") || disabled, (el) => el.opacity(0.6))
-      .on_click(onClick)
+      // A blocked button is not wired at all: no click, no pointer cursor, no hover.
+      .when(disabled, (el) => el.cursor_default())
+      .when(!disabled, (el) => el.on_click(onClick))
       .child(label);
   }
 }

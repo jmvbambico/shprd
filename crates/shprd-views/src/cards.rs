@@ -223,11 +223,14 @@ pub fn card_at(state: &RunState, escalation: &Escalation, now_ms: u64) -> Option
     // `failed the same way` cards for one step and attempt is drawn, so a run
     // of identical failures reads as one card that updates in place rather than
     // one new needs-you card per pass.
+    // An unchanged failure is the card already drawn (the earliest with those
+    // words), never a new one; a changed error replaces it in place.
     if let Some(family) = repeated_failure_family(&escalation.body)
-        && state.escalations.iter().any(|later| {
-            later.seq > escalation.seq
-                && later.task == escalation.task
-                && repeated_failure_family(&later.body) == Some(family)
+        && state.escalations.iter().any(|other| {
+            other.task == escalation.task
+                && repeated_failure_family(&other.body) == Some(family)
+                && ((other.seq > escalation.seq && other.body != escalation.body)
+                    || (other.seq < escalation.seq && other.body == escalation.body))
         })
     {
         return None;
@@ -1260,5 +1263,23 @@ mod tests {
             card_at(&state, &other_step, 0).is_some(),
             "a different step is a card of its own"
         );
+    }
+
+    #[test]
+    fn an_unchanged_failure_never_raises_a_new_card() {
+        let body =
+            "T1: its `land` step has failed the same way 3 passes in a row (attempt 1): no remote";
+        let first = raised(5, body, "retry");
+        let again = raised(9, body, "retry");
+        let mut state = run_with(TaskStatus::Failed);
+        state.escalations = vec![first.clone(), again.clone()];
+        assert!(card_at(&state, &first, 0).is_some(), "the first card stays");
+        assert!(
+            card_at(&state, &again, 0).is_none(),
+            "the repeat is no new card"
+        );
+        // Dismissing the first does not bring the identical repeat back.
+        state.dismissed_needs.insert(first.seq);
+        assert!(card_at(&state, &again, 0).is_none());
     }
 }
