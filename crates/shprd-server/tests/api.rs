@@ -16,7 +16,10 @@ use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use shprd_core::event::{Actor, EventKind};
 use shprd_core::log::{EventLog, SystemClock};
-use shprd_server::{App, WsLimits};
+use shprd_server::{App, Engine, RunVerb, WsLimits};
+
+/// Every `(repo, verb)` a faked binary-side runner was asked for.
+type Calls = std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>;
 use tempfile::TempDir;
 use tower::ServiceExt;
 
@@ -223,6 +226,32 @@ fn task_add(id: &str) -> Value {
         "scope": ["crates/shprd-core"],
         "acceptance": ["it works"],
     })
+}
+
+#[tokio::test]
+async fn a_task_added_without_an_id_gets_the_next_short_one() {
+    let fixture = Fixture::new();
+    let add = |extra: Value| {
+        let mut body = json!({
+            "kind": "task.add", "title": "untitled", "acceptance": ["it works"],
+        });
+        if let (Some(body), Some(extra)) = (body.as_object_mut(), extra.as_object()) {
+            body.extend(extra.clone());
+        }
+        fixture.send(
+            Call::post("/api/action", body)
+                .with_token(&fixture.token)
+                .with_write_header(),
+        )
+    };
+    let first = add(json!({})).await;
+    assert_eq!(first.status, StatusCode::OK);
+    assert_eq!(first.json()["task"]["id"], json!("T1"));
+    // A given id is kept, and a long one never blocks the counter.
+    let given = add(json!({"task": "long-slug"})).await;
+    assert_eq!(given.json()["task"]["id"], json!("long-slug"));
+    let second = add(json!({})).await;
+    assert_eq!(second.json()["task"]["id"], json!("T2"));
 }
 
 #[tokio::test]
@@ -1869,5 +1898,222 @@ async fn an_agent_answering_a_proposal_card_is_refused_and_runs_nothing() {
             EventKind::TaskDropped { .. } | EventKind::AskAnswered { .. }
         )),
         "nothing ran and the card is still open"
+    );
+}
+
+/// A repository whose run can close: base and integration branch are one branch,
+/// so there is no pull request to wait for, and its one task has landed.
+///
+/// It carries the `propose-close-1` card `shprd agent propose close T1 --reason
+/// …` raises, the shape a board draws in T1's timeline.
+fn close_proposal_repo() -> TempDir {
+    let repo = tempfile::tempdir().expect("repo dir");
+    let path = repo.path().join(".shprd").join("events.jsonl");
+    let mut log = EventLog::open(&path).expect("the log opens");
+    put(
+        &mut log,
+        Actor::Human,
+        EventKind::RunStarted {
+            run_id: "r1".into(),
+            repo: repo.path().display().to_string(),
+            base_branch: "prototype".into(),
+            integration_branch: "prototype".into(),
+        },
+    );
+    put(
+        &mut log,
+        Actor::Human,
+        EventKind::TaskAdded {
+            task: "T1".into(),
+            title: "t1".into(),
+            scope: vec!["src".into()],
+            acceptance: vec!["it works".into()],
+            tags: Vec::new(),
+            skills: Vec::new(),
+            deps: Vec::new(),
+        },
+    );
+    let ask = "propose-close-1".to_string();
+    let body = "T1: the run's work is done: run `run close`?\nreason: all landed\nthis ends the run rather than the task, and a new run can start after it".to_string();
+    let options = vec!["confirm run close".to_string(), "leave it".to_string()];
+    put(
+        &mut log,
+        Actor::Agent {
+            id: "claude".into(),
+        },
+        EventKind::AskRaised {
+            task: "T1".into(),
+            ask: ask.clone(),
+            ask_kind: shprd_core::ask::AskKind::Question,
+            text: body.clone(),
+            options: options.clone(),
+            created_at_ms: 1,
+            expires_at_ms: None,
+        },
+    );
+    shprd_core::ask::AskQueue::for_repo(repo.path())
+        .raise(
+            &shprd_core::ask::Ask::new(ask, "T1", shprd_core::ask::AskKind::Question, body, 1)
+                .with_options(options),
+        )
+        .expect("the ask file");
+    repo
+}
+
+/// Answers the close proposal on `fixture` and returns the reply and the events.
+async fn answer_close_proposal(fixture: &Fixture) -> (Reply, Vec<shprd_core::event::Event>) {
+    let reply = fixture
+        .send(
+            Call::post(
+                "/api/asks/answer",
+                json!({"task": "T1", "ask": "propose-close-1", "answer": "confirm run close"}),
+            )
+            .with_token(&fixture.token)
+            .with_write_header(),
+        )
+        .await;
+    let events = EventLog::read_all(&fixture.repo.path().join(".shprd").join("events.jsonl"))
+        .expect("read the log")
+        .events;
+    (reply, events)
+}
+
+/// A service whose binary-side runner is a closure, the way every test drives a
+/// spawn or a stop: the run's verbs are the binary's, so a test hands it a fake
+/// rather than running `shprd` from a test process.
+fn with_run_verb(fixture: Fixture, answer: Result<(), &'static str>) -> (Fixture, Calls) {
+    let seen: Calls = std::sync::Arc::default();
+    let recorder = std::sync::Arc::clone(&seen);
+    let run: RunVerb = std::sync::Arc::new(move |repo: &std::path::Path, verb: &str| {
+        recorder
+            .lock()
+            .expect("the lock")
+            .push((repo.display().to_string(), verb.to_string()));
+        answer.map_err(str::to_string)?;
+        // The real verb records the run's end in the log; the fake does the
+        // same, so a test reads the ledger the binary would have left.
+        if verb == "run close" {
+            let mut log = EventLog::open(&repo.join(".shprd").join("events.jsonl"))
+                .map_err(|err| err.to_string())?;
+            log.append(
+                Actor::Human,
+                EventKind::RunFinished {
+                    abandoned: Vec::new(),
+                },
+                &SystemClock,
+            )
+            .map_err(|err| err.to_string())?;
+        }
+        Ok(())
+    });
+    let app = fixture
+        .app
+        .with_engine(Engine::new(std::sync::Arc::new(|_, _| Ok(String::new()))).with_run_verb(run));
+    (
+        Fixture {
+            app,
+            token: fixture.token,
+            id: fixture.id,
+            state: fixture.state,
+            repo: fixture.repo,
+        },
+        seen,
+    )
+}
+
+#[tokio::test]
+async fn the_close_card_is_on_the_board_and_its_confirmation_ends_the_run() {
+    let repo = close_proposal_repo();
+    let (fixture, ran) = with_run_verb(
+        Fixture::prepared(repo, tempfile::tempdir().expect("state")),
+        Ok(()),
+    );
+    // The card reaches the board: it is one of the asks a client draws, with the
+    // one choice that runs the run's close.
+    let listed = fixture
+        .send(Call::get("/api/asks").with_token(&fixture.token))
+        .await;
+    assert_eq!(listed.status, StatusCode::OK, "{:?}", listed.body);
+    let shown = listed.json()["asks"]
+        .as_array()
+        .expect("the asks array")
+        .iter()
+        .find(|ask| ask["id"] == "propose-close-1")
+        .expect("the close card is on the board");
+    assert!(
+        shown["options"]
+            .as_array()
+            .expect("the options")
+            .iter()
+            .any(|option| option == "confirm run close"),
+        "the board offers the button: {shown}"
+    );
+
+    // Confirming it runs the person's own verb, which the rules accept because
+    // base and integration are one branch: there is nothing to carry.
+    let (reply, events) = answer_close_proposal(&fixture).await;
+    assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+    assert_eq!(
+        ran.lock().expect("the lock").as_slice(),
+        &[(
+            fixture.repo.path().display().to_string(),
+            "run close".to_string()
+        )],
+        "the confirmation runs the person's own `run close`, once"
+    );
+    let finished: Vec<_> = events
+        .iter()
+        .filter(|event| matches!(&event.kind, EventKind::RunFinished { .. }))
+        .collect();
+    assert_eq!(finished.len(), 1, "the run closed once");
+    assert_eq!(finished[0].actor, Actor::Human, "the person's own verb");
+    assert!(
+        matches!(&finished[0].kind, EventKind::RunFinished { abandoned } if abandoned.is_empty()),
+        "a close abandons nothing: {:?}",
+        finished[0].kind
+    );
+    let state = shprd_core::state::RunState::fold(&events).expect("folds");
+    assert!(state.finished, "the run is over, so a new one can start");
+}
+
+#[tokio::test]
+async fn a_close_card_whose_work_is_unfinished_is_refused_with_the_tasks_named() {
+    let repo = close_proposal_repo();
+    // A task still in flight: `run close` refuses, and the answer says why.
+    let mut log = EventLog::open(&repo.path().join(".shprd").join("events.jsonl")).expect("log");
+    put(
+        &mut log,
+        Actor::Human,
+        EventKind::TaskAdded {
+            task: "T2".into(),
+            title: "t2".into(),
+            scope: vec!["src/other".into()],
+            acceptance: vec!["it works".into()],
+            tags: Vec::new(),
+            skills: Vec::new(),
+            deps: Vec::new(),
+        },
+    );
+    let (fixture, ran) = with_run_verb(
+        Fixture::prepared(repo, tempfile::tempdir().expect("state")),
+        Err("refusing to end run r1\n1 task(s) unfinished:\n  T2  queued"),
+    );
+    let (reply, events) = answer_close_proposal(&fixture).await;
+    assert_ne!(reply.status, StatusCode::OK, "{:?}", reply.body);
+    let message = reply.json()["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("T2"),
+        "the refusal names the unfinished task: {message}"
+    );
+    assert_eq!(
+        ran.lock().expect("the lock").len(),
+        1,
+        "the run's own verb was asked, and it is the one that refused"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(&event.kind, EventKind::RunFinished { .. })),
+        "a refused close ends nothing"
     );
 }

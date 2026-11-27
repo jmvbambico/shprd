@@ -1796,8 +1796,10 @@ fn start_review(ctx: &Ctx, home: &Path, task: &str, again: bool) -> Result<Strin
     };
     let report = review(&mux, &env, &request).map_err(|err| err.to_string())?;
     Ok(format!(
-        "started {} on {} attempt {} in tab {}",
-        report.agent, report.task, report.attempt, report.tab
+        "started {} on {} in tab {}",
+        report.agent,
+        shprd_core::event::attempt_label(&report.task, report.attempt),
+        report.tab
     ))
 }
 

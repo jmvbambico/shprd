@@ -19,7 +19,7 @@
 use std::path::Path;
 
 use shprd_core::config::MergePolicy;
-use shprd_core::event::{Actor, EventKind, ResourceAction, ResourceKind, status_line};
+use shprd_core::event::{Actor, Event, EventKind, ResourceAction, ResourceKind, status_line};
 use shprd_core::log::{Clock, SystemClock};
 use shprd_core::state::Task;
 use shprd_git::git::Git;
@@ -72,7 +72,7 @@ pub(crate) fn run(ctx: &Context<'_>, action: Action) -> Result<ActionReply, ApiR
         } => {
             ensure_run(ctx)?;
             let kind = EventKind::TaskAdded {
-                task,
+                task: task.clone().unwrap_or_default(),
                 title,
                 scope,
                 acceptance,
@@ -80,7 +80,11 @@ pub(crate) fn run(ctx: &Context<'_>, action: Action) -> Result<ActionReply, ApiR
                 skills,
                 deps,
             };
-            commit(ctx, kind)
+            // Without a `task` the id is the next free `T<n>`, picked under the
+            // log's lock so two adders at once never share one.
+            let event =
+                ledger::commit_task_added(ctx.repo, ctx.actor, task, kind).map_err(commit_error)?;
+            published(ctx, &event)
         }
         Action::TaskStatus {
             task,
@@ -579,8 +583,14 @@ pub(crate) fn answer_ask(
             ctx.hub.publish(acted.seq);
         }
         Some(Proposal::Sync) => {
-            run_sync(ctx.repo)?;
+            run_a_verb(ctx, "sync")?;
             // The verb wrote its own event from its own process.
+            if let Ok((state, _)) = ledger::load(ctx.repo) {
+                ctx.hub.publish(state.last_seq);
+            }
+        }
+        Some(Proposal::RunClose) => {
+            run_a_verb(ctx, "run close")?;
             if let Ok((state, _)) = ledger::load(ctx.repo) {
                 ctx.hub.publish(state.last_seq);
             }
@@ -623,6 +633,13 @@ enum Proposal {
     Event(EventKind),
     /// `shprd sync`, which merges in the integration worktree.
     Sync,
+    /// `shprd run close`, which ends the run once its work is done.
+    ///
+    /// It is the run's verb, not a task's, so it is not an event this service
+    /// can append: the verb itself asks the rules, closes the tabs the run left
+    /// open and records the refusal or the end. Running the binary's own verb is
+    /// what keeps the button and `shprd run close` one implementation.
+    RunClose,
 }
 
 /// The id every `shprd agent propose` card begins with.
@@ -630,6 +647,10 @@ const PROPOSE_ASK_PREFIX: &str = "propose-";
 
 /// What a proposal card's confirming choice begins with.
 const PROPOSE_CONFIRM: &str = "confirm ";
+
+/// The first word of the run's close command, as its card's confirmation spells
+/// it: `confirm run close`.
+const CLOSE_WORD: &str = "run";
 
 /// The verb a confirmed proposal card stands for, or `None` when `ask` is not
 /// a proposal or `answer` is not its confirmation (`leave it`, anything else).
@@ -655,7 +676,12 @@ fn proposal_of(
         Some((word, subject)) => (word, subject.trim()),
         None => (chosen.trim(), ""),
     };
-    if word != verb {
+    // `run close` is two words in the command the card prints, and its id is
+    // still `propose-close-<n>`: the id spells the verb's own word, and the
+    // choice spells the command a person would type. So a close card matches on
+    // either the two words or the one, and no other card's confirmation does.
+    let matches_verb = word == verb || (word == CLOSE_WORD && subject == verb);
+    if !matches_verb {
         return Ok(None);
     }
     let record = state
@@ -698,6 +724,7 @@ fn proposal_of(
             reason,
         },
         "sync" => return Ok(Some(Proposal::Sync)),
+        "close" => return Ok(Some(Proposal::RunClose)),
         other => {
             return Err(ApiReject::refused(format!(
                 "{other:?} is not a verb a proposal can name"
@@ -707,27 +734,23 @@ fn proposal_of(
     Ok(Some(Proposal::Event(kind)))
 }
 
-/// Runs `shprd sync` as the person, in `repo`, by the service's own binary.
+/// Runs one of the run's verbs as the person, through the engine the binary
+/// wired.
 ///
-/// It is the same verb the CLI runs, so the merge, the lock and the event are
-/// one implementation. A failure is the verb's own words.
-fn run_sync(repo: &Path) -> Result<(), ApiReject> {
-    let exe = std::env::current_exe()
-        .map_err(|err| ApiReject::internal(format!("cannot find the shprd binary: {err}")))?;
-    let output = std::process::Command::new(exe)
-        .arg("--repo")
-        .arg(repo)
-        .args(["--as", "human", "--no-dagr", "sync"])
-        .env_remove("SHPRD_ACTOR")
-        .output()
-        .map_err(|err| ApiReject::internal(format!("could not run `shprd sync`: {err}")))?;
-    if output.status.success() {
-        return Ok(());
-    }
-    Err(ApiReject::refused(format!(
-        "shprd sync failed: {}",
-        String::from_utf8_lossy(&output.stderr).trim()
-    )))
+/// A proposal card is the person's own confirmation, so what it runs is the
+/// person's verb, by the binary the service was started from: the merge, the
+/// close, the lock and the event are one implementation.
+///
+/// The service's binary is what runs it, not a copy of the verb here: a service
+/// without one refuses rather than pretending, the same way it refuses a stop
+/// with no host.
+fn run_a_verb(ctx: &Context<'_>, verb: &str) -> Result<(), ApiReject> {
+    let engine = ctx.engine.ok_or_else(|| {
+        ApiReject::refused(format!(
+            "this service was started without a host, so it cannot run `shprd {verb}`"
+        ))
+    })?;
+    engine.run_verb(ctx.repo, verb).map_err(ApiReject::refused)
 }
 
 /// Answers one finding or decision of a task's review, and records it.
@@ -859,8 +882,14 @@ fn ask_error(err: shprd_core::ask::AskError) -> ApiReject {
 /// Every arm above ends here, so a new action cannot forget the rule check, the
 /// wake-up, the binary's after-write step, or the fold the reply carries.
 pub(crate) fn commit(ctx: &Context<'_>, kind: EventKind) -> Result<ActionReply, ApiReject> {
-    let task = event_task(&kind);
     let event = ledger::commit(ctx.repo, ctx.actor, kind).map_err(commit_error)?;
+    published(ctx, &event)
+}
+
+/// The steps after an event is written: the wake-up, the binary's after-write
+/// step and the reply carrying the task folded again.
+fn published(ctx: &Context<'_>, event: &Event) -> Result<ActionReply, ApiReject> {
+    let task = event_task(&event.kind);
     ctx.hub.publish(event.seq);
     if let Some(step) = ctx.after_write {
         step.call(ctx.repo);
@@ -1052,6 +1081,43 @@ mod tests {
         ));
         assert!(
             proposal_of(&state, "T1", "scope-widen-1", "confirm drop")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    /// A close proposal is the run's verb, so its confirmation is not an event
+    /// this service can append: it is `shprd run close` in the person's own
+    /// process, which is what
+    /// [`answer_ask`] runs for [`Proposal::RunClose`].
+    #[test]
+    fn a_close_proposal_is_the_runs_close_and_nothing_else_runs_it() {
+        let state = state_with(
+            "propose-close-1",
+            "T1: the run's work is done: run `run close`?\nreason: all landed\nthis ends the run \
+             rather than the task, and a new run can start after it",
+            &["confirm run close", "leave it"],
+        );
+        assert!(
+            matches!(
+                proposal_of(&state, "T1", "propose-close-1", "confirm run close").unwrap(),
+                Some(Proposal::RunClose)
+            ),
+            "the close card's confirmation runs the run's close"
+        );
+        // Leaving it, or a confirmation that names something else, runs nothing.
+        for answer in ["leave it", "confirm close", "confirm drop", "confirm run"] {
+            assert!(
+                proposal_of(&state, "T1", "propose-close-1", answer)
+                    .unwrap()
+                    .is_none(),
+                "{answer:?} must not close the run"
+            );
+        }
+        // The card's own words are the only ones that count: a free-typed
+        // confirmation of a verb the card did not offer runs nothing.
+        assert!(
+            proposal_of(&state, "T1", "propose-drop-1", "confirm run close")
                 .unwrap()
                 .is_none()
         );

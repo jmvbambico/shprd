@@ -1,11 +1,16 @@
 //! `shprd agent propose <verb> <task> --reason <TEXT>`: an agent asks the
 //! person to run one of the human-only verbs.
 //!
-//! `drop`, `reopen`, `sync`, `override` and `readmit` are the person's: some
-//! need a terminal, all refuse a non-human actor. This verb raises one
-//! needs-you card on the task and runs nothing. The card's `confirm …` choice,
-//! answered by the person on the board, is what the service turns into the
-//! verb's event, written as the person; `leave it` writes nothing.
+//! `drop`, `reopen`, `sync`, `override`, `readmit` and `close` are the person's:
+//! some need a terminal, all refuse a non-human actor. `close` is the run's
+//! verb, `shprd run close`: it ends a run whose work is all landed or dropped,
+//! so a finished run does not block the next one. Its card hangs on the task the
+//! agent is working on, because a card is drawn in one task's timeline.
+//!
+//! This verb raises one needs-you card on the task and runs nothing. The card's
+//! `confirm …` choice, answered by the person on the board, is what the service
+//! turns into the verb's event, written as the person; `leave it` writes
+//! nothing.
 //!
 //! The card's shape is a contract with the service's answer step
 //! (`shprd-server`'s `actions.rs`, which cannot see this crate): the id is
@@ -32,11 +37,18 @@ pub fn verb_word(verb: ProposedVerb) -> &'static str {
         ProposedVerb::Sync => "sync",
         ProposedVerb::Override => "override",
         ProposedVerb::Readmit => "readmit",
+        ProposedVerb::Close => "close",
     }
 }
 
 /// The choice that confirms: `confirm drop`, `confirm override <rule>`, …
+///
+/// The close card's choice is the command a person would type, `confirm run
+/// close`, because the card's id spells only the first word of it.
 pub fn confirm_choice(verb: ProposedVerb, subject: &str) -> String {
+    if verb == ProposedVerb::Close {
+        return "confirm run close".to_string();
+    }
     match subject.is_empty() {
         true => format!("confirm {}", verb_word(verb)),
         false => format!("confirm {} {subject}", verb_word(verb)),
@@ -44,7 +56,18 @@ pub fn confirm_choice(verb: ProposedVerb, subject: &str) -> String {
 }
 
 /// What the card says: the task, the verb and the reason.
+///
+/// The one verb that is the run's rather than the task's says so, because a
+/// person reading a card drawn in a task's timeline has to know that confirming
+/// it ends the run and not just that task.
 pub fn body(task: &str, verb: ProposedVerb, subject: &str, reason: &str) -> String {
+    if verb == ProposedVerb::Close {
+        return format!(
+            "{task}: the run's work is done: run `run close`?\nreason: {}\nthis ends the run \
+             rather than the task, and a new run can start after it",
+            reason.trim()
+        );
+    }
     let what = match subject.is_empty() {
         true => verb_word(verb).to_string(),
         false => format!("{} {subject}", verb_word(verb)),
@@ -151,5 +174,18 @@ mod tests {
         );
         let text = body("T1", ProposedVerb::Drop, "", " stuck ");
         assert!(text.ends_with("\nreason: stuck"), "{text}");
+    }
+
+    #[test]
+    fn a_close_proposal_is_the_runs_and_says_so() {
+        assert_eq!(confirm_choice(ProposedVerb::Close, ""), "confirm run close");
+        let text = body("T1", ProposedVerb::Close, "", " every task landed ");
+        assert!(text.contains("`run close`"), "{text}");
+        assert!(
+            text.ends_with(
+                "reason: every task landed\nthis ends the run rather than the task, and a new run can start after it"
+            ),
+            "{text}"
+        );
     }
 }

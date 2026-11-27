@@ -104,8 +104,9 @@ pub fn stuck_options() -> Vec<String> {
 /// What a stuck review's card says.
 pub fn stuck_body(task: &str, attempt: u32, reviewer: &str, minutes: u64) -> String {
     format!(
-        "{task}: the review of attempt {attempt} by {reviewer} has not finished after {minutes} \
-         minutes; the reviewer may have died, hung or be failing"
+        "{task}: the review of {} by {reviewer} has not finished after {minutes} \
+         minutes; the reviewer may have died, hung or be failing",
+        crate::event::attempt_label(task, attempt)
     )
 }
 

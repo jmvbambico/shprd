@@ -908,13 +908,17 @@ async fn answer(State(state): State<AppState>, body: Bytes) -> Result<Json<AskRe
     let actor = state.actor.clone();
     let hub = state.hub.clone();
     let after_write = state.after_write.clone();
+    // A proposal card's confirmation may be one of the run's own verbs (`run
+    // close`), which only the binary can run: the same engine `/api/action`
+    // gets, so an answer is never a verb the service cannot carry out.
+    let engine = state.engine.clone();
     let reply = blocking(move || {
         let ctx = actions::Context {
             repo: &repo,
             actor: &actor,
             hub: &hub,
             after_write: after_write.as_ref(),
-            engine: None,
+            engine: engine.as_ref(),
             merge: None,
         };
         actions::answer_ask(&ctx, &body.task, &body.ask, &body.answer)

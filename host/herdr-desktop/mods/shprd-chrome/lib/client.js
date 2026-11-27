@@ -61,7 +61,7 @@ import { exec, home, readTextFile, shared, spaces } from "herdr";
 import * as optimistic from "./optimistic.js";
 
 /** The first look at a service gives up after this many ms. */
-export const HEALTH_WAIT = 1500;
+export const HEALTH_WAIT = 6000;
 /** A read gives up after this many ms, so one slow call never wedges a panel. */
 export const READ_WAIT = 4000;
 /** A write is one event, so it may take longer than a read. */
@@ -489,6 +489,7 @@ export function downNotice(folder = activeFolder()) {
   if (!folder) return "Open a repository's space to use shprd";
   const status = shared(SERVICE_STATUS);
   if (status?.phase === "starting") return "Starting the shprd service…";
+  if (status?.phase === "reconnecting") return "Reconnecting to the shprd service…";
   if (status?.phase === "failed") {
     // The footer says why in full; every other panel only points at it.
     return "The shprd service isn't running (the reason is in the footer)";

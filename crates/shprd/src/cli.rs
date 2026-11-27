@@ -719,6 +719,11 @@ pub enum RunCommand {
     Start(RunStartArgs),
     /// Finish the run; nothing may follow.
     Finish(EndRunArgs),
+    /// Close the run once its work is done: every task landed or dropped, and
+    /// nothing left to merge (a run whose base and integration branch are one
+    /// branch has no pull request). It throws nothing away; `run finish
+    /// --abandon` is the verb for that.
+    Close,
 }
 
 /// Arguments for `run start`.
@@ -793,6 +798,13 @@ pub enum ProposedVerb {
     Override,
     /// `shprd readmit`: an agent is usable again.
     Readmit,
+    /// `shprd run close`: the run's work is all landed or dropped, so the run
+    /// ends and a new one can start. It throws nothing away.
+    ///
+    /// The card hangs on the task the agent is working on, because a card is
+    /// drawn in one task's timeline; the verb it confirms is the run's, so
+    /// `shprd run close` is what runs, not a task's own.
+    Close,
 }
 
 /// Arguments for `agent propose`.
@@ -1002,9 +1014,10 @@ pub struct TaskStatusArgs {
 /// Arguments for `agent task add`.
 #[derive(Debug, Args)]
 pub struct TaskAddArgs {
-    /// Task id, e.g. `M1.6`.
+    /// Task id, e.g. `M1.6`. Leave it out and shprd assigns the next free
+    /// `T<n>` and prints it.
     #[arg(long, value_name = "ID")]
-    pub id: String,
+    pub id: Option<String>,
     /// One-line title.
     #[arg(long, value_name = "TITLE")]
     pub title: String,

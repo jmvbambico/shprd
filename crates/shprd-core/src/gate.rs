@@ -162,7 +162,10 @@ pub fn rounds_spent_ask(attempt: u32) -> String {
 /// writing, so one failure is told once. It names the attempt, so a second
 /// failure after another round is a new card rather than a repeat.
 pub fn rounds_spent_prefix(task: &str, attempt: u32, rounds: u32) -> String {
-    format!("{task}: its review of attempt {attempt} failed {rounds} time(s) and no round is left")
+    format!(
+        "{task}: its review of {} failed {rounds} time(s) and no round is left",
+        crate::event::attempt_label(task, attempt)
+    )
 }
 
 /// The attempt a card's body names, when `body` is one about `task`.
@@ -172,27 +175,34 @@ pub fn rounds_spent_prefix(task: &str, attempt: u32, rounds: u32) -> String {
 /// so one rule covers a review that spent its rounds, a send-back that did not
 /// start, and a step that keeps failing.
 pub fn card_attempt(task: &str, body: &str) -> Option<u32> {
+    // A name is `<task>·a<n>` now; bodies written before that said `attempt <n>`.
     let named = |prefix: &str, tail: &str| -> Option<u32> {
         let rest = body.strip_prefix(prefix)?;
         let (digits, rest) = rest.split_once(' ')?;
+        let digits = digits.strip_prefix(&format!("{task}·a")).unwrap_or(digits);
         let attempt: u32 = digits.parse().ok()?;
         rest.starts_with(tail).then_some(attempt)
     };
     if !body.starts_with(task) {
         return None;
     }
-    named(&format!("{task}: its review of attempt "), "failed ")
+    named(&format!("{task}: its review of "), "failed ")
+        .or_else(|| named(&format!("{task}: its review of attempt "), "failed "))
+        .or_else(|| named(&format!("{task}: sending "), "back did not start: "))
         .or_else(|| named(&format!("{task}: sending attempt "), "back did not start: "))
         // A step that keeps failing names its attempt in parentheses, after the
-        // words that say what failed: `… 3 passes in a row (attempt 2): …`.
-        .or_else(|| tagged_attempt(body))
+        // words that say what failed: `… 3 passes in a row (T1·a2): …`.
+        .or_else(|| tagged_attempt(task, body))
 }
 
-/// The attempt a body marks with `(attempt N)`, when it does.
-fn tagged_attempt(body: &str) -> Option<u32> {
-    let (_, rest) = body.split_once("(attempt ")?;
-    let (digits, rest) = rest.split_once(')')?;
-    rest.starts_with(':').then(|| digits.parse().ok())?
+/// The attempt a body marks with `(<task>·a<n>)` (or the older `(attempt <n>)`).
+fn tagged_attempt(task: &str, body: &str) -> Option<u32> {
+    let after = |open: &str| -> Option<u32> {
+        let (_, rest) = body.split_once(open)?;
+        let (digits, rest) = rest.split_once(')')?;
+        rest.starts_with(':').then(|| digits.parse().ok())?
+    };
+    after(&format!("({task}·a")).or_else(|| after("(attempt "))
 }
 
 /// The card a review that spent its rounds puts in front of a person.
@@ -538,7 +548,10 @@ pub fn has_open_update_failure(state: &RunState, repo: &str) -> bool {
 /// It names the attempt, so a second failure of the same attempt is one card and
 /// the attempt after it is a new one.
 pub fn send_back_failure_prefix(task: &str, attempt: u32) -> String {
-    format!("{task}: sending attempt {attempt} back did not start: ")
+    format!(
+        "{task}: sending {} back did not start: ",
+        crate::event::attempt_label(task, attempt)
+    )
 }
 
 /// What recording a review's verdict comes to.
@@ -937,6 +950,18 @@ mod tests {
         assert_eq!(card_attempt("T1", repeated), Some(2));
         // Anything else is not a card about an attempt, and a card for another
         // task is not this task's.
+        assert_eq!(
+            card_attempt("T1", &rounds_spent_prefix("T1", 3, 2)),
+            Some(3)
+        );
+        assert_eq!(
+            card_attempt("T1", &send_back_failure_prefix("T1", 4)),
+            Some(4)
+        );
+        assert_eq!(
+            card_attempt("T1", "T1: its `start` step failed (T1·a2): x"),
+            Some(2)
+        );
         assert_eq!(card_attempt("T1", "T1 is ready to land"), None);
         assert_eq!(card_attempt("T2", &spent), None);
         assert_eq!(
