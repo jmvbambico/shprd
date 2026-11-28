@@ -3236,6 +3236,13 @@ pub(crate) fn ensure_coordinator(
     // one, and the Agents list does not fill up with them.
     if let Some(found) = find_coordinator(&env.home, &env.ctx.root, mux, space) {
         end_other_coordinators(mux, &env.ctx.root, space, Some(&found.pane));
+        // The found coordinator's own tab (matched by its pane, never by a
+        // fixed id) takes the role's name: a custom one from the settings is
+        // kept across restarts, and an older shprd's "Assistant" is migrated,
+        // never duplicated.
+        let role = env.settings.resolve(None).role(COORDINATOR_ROLE);
+        let wanted = coordinator_name(role.as_ref());
+        rename_found_coordinator_tab(mux, space, &found.pane, &wanted);
         tidy_window_tabs(mux, env, space, None);
         return Ok(CoordinatorStart::Running(found.pane));
     }
@@ -3579,8 +3586,14 @@ impl PendingPrompt {
 /// The settings role the repository's coordinator agent runs as.
 const COORDINATOR_ROLE: &str = "coordinator";
 
-/// What the coordinator's tab is called, as Shepherdr calls its own.
+/// What another product's coordinator tab is called (Shepherdr's), and what
+/// shprd's own was called before the role's built-in name became "Orchestrator":
+/// a tab of this name that is not shprd's is never touched, and a shprd tab of
+/// this name is still the coordinator's.
 const ASSISTANT_TITLE: &str = "Assistant";
+
+/// What the coordinator's tab is called until the person renames its role.
+const DEFAULT_COORDINATOR_TITLE: &str = "Orchestrator";
 
 /// The name shprd's tab takes when another product already has an "Assistant"
 /// in the space.
@@ -3632,10 +3645,10 @@ fn restart_coordinator_with(
 }
 
 /// What the person calls the coordinator: its role's name, which is the
-/// built-in "Assistant" until they rename it.
+/// built-in "Orchestrator" until they rename it.
 pub(crate) fn coordinator_name(role: Option<&shprd_core::settings::ResolvedRole>) -> String {
     role.map_or_else(
-        || ASSISTANT_TITLE.to_owned(),
+        || DEFAULT_COORDINATOR_TITLE.to_owned(),
         shprd_core::settings::ResolvedRole::display_title,
     )
 }
@@ -3645,18 +3658,58 @@ pub(crate) fn coordinator_name(role: Option<&shprd_core::settings::ResolvedRole>
 /// an "Assistant" to every space), in which case "shprd". Another product's tab
 /// is never renamed.
 fn assistant_title(mux: &dyn Host, space: &shprd_mux::Space, wanted: &str) -> String {
+    assistant_title_excluding(mux, space, wanted, None)
+}
+
+/// [`assistant_title`] where the tab `own` is the coordinator's and never counts
+/// as another product's.
+fn assistant_title_excluding(
+    mux: &dyn Host,
+    space: &shprd_mux::Space,
+    wanted: &str,
+    own_tab: Option<&shprd_mux::TabId>,
+) -> String {
     let taken = mux
         .tab_names(&space.id)
         .unwrap_or_default()
         .into_iter()
         .any(|(id, name)| {
-            let own = is_coordinator_tab(id.as_str()) || id.as_str() == OLD_COORDINATOR_TAB;
+            let own = is_coordinator_tab(id.as_str())
+                || id.as_str() == OLD_COORDINATOR_TAB
+                || own_tab == Some(&id);
             !own && name.trim().eq_ignore_ascii_case(wanted)
         });
     if taken {
         ASSISTANT_FALLBACK_TITLE.to_owned()
     } else {
         wanted.to_owned()
+    }
+}
+
+/// Gives the tab of the running coordinator `pane` the role's name `wanted`
+/// (a custom one from the settings, or the built-in default), whatever the
+/// tab's id: this covers an older shprd's "Assistant" too. Only the tab holding
+/// that pane is touched, never another by id or by title. A failure is only
+/// logged.
+fn rename_found_coordinator_tab(
+    mux: &dyn Host,
+    space: &shprd_mux::Space,
+    pane: &PaneId,
+    wanted: &str,
+) {
+    let Some(tab) = mux
+        .list_tabs(&space.id)
+        .unwrap_or_default()
+        .into_iter()
+        .find(|tab| tab.root_pane == *pane)
+    else {
+        return;
+    };
+    let title = assistant_title_excluding(mux, space, wanted, Some(&tab.id));
+    if tab.title != title
+        && let Err(err) = mux.rename_tab(&tab.id, &title)
+    {
+        tracing::debug!(%err, "the coordinator's tab was not renamed");
     }
 }
 
@@ -5091,7 +5144,7 @@ project_dirs = []
             .list_tabs(&again.space.id)
             .unwrap_or_else(|err| panic!("{err}"));
         assert_eq!(tabs.len(), 1, "only the coordinator is left: {tabs:?}");
-        assert_eq!(tabs[0].title, ASSISTANT_TITLE);
+        assert_eq!(tabs[0].title, DEFAULT_COORDINATOR_TITLE);
     }
 
     /// SHPR-88: a Shepherdr space adopted for the first time (not made by shprd,
@@ -5185,7 +5238,7 @@ project_dirs = []
             .unwrap_or_else(|err| panic!("{err}"));
         assert_eq!(tabs.len(), 1, "only the coordinator is left: {tabs:?}");
         assert_eq!(tabs[0].root_pane, pane);
-        assert_eq!(tabs[0].title, ASSISTANT_TITLE);
+        assert_eq!(tabs[0].title, DEFAULT_COORDINATOR_TITLE);
         let exe = std::env::current_exe().unwrap_or_default();
         let exe = exe.canonicalize().unwrap_or(exe);
         assert!(
@@ -5229,6 +5282,91 @@ project_dirs = []
             matches!(replaced, CoordinatorStart::Started(_)),
             "{replaced:?}"
         );
+    }
+
+    /// An older shprd's coordinator is running in a tab titled "Assistant": a
+    /// restart through `ensure_coordinator` reuses that very agent, renames its
+    /// tab to the new default, and starts no second one.
+    #[test]
+    fn a_restart_reuses_an_old_assistant_coordinator_and_renames_its_tab() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.spawn_env(&ctx);
+        let mux = FakeMux::default().with_ready_agent();
+        let prepared =
+            ensure_repo_space(&mux, scratch.root()).unwrap_or_else(|err| panic!("{err}"));
+        let old = stray_coordinator(&mux, &prepared.space, scratch.root());
+        let titles = |mux: &FakeMux| {
+            mux.list_tabs(&prepared.space.id)
+                .unwrap_or_else(|err| panic!("{err}"))
+                .into_iter()
+                .filter(|tab| tab.root_pane == old)
+                .map(|tab| tab.title)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(titles(&mux), vec!["Assistant"]);
+        let _ = mux.take_calls();
+
+        let started = ensure_coordinator(&mux, &env, &prepared, |pending| pending.deliver(&mux))
+            .unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(started, CoordinatorStart::Running(old.clone()));
+        assert_eq!(running(&mux), vec![old.clone()], "no second coordinator");
+        assert!(
+            !mux.calls()
+                .iter()
+                .any(|call| matches!(call, Call::SpawnAgent(..)))
+        );
+        assert_eq!(titles(&mux), vec!["Orchestrator"]);
+    }
+
+    /// A custom coordinator title from the settings is kept across restarts, and
+    /// only the found coordinator's tab takes it: an unrelated tab, even one with
+    /// the fixed coordinator id, is left alone.
+    #[test]
+    fn a_custom_title_survives_restarts_and_an_unrelated_tab_is_left_alone() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.spawn_env_with(&ctx, "[roles.coordinator]\ntitle = \"Captain\"\n");
+        let mux = FakeMux::default().with_ready_agent();
+        let prepared =
+            ensure_repo_space(&mux, scratch.root()).unwrap_or_else(|err| panic!("{err}"));
+        let old = stray_coordinator(&mux, &prepared.space, scratch.root());
+        let unrelated = mux.with_tab_id(&prepared.space.id, COORDINATOR_TAB, "Notes");
+        let title_of = |pane: &PaneId| {
+            mux.list_tabs(&prepared.space.id)
+                .unwrap_or_default()
+                .into_iter()
+                .find(|tab| tab.root_pane == *pane)
+                .map(|tab| tab.title)
+        };
+        for _ in 0..3 {
+            let started =
+                ensure_coordinator(&mux, &env, &prepared, |pending| pending.deliver(&mux))
+                    .unwrap_or_else(|err| panic!("{err}"));
+            assert_eq!(started, CoordinatorStart::Running(old.clone()));
+            assert_eq!(title_of(&old).as_deref(), Some("Captain"));
+        }
+        assert_eq!(
+            title_of(&unrelated.root_pane).as_deref(),
+            Some("Notes"),
+            "the unrelated tab keeps its name"
+        );
+    }
+
+    /// The avoidance of another product's tab holds for both names: the old
+    /// "Assistant" a person kept as their role's title, and the new default.
+    #[test]
+    fn the_other_products_tab_is_avoided_under_either_name() {
+        let scratch = Scratch::new();
+        let mux = FakeMux::default();
+        let prepared =
+            ensure_repo_space(&mux, scratch.root()).unwrap_or_else(|err| panic!("{err}"));
+        let space = &prepared.space;
+        mux.with_tab_id(&space.id, "tb42", "Assistant");
+        assert_eq!(assistant_title(&mux, space, "Assistant"), "shprd");
+        assert_eq!(assistant_title(&mux, space, "Orchestrator"), "Orchestrator");
+        mux.with_tab_id(&space.id, "tb43", "Orchestrator");
+        assert_eq!(assistant_title(&mux, space, "Orchestrator"), "shprd");
     }
 
     /// A coordinator an earlier start left behind: running, with no record that
@@ -5407,18 +5545,19 @@ project_dirs = []
     #[test]
     fn the_coordinators_name_comes_from_its_role() {
         use shprd_core::settings::{File, Request, resolve};
-        assert_eq!(coordinator_name(None), "Assistant");
-        let named = File::parse("[roles.coordinator]\ntitle = \"Orchestrator\"\n")
+        assert_eq!(coordinator_name(None), "Orchestrator");
+        let named = File::parse("[roles.coordinator]\ntitle = \"Captain\"\n")
             .unwrap_or_else(|err| panic!("{err}"));
         let resolved = resolve(&named, &Request::default());
         assert_eq!(
             coordinator_name(resolved.role("coordinator").as_ref()),
-            "Orchestrator"
+            "Captain",
+            "a title the person set wins"
         );
         let plain = resolve(&File::default(), &Request::default());
         assert_eq!(
             coordinator_name(plain.role("coordinator").as_ref()),
-            "Assistant"
+            "Orchestrator"
         );
     }
 
@@ -5756,7 +5895,11 @@ project_dirs = []
             .unwrap_or_else(|err| panic!("{err}"));
         let titled = |title: &str| tabs.iter().filter(|tab| tab.title == title).count();
         assert_eq!(titled("Assistant"), 1, "only the other product's: {tabs:?}");
-        assert_eq!(titled("shprd"), 1, "shprd's own tab takes another name");
+        assert_eq!(
+            titled("Orchestrator"),
+            1,
+            "shprd's own tab takes the default name beside it"
+        );
         assert!(tabs.iter().any(|tab| tab.id == foreign.id), "{tabs:?}");
         assert!(
             tabs.iter().any(|tab| tab.id == elsewhere.id),

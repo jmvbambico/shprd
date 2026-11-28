@@ -54,7 +54,7 @@ test("a task's line says the reviewer's own name only when it has one", () => {
 
 test("the coordinator's row and Jump carry its name", () => {
   assert.equal(coordinatorRow(named).title, "Orchestrator");
-  assert.equal(coordinatorRow(state).title, "Assistant");
+  assert.equal(coordinatorRow(state).title, "Orchestrator");
   const items = jumpItems(named, [{ id: "sp", name: "shprd · shprd", folder: "/x/shprd", active: true, tabs: [] }], "orch");
   assert.ok(items.some((item) => /^Orchestrator/.test(item.sub ?? "")), JSON.stringify(items));
 });
@@ -90,7 +90,7 @@ test("the settings page lists each role's name, with the built-in word as its fa
   const list = roles(document, { programs: [] });
   const [coordinator, worker] = list;
   assert.equal(coordinator.title, "Orchestrator");
-  assert.deepEqual([coordinator.name.key, coordinator.name.value, coordinator.name.fallback], ["roles.coordinator.title", "Orchestrator", "Assistant"]);
+  assert.deepEqual([coordinator.name.key, coordinator.name.value, coordinator.name.fallback], ["roles.coordinator.title", "Orchestrator", "Orchestrator"]);
   assert.equal(worker.title, "Worker (s)", "the built-in word is headed as a list");
 });
 

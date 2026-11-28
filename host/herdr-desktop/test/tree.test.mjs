@@ -140,7 +140,7 @@ test("agents: needs you first, with role, program and state", () => {
   assert.equal(rows[0].state, "needs_you");
   const worker = rows.find((row) => row.task === "SHPR-22");
   assert.deepEqual([worker.role, worker.program, worker.line], ["Worker", "claude", "working · 4m"]);
-  const coordinator = rows.find((row) => row.role === "Assistant" && row.space === "sp-shprd");
+  const coordinator = rows.find((row) => row.role === "Orchestrator" && row.space === "sp-shprd");
   assert.equal(coordinator.name, "shprd");
   assert.equal(agentsOfTask(state, "SHPR-23")[0].program, "codex");
 });

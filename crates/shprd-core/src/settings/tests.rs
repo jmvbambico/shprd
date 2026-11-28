@@ -86,7 +86,7 @@ fn the_three_built_in_roles_are_the_first_rows() {
         "the three built-ins, in their own order"
     );
     let coordinator = resolved.role("coordinator").expect("the coordinator");
-    assert_eq!(coordinator.label(), "Assistant");
+    assert_eq!(coordinator.label(), "Orchestrator");
     assert_eq!(coordinator.kind.value, RoleKind::Coordinator);
     assert_eq!(coordinator.prompt.value, "prompt:assistant");
     let reviewer = resolved.role("reviewer").expect("the reviewer");
@@ -1088,7 +1088,7 @@ fn a_role_is_shown_under_its_own_name_or_its_built_in_one() {
     // The built-in names: the coordinator keeps Shepherdr's word.
     let resolved = resolve(&File::default(), &Request::default());
     let names: std::collections::BTreeMap<_, _> = resolved.role_titles().into_iter().collect();
-    assert_eq!(names["coordinator"], "Assistant");
+    assert_eq!(names["coordinator"], "Orchestrator");
     assert_eq!(names["worker"], "Worker");
     assert_eq!(names["reviewer"], "Reviewer");
 
@@ -1112,7 +1112,7 @@ fn a_role_is_shown_under_its_own_name_or_its_built_in_one() {
 fn an_empty_or_blank_name_falls_back_to_the_built_in_title() {
     assert_eq!(display_title("", "worker"), "Worker");
     assert_eq!(display_title("   \t ", "reviewer"), "Reviewer");
-    assert_eq!(display_title("", "coordinator"), "Assistant");
+    assert_eq!(display_title("", "coordinator"), "Orchestrator");
     // A custom role falls back to its id.
     assert_eq!(display_title("  ", "docs"), "docs");
 }

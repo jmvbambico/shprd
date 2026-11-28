@@ -109,7 +109,7 @@ test("the roles are the ones the settings resolve, in their order", () => {
   assert.deepEqual(roleIds(SETTINGS), ["coordinator", "worker", "reviewer", "docs"]);
   assert.deepEqual(
     roles(SETTINGS, ROSTER).map((entry) => entry.title),
-    ["Assistant", "Worker (s)", "Reviewer (s)", "docs"],
+    ["Orchestrator", "Worker (s)", "Reviewer (s)", "docs"],
   );
   assert.deepEqual(role("worker").picks.map((entry) => entry.field), PICKS);
 });
