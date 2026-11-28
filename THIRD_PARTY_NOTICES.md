@@ -209,6 +209,12 @@ SOFTWARE.
   `host/herdr-desktop/mods/shprd-tabs/icons/kilo.svg`
 - Used for: the Kilo harness icon in tabs, the Agents pane and Settings program tabs, where
   Herdr's own list of agents has none
+- Where the other harness icons (Claude, Codex, Pi, OpenCode) come from: not shprd's files. They
+  are Herdr's own agent icons, read at run time from `knownAgents()` (the `herdr` module) and
+  mapped harness id to `{icon, tint}` by `harnessIcons()` in
+  `host/herdr-desktop/mods/lib/panel.js` (copied into each mod by `bin/sync-shared`). shprd
+  never copies or changes them; `OWN_HARNESS_ICONS` there adds only Kilo, and an icon Herdr
+  gives always wins.
 - License: MIT, Copyright (c) 2026 Kilo Code (Kilo-Org/kilocode `LICENSE`; the repository has no
   separate brand or trademark terms, and kilo.ai publishes none). The logo is the product's mark,
   shown only to identify Kilo (nominative use) in this open-source tool.

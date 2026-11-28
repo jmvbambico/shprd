@@ -365,22 +365,26 @@ export function plainSpaces(served, herdrSpaces = []) {
  * The Agents pane's rows. Ungrouped: one row per live agent, needs-you first.
  * Grouped: a `head` row per space, then its agents.
  *
- * A row is `{kind: "agent", id, name, role, program, line, glyph, tone, pct,
+ * A row is `{kind: "agent", id, name, role, program, icon, tint, line, glyph, tone, pct,
  * task, space}`; `name` is the task's `id title`, or the space's name for a
  * coordinator.
  */
-export function agentRows(state, { grouped = false, now = Date.now() } = {}) {
+export function agentRows(state, { grouped = false, now = Date.now(), icons = {} } = {}) {
   const spaces = new Map(spacesOf(state).map((space) => [space.id, space]));
   const order = { needs_you: 0, working: 1, done: 2, idle: 3 };
   const rows = liveAgents(state, now).map((agent) => {
     const task = taskOf(state, agent);
     const shape = agentLook(agent);
+    const harness = icons?.[String(agent.program ?? "")];
     return {
       kind: "agent",
       id: agent.id,
       name: task ? `${task.id} ${task.title}` : (spaces.get(agent.space)?.name ?? agent.space ?? ""),
       role: roleTitle(state, agent.role),
       program: String(agent.program ?? ""),
+      // The harness's icon, from `harnessIcons` (Herdr's own, plus shprd's for Kilo).
+      icon: harness?.icon ?? null,
+      tint: Boolean(harness?.tint),
       line: agentLine(agent, now),
       glyph: shape.glyph,
       tone: shape.tone,

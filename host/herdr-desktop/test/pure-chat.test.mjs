@@ -98,3 +98,37 @@ test("a kilo agent gets the Kilo icon, and Herdr's own icon still wins", async (
   assert.equal(harnessIcons([{ key: "kilo", icon: "theirs.svg" }]).kilo.icon, "theirs.svg");
   assert.equal(harnessIcons(null).kilo.icon, "mods/shprd-tabs/icons/kilo.svg", "Herdr failing leaves kilo's");
 });
+
+test("a kilo agent in the Agents pane is drawn with the Kilo icon", async () => {
+  const { default: Agents } = await import("../mods/shprd-agents/main.js");
+  const { harnessIcons } = await import("../mods/lib/panel.js");
+  const { agentRows } = await import("../mods/lib/tree.js");
+  const NOW = 1_000_000;
+  const state = {
+    spaces: [{ id: "sp", name: "shprd" }],
+    tasks: [{ id: "T1", title: "x", space: "sp", derived: { status: "working" } }],
+    live_agents: [
+      { id: "a1", space: "sp", task: "T1", role: "worker", program: "kilo", state: "working", since_ms: NOW - 5000 },
+      { id: "a2", space: "sp", task: "T1", role: "reviewer", program: "claude", state: "working", since_ms: NOW - 5000 },
+    ],
+  };
+  // Herdr knows claude only; kilo's icon is shprd's own.
+  const icons = harnessIcons([{ key: "claude", icon: "claude.svg", tint: false }]);
+  const rows = agentRows(state, { icons, now: NOW });
+  const kilo = rows.find((r) => r.program === "kilo");
+  assert.equal(kilo.icon, "mods/shprd-tabs/icons/kilo.svg");
+  assert.equal(rows.find((r) => r.program === "claude").icon, "claude.svg");
+
+  // Render the pane's real row and find the icon element it draws.
+  const pane = Object.create(Agents.prototype);
+  pane.picked = null;
+  record(true);
+  let tree;
+  try {
+    tree = pane.row(herdr.theme(), { red: "#f00" }, kilo);
+  } finally {
+    record(false);
+  }
+  const drawn = walk(tree).map((n) => n.src).filter(Boolean);
+  assert.ok(drawn.includes("mods/shprd-tabs/icons/kilo.svg"), `the row draws the Kilo icon (drew ${drawn})`);
+});

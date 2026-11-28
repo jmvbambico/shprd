@@ -11,12 +11,12 @@
 //
 // Layout: the Spaces mod's own column in `layouts/shprd.json`, below it.
 
-import { View, div } from "gpui-kit";
+import { View, div, image, svg } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
-import { nextCommand, run, setShared, spaces, theme } from "herdr";
+import { knownAgents, nextCommand, run, setShared, spaces, theme } from "herdr";
 
 import { adoptCache, attach, downNotice, forgetAll, reason, remember, singleFlight, syncRepo, watchSwitch } from "./lib/client.js";
-import { activeTaskId, note, openTaskChat, statusGlyph } from "./lib/panel.js";
+import { activeTaskId, harnessIcons, note, openTaskChat, statusGlyph } from "./lib/panel.js";
 import { H, RADIUS, TEXT, tone } from "./lib/tokens.js";
 import { agentRows, herdrSpaceOf } from "./lib/tree.js";
 import { followChanges } from "./lib/watch.js";
@@ -34,6 +34,16 @@ export default class Agents extends View {
     this.watching = false;
     this.grouped = this.load("grouped", false) === true;
     this.picked = null;
+    // Harness icons by id, from Herdr's known agents plus shprd's own (Kilo).
+    this.icons = harnessIcons(null);
+    cx.spawn(async () => {
+      try {
+        this.icons = harnessIcons(await knownAgents());
+        cx.notify();
+      } catch {
+        // Keep shprd's own icons; the row is words only for the rest.
+      }
+    });
     this.refresh();
     cx.timer.every(FLOOR_MS, (cx) => this.refresh(cx));
     watchSwitch(this, cx);
@@ -44,7 +54,7 @@ export default class Agents extends View {
         const command = String(await nextCommand());
         if (command === "grouped") this.toggle();
         else if (command.startsWith("open:")) {
-          const row = agentRows(this.state, {}).find((entry) => entry.id === command.slice(5));
+          const row = agentRows(this.state, { icons: this.icons }).find((entry) => entry.id === command.slice(5));
           if (row) this.open(row);
         }
       }
@@ -139,7 +149,7 @@ export default class Agents extends View {
     syncRepo(this);
     const t = theme();
     const colors = tone(t);
-    const rows = this.state ? agentRows(this.state, { grouped: this.grouped }) : null;
+    const rows = this.state ? agentRows(this.state, { grouped: this.grouped, icons: this.icons }) : null;
     const body =
       rows === null
         ? [note(t, this.failure ?? (this.state === null ? "Loading…" : "No run yet."))]
@@ -250,6 +260,16 @@ export default class Agents extends View {
                   .flex_none()
                   .text_size(TEXT.label)
                   .text_color(t.dim)
+                  .flex()
+                  .gap(4)
+                  .items_center()
+                  .when(Boolean(row.icon), (el) =>
+                    el.child(
+                      row.tint
+                        ? svg(row.icon).size(12).flex_none().text_color(t.muted)
+                        : image(row.icon).size(12).flex_none(),
+                    ),
+                  )
                   .child(`${row.role} · ${row.program}`),
               ),
           )

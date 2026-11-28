@@ -18,8 +18,8 @@ export function record(on) {
 }
 
 /** One chainable element: every method answers itself, `child`/`children` included. */
-function element() {
-  const node = { idv: null, click: null, down: null, keydown: null, drop: null, kids: [], calls: [] };
+function element(src = null) {
+  const node = { src, idv: null, click: null, down: null, keydown: null, drop: null, kids: [], calls: [] };
   const add = (c) => {
     if (Array.isArray(c)) c.forEach(add);
     else if (c !== null && c !== undefined && c !== false) node.kids.push(c);
@@ -220,8 +220,8 @@ export const NumberInput = { new: () => element() };
 export const div = () => element();
 export const h_flex = () => element();
 export const v_flex = () => element();
-export const svg = () => element();
-export const image = () => element();
+export const svg = (path) => element(path);
+export const image = (path) => element(path);
 export const ScrollHandle = {
   new: () => ({
     /** The row indexes a mod asked to reveal, in order. */
