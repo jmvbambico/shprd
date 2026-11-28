@@ -34,6 +34,12 @@ pub struct RunState {
     /// A person's dismissal sticks for the same words; an engine's retirement
     /// does not, so the same cause arising again is raised again.
     pub retired_needs: std::collections::BTreeSet<u64>,
+    /// The reason the fold closed an escalation itself (`task landed`,
+    /// `task dropped`), keyed by its sequence number.
+    ///
+    /// Such an escalation is also in [`Self::dismissed_needs`]; this map is the
+    /// recorded reason, so a view can say why it is gone.
+    pub closed_needs: BTreeMap<u64, String>,
     /// Asks raised during the run, keyed by task and ask id.
     ///
     /// The queue's files hold the same asks; the fold is what the board and
@@ -181,6 +187,54 @@ pub struct AskRecord {
     pub raised_seq: u64,
     /// Its answer, once one was recorded.
     pub answer: Option<AskAnswerRecord>,
+}
+
+/// The reason recorded when a landing closes a task's open cards.
+pub const CLOSED_LANDED: &str = "task landed";
+/// The reason recorded when a drop closes a task's open cards.
+pub const CLOSED_DROPPED: &str = "task dropped";
+/// The reason recorded when an override answers a spent review's card.
+pub const CLOSED_OVERRIDDEN: &str = "overridden";
+/// The reason recorded when a new attempt answers a spent review's card.
+pub const CLOSED_RETRIED: &str = "retried";
+
+impl RunState {
+    /// Closes every open ask and escalation of `task`, recording `reason`.
+    fn close_task_cards(&mut self, task: &str, reason: &str, seq: u64) {
+        for record in self.asks.values_mut() {
+            if record.task == task && record.answer.is_none() {
+                record.answer = Some(AskAnswerRecord {
+                    text: reason.to_string(),
+                    seq,
+                });
+            }
+        }
+        for escalation in &self.escalations {
+            if escalation.task.as_deref() == Some(task)
+                && !self.dismissed_needs.contains(&escalation.seq)
+            {
+                self.dismissed_needs.insert(escalation.seq);
+                self.closed_needs.insert(escalation.seq, reason.to_string());
+            }
+        }
+    }
+
+    /// Closes the open out-of-rounds and stuck-review asks of `task`: the
+    /// situation they ask about was answered another way.
+    fn close_review_asks(&mut self, task: &str, reason: &str, seq: u64) {
+        for record in self.asks.values_mut() {
+            if record.task == task
+                && record.answer.is_none()
+                && (record.id.starts_with(crate::gate::ROUNDS_SPENT_ASK_PREFIX)
+                    || record.id.starts_with(crate::review::STUCK_ASK_PREFIX))
+            {
+                record.answer = Some(AskAnswerRecord {
+                    text: reason.to_string(),
+                    seq,
+                });
+            }
+        }
+    }
 }
 
 impl AskRecord {
@@ -647,6 +701,7 @@ impl RunState {
                 branch,
             } => {
                 self.agents.entry(agent.clone()).or_default();
+                self.close_review_asks(task, CLOSED_RETRIED, event.seq);
                 if let Some(entry) = self.tasks.get_mut(task) {
                     entry.status = TaskStatus::Working;
                     // A fresh attempt is fresh work, so a "nothing to merge"
@@ -847,6 +902,7 @@ impl RunState {
                 if let Some(entry) = self.tasks.get_mut(task) {
                     entry.status = TaskStatus::Integrated;
                 }
+                self.close_task_cards(task, CLOSED_LANDED, event.seq);
             }
             EventKind::ScopeWidened { task, paths } => {
                 if let Some(entry) = self.tasks.get_mut(task) {
@@ -915,6 +971,7 @@ impl RunState {
                     entry.status = TaskStatus::Dropped;
                     entry.dropped_reason = Some(reason.clone());
                 }
+                self.close_task_cards(task, CLOSED_DROPPED, event.seq);
             }
             EventKind::Dry {
                 agent,
@@ -1043,6 +1100,7 @@ impl RunState {
                     self.run_overrides.push(record);
                 } else if let Some(entry) = self.tasks.get_mut(task) {
                     entry.overrides.push(record);
+                    self.close_review_asks(task, CLOSED_OVERRIDDEN, event.seq);
                 }
             }
             EventKind::Resource {
@@ -1162,6 +1220,9 @@ impl RunState {
                 // its own to merge, both settle the task: it is done. The
                 // second keeps the head it looked at in `nothing_to_merge`,
                 // which is what a board reads to say "done, nothing to merge".
+                if self.tasks.contains_key(task) {
+                    self.close_task_cards(task, CLOSED_LANDED, event.seq);
+                }
                 if let Some(entry) = self.tasks.get_mut(task) {
                     match outcome {
                         crate::event::LandOutcome::Merged
@@ -1965,6 +2026,142 @@ mod tests {
         assert_eq!(pr.number, 12);
         assert_eq!(pr.approved_head, Some("bbb222".to_string()));
         assert!(pr.merged, "a merged landing marks the pull request merged");
+    }
+
+    fn raise(seq: u64, id: &str) -> Event {
+        ev(
+            seq,
+            EventKind::AskRaised {
+                task: "a".to_string(),
+                ask: id.to_string(),
+                ask_kind: crate::ask::AskKind::Question,
+                text: "what now?".to_string(),
+                options: Vec::new(),
+                created_at_ms: seq * 1000,
+                expires_at_ms: None,
+            },
+        )
+    }
+
+    fn escalate(seq: u64) -> Event {
+        ev(
+            seq,
+            EventKind::Escalated {
+                task: Some("a".to_string()),
+                body: "stuck".to_string(),
+                default_action: String::new(),
+            },
+        )
+    }
+
+    fn answer_of(state: &RunState, id: &str) -> Option<String> {
+        state
+            .asks
+            .get(&("a".to_string(), id.to_string()))
+            .and_then(|ask| ask.answer.as_ref().map(|a| a.text.clone()))
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn a_landing_closes_the_tasks_open_asks_and_escalations() {
+        let state = fold_extra(vec![
+            raise(3, "q-1"),
+            raise(4, "review-out-1"),
+            escalate(5),
+            ev(
+                6,
+                EventKind::TaskLanded {
+                    task: "a".to_string(),
+                    base: "main".to_string(),
+                    head: "bbb222".to_string(),
+                    number: None,
+                    outcome: LandOutcome::NothingToMerge,
+                },
+            ),
+        ])
+        .expect("folds");
+        assert_eq!(answer_of(&state, "q-1").as_deref(), Some("task landed"));
+        assert_eq!(
+            answer_of(&state, "review-out-1").as_deref(),
+            Some("task landed")
+        );
+        assert!(state.dismissed_needs.contains(&5));
+        assert_eq!(
+            state.closed_needs.get(&5).map(String::as_str),
+            Some("task landed")
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn a_drop_closes_the_tasks_open_asks_and_escalations() {
+        let state = fold_extra(vec![
+            raise(3, "review-stuck-1-1"),
+            escalate(4),
+            ev(
+                5,
+                EventKind::TaskDropped {
+                    task: "a".to_string(),
+                    reason: "no longer wanted".to_string(),
+                },
+            ),
+        ])
+        .expect("folds");
+        assert_eq!(
+            answer_of(&state, "review-stuck-1-1").as_deref(),
+            Some("task dropped")
+        );
+        assert_eq!(
+            state.closed_needs.get(&4).map(String::as_str),
+            Some("task dropped")
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn an_override_closes_the_out_of_rounds_ask_but_not_a_question() {
+        let state = fold_extra(vec![
+            raise(3, "review-out-1"),
+            raise(4, "q-1"),
+            ev(
+                5,
+                EventKind::Override {
+                    task: "a".to_string(),
+                    rule: crate::rules::INTEGRATE_AFTER_FAILED_GATE.to_string(),
+                    reason: "fine".to_string(),
+                },
+            ),
+        ])
+        .expect("folds");
+        assert_eq!(
+            answer_of(&state, "review-out-1").as_deref(),
+            Some("overridden")
+        );
+        assert_eq!(answer_of(&state, "q-1"), None);
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn a_retry_closes_the_out_of_rounds_ask() {
+        let state = fold_extra(vec![
+            raise(3, "review-out-1"),
+            ev(
+                4,
+                EventKind::Spawned {
+                    task: "a".to_string(),
+                    attempt: 1,
+                    agent: "claude".to_string(),
+                    model: None,
+                    worktree: "/tmp/wt".to_string(),
+                    branch: "feature/a".to_string(),
+                },
+            ),
+        ])
+        .expect("folds");
+        assert_eq!(
+            answer_of(&state, "review-out-1").as_deref(),
+            Some("retried")
+        );
     }
 
     #[test]
