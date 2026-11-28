@@ -1182,7 +1182,9 @@ mod tests {
         }
         let mut ask = record("ask-1", None, None);
         ask.task = "T7".to_string();
-        state.asks.insert(("T7".to_string(), "ask-1".to_string()), ask);
+        state
+            .asks
+            .insert(("T7".to_string(), "ask-1".to_string()), ask);
         let mut snap = snapshot(&state, NOW);
         let mut landing = std::collections::BTreeSet::new();
         landing.insert("T6".to_string());
