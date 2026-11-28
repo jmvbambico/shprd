@@ -60,7 +60,7 @@ import {
   restartable,
   tabMenu,
 } from "./lib/menu.js";
-import { countsBadge, openAddTask, openNewSpace, sweepTaskTabs } from "./lib/panel.js";
+import { countsBadge, harnessIcons, openAddTask, openNewSpace, sweepTaskTabs } from "./lib/panel.js";
 import { panelButtons, rememberPanel, seenWith, shownPanel, strayTab, tabRows, coordinatorProgram } from "./lib/tabstrip.js";
 import { RADIUS, TEXT, tone } from "./lib/tokens.js";
 
@@ -207,10 +207,7 @@ export default class Tabs extends View {
     if (this.iconsRead) return;
     this.iconsRead = true;
     try {
-      for (const entry of (await knownAgents()) ?? []) {
-        const id = entry.key ?? (entry.run ?? [])[0];
-        if (id && entry.icon) this.icons[id] = { icon: entry.icon, tint: Boolean(entry.tint) };
-      }
+      this.icons = harnessIcons(await knownAgents());
     } catch {
       // No icons: the tab is words only.
     }
