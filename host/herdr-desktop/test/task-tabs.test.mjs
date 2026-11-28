@@ -154,3 +154,50 @@ test("the tab wears the icon of the harness on the task: the worker's while work
   live.live_agents = [{ id: "a", task: "T1", role: "reviewer", program: "codex", state: "working" }];
   assert.equal(iconOf(live).icon, "codex.svg", "a live reviewer agent is the same answer");
 });
+
+// SHP-7: a restart opens no tab by itself, a stale request is dropped, a landed task's tab closes at startup, a task tab selects on click.
+import { clearStaleRequests, staleRequests } from "../mods/lib/panel.js";
+import { pillRelease } from "../mods/lib/tabstrip.js";
+
+test("a restart with a stale focus key opens no tab and clears the key", () => {
+  herdr.setShared("shprd.chat.focus", { space: "T34", at: Date.now() - 86_400_000 });
+  herdr.setShared("shprd.chat.composer", { space: "T34", at: Date.now() - 86_400_000 });
+  assert.deepEqual(clearStaleRequests(STATE).sort(), ["shprd.chat.composer", "shprd.chat.focus"]);
+  assert.equal(herdr.shared("shprd.chat.focus"), null);
+  assert.equal(herdr.shared("shprd.chat.composer"), null);
+  assert.deepEqual(tabsOf(), [], "no tab opened");
+  assert.ok(!herdr.RUNS.some((r) => r.name === "tab.new" || r.name === "tab.select"));
+});
+
+test("a request naming a landed, dropped or unknown task is ignored and cleared, a live fresh one stays", () => {
+  const now = 1_000_000;
+  const tasks = [
+    { id: "T1", status: "running", derived: { status: "working" } },
+    { id: "T2", status: "merged", derived: { status: "done" } },
+    { id: "T3", status: "dropped" },
+  ];
+  const at = now - 1000;
+  const entries = { a: { space: "T1", at }, b: { space: "T2", at }, c: { space: "T3", at }, d: { space: "T9", at }, e: null, f: { space: "coordinator", at } };
+  assert.deepEqual(staleRequests(tasks, entries, now), ["b", "c", "d"]);
+});
+
+test("a landed task's restored tab is closed at startup, even when it is the shown one", () => {
+  const spaces = structuredClone(SPACES);
+  spaces[0].tabs.push({ id: "tab-t34", name: "T34", active: true });
+  spaces[0].tabs[0].active = false;
+  herdr.setSpaces(spaces);
+  herdr.setPanes([{ pane: "p", mod: "shprd-chat", tab: "tab-t34", props: { space: "T34" } }]);
+  const landed = { tasks: [{ id: "T34", status: "merged", derived: { status: "done" } }] };
+  assert.deepEqual(sweepTaskTabs(landed), [], "a later sweep keeps the shown tab");
+  assert.deepEqual(sweepTaskTabs(landed, { startup: true }), ["T34"]);
+  assert.deepEqual(herdr.RUNS, [{ name: "tab.select", args: { id: "tab-main" } }, { name: "tab.close", args: { id: "tab-t34" } }]);
+});
+
+test("a task tab selects on click, even when tabs shifted between press and release", () => {
+  const rows = [{ id: "coord", index: 0 }, { id: "tab-t34", index: 1 }];
+  assert.deepEqual(pillRelease(rows[1], rows[1], rows), { select: "tab-t34" });
+  assert.deepEqual(pillRelease(null, rows[1], rows), { select: "tab-t34" }, "no remembered press");
+  // The tab pressed closed meanwhile (an ended tab swept): a click, not a move.
+  assert.deepEqual(pillRelease({ id: "gone", index: 1 }, rows[1], rows), { select: "tab-t34" });
+  assert.deepEqual(pillRelease(rows[0], rows[1], rows), { move: "coord", index: 2 }, "a real drag still moves");
+});

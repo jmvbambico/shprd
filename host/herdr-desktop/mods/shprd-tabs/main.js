@@ -59,8 +59,8 @@ import {
   restartable,
   tabMenu,
 } from "./lib/menu.js";
-import { countsBadge, harnessIcons, openAddTask, openNewSpace, sweepTaskTabs } from "./lib/panel.js";
-import { panelButtons, rememberPanel, seenWith, shownPanel, strayTab, tabRows, coordinatorProgram } from "./lib/tabstrip.js";
+import { clearStaleRequests, countsBadge, harnessIcons, openAddTask, openNewSpace, sweepTaskTabs } from "./lib/panel.js";
+import { panelButtons, pillRelease, rememberPanel, seenWith, shownPanel, strayTab, tabRows, coordinatorProgram } from "./lib/tabstrip.js";
 import { RADIUS, TEXT, tone } from "./lib/tokens.js";
 
 /** How often the bar re-reads the board the pills borrow their words from. */
@@ -182,7 +182,11 @@ export default class Tabs extends View {
       // Read each beat, so a role's new program shows without a restart.
       this.settings = await this.client.settings().catch(() => this.settings);
       await this.readIcons();
-      sweepTaskTabs(this.state);
+      // The first sweep after a start also closes a restored tab of a task that
+      // landed meanwhile, shown or not; leftover focus requests are cleared.
+      sweepTaskTabs(this.state, { startup: !this.startupSwept });
+      if (Array.isArray(this.state?.tasks)) this.startupSwept = true;
+      clearStaleRequests(this.state);
       // The pills are painted before the roster is asked for: the roster can take
       // a moment (a program that lists its own models is a process), and a bar
       // that waits for it is a bar with no counts on the first frame. The "+"
@@ -596,14 +600,12 @@ export default class Tabs extends View {
       .on_mouse_up("left", () => {
         const from = this.pressed;
         this.pressed = null;
-        if (from && from.index !== row.index) {
-          // A drag across the bar moves the pressed tab to where it was dropped.
-          // The host counts a tab's index from one, so the target is the dropped
-          // tab's own position in its space (Shepherdr's `tab.move`, `:163`).
-          run("tab.move", { id: from.id, index: row.index + 1 });
-        } else {
-          run("tab.select", { id: row.id });
-        }
+        // A click selects; a drag across the bar moves the pressed tab to where it
+        // was dropped. The host counts a tab's index from one (Shepherdr's
+        // `tab.move`, `:163`). Compared by tab id, not position (`pillRelease`).
+        const act = pillRelease(from, row, tabRows(this.space(), panes(), this.state));
+        if (act.move) run("tab.move", { id: act.move, index: act.index });
+        else run("tab.select", { id: act.select });
       })
       .on_mouse_down("right", (_event, cx) => {
         cx?.stop_propagation?.();
