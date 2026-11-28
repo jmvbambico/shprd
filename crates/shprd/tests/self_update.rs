@@ -658,13 +658,32 @@ fn a_new_binary_that_cannot_fold_a_repository_log_is_rolled_back() {
     // The "unfoldable" build is the real shprd serving a repository whose log it
     // cannot fold; its own /api/health/repos says so.
     let world = World::new("crates/x.rs", "unfoldable");
-    // The updated repository's log holds something this build cannot fold.
-    fs::create_dir_all(world.repo.join(".shprd")).unwrap();
-    fs::write(
-        world.repo.join(".shprd/events.jsonl"),
-        "{\"this\": \"is not an event\"}\n",
+    // The updated repository's log is a real run (started by the real CLI) plus a
+    // well-formed `ask_answered` the fold refuses, the class of failure the
+    // 2026-11-28 incident had: every line parses, the fold rejects the sequence.
+    world.start_run();
+    let mut log =
+        shprd_core::log::EventLog::open(&world.repo.join(".shprd").join("events.jsonl")).unwrap();
+    log.append(
+        shprd_core::event::Actor::Human,
+        shprd_core::event::EventKind::AskAnswered {
+            task: "chat-tail".to_string(),
+            ask: "review-out-2".to_string(),
+            answer: "late".to_string(),
+        },
+        &shprd_core::log::SystemClock,
     )
     .unwrap();
+    drop(log);
+    assert!(
+        shprd_core::state::RunState::fold(
+            &shprd_core::log::EventLog::read_all(&world.repo.join(".shprd").join("events.jsonl"))
+                .unwrap()
+                .events
+        )
+        .is_err(),
+        "the seeded log must be one a build cannot fold"
+    );
     let out = world.helper("ok", "unfoldable");
     assert!(out.status.success(), "a rollback is reported: {out:?}");
     assert!(
