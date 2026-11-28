@@ -28,7 +28,7 @@
 // every mod folder that imports it. Edit the source, never a copy.
 
 import { forYou, newestDecision } from "./board.js";
-import { desktopWords, roleRename } from "./tokens.js";
+import { desktopWords, roleRename, waitLabel } from "./tokens.js";
 
 /** How many toasts are on screen at once (`core/toasts.js:11`). */
 export const SHOWN = 3;
@@ -181,10 +181,12 @@ export function newsItems(changes, state) {
       // settles (operational, out of rounds, a stopped agent, the run-wide
       // card, which has no task row) is not told to the person at all.
       if (!isTheirs(state, task)) continue;
+      const label = waitLabel((state?.tasks ?? []).find((entry) => entry?.id === task));
+      const said = label.charAt(0).toUpperCase() + label.slice(1);
       items.push({
         id: eventId(change.seq),
         level,
-        title: task ? `${task} · Needs you` : "Needs you",
+        title: task ? `${task} · ${said}` : said,
         body: needBody(state, task),
         task,
       });
