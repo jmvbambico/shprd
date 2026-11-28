@@ -80,7 +80,9 @@ export default class Pane extends View {
     const wired = props();
     const self = panes().find((p) => p.pane === wired?.pane);
     const view = paneChat({ pane: self, terminals: terminals(), spaces: spaces() });
-    if (view.chatMode && (view.space ?? "coordinator") === want.space) this.toTerminal(wired.pane, view, cx);
+    // Only a pane with an agent parked behind it, in the asked-for space, acts: a
+    // task's chat-only pane never takes the coordinator's request.
+    if (view.chatMode && view.agent !== null && (view.space ?? "coordinator") === want.space) this.toTerminal(wired.pane, view, cx);
   }
 
   /** The folder as a person writes it: `~` for home and `~/a/b` under it. */
@@ -204,6 +206,11 @@ export default class Pane extends View {
    */
   closeAgent(pane, view, self) {
     this.ending = false;
+    // A chat-only pane (a task's chat with no agent behind it) closes itself only.
+    if (view.chatMode && view.chatOnly) {
+      run("pane.close", { pane });
+      return;
+    }
     const terminal = view.chatMode ? view.agent : self?.terminal;
     if (terminal) run("terminal.kill", { terminal });
     run("pane.close", { pane });
@@ -220,7 +227,7 @@ export default class Pane extends View {
     const status = (view.chatMode ? agent?.status : (self?.agent?.status ?? self?.status)) ?? "idle";
     const program = view.chatMode ? agent?.program : self?.program;
     // An agent's × asks before it ends the agent; a shell's just closes its pane.
-    const isAgent = view.chatMode || Boolean(program?.agent);
+    const isAgent = (view.chatMode && !view.chatOnly) || Boolean(program?.agent);
     // shprd's own agent (a task's, the coordinator) says whose it is, as Shepherdr
     // labels its Assistant, not the program's name.
     const name =

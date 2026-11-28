@@ -1222,6 +1222,12 @@ export default class Chat extends View {
       openThread({ task: this.space, title: "" }, "terminal");
       return;
     }
+    // A pane fixed to one task with no terminal parked behind it has nothing for the
+    // pane's own switch to show: the task's terminal is in the Tasks thread.
+    if (this.fixed && this.fixed !== COORDINATOR && !props()?.terminal) {
+      openThread({ task: this.fixed, title: "" }, "terminal");
+      return;
+    }
     setShared(TERMINAL_KEY, { space: this.space ?? COORDINATOR, at: Date.now() });
   }
 

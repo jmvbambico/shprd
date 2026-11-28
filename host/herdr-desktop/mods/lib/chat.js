@@ -604,10 +604,14 @@ export function agentOf(chat, terminals = []) {
  */
 export function paneChat({ pane, terminals = [], spaces = [] } = {}) {
   const chatMode = pane?.mod === CHAT_MOD;
-  const space = spaceOfTab(pane?.tab, spaces);
+  // A chat pane's own props name its space first: a pane showing a task inside the
+  // coordinator's tab is that task's chat, not the coordinator's.
+  const own = chatMode && pane?.props?.space ? String(pane.props.space) : null;
+  const space = own ?? spaceOfTab(pane?.tab, spaces);
   if (chatMode) {
     const agent = agentOf(pane?.pane, terminals);
-    return { chatMode, agent, space, canSwitch: agent !== null };
+    // `chatOnly`: no agent is parked behind this pane, so closing it must not end anyone.
+    return { chatMode, agent, space, canSwitch: agent !== null, chatOnly: agent === null };
   }
   const agent = pane?.terminal ?? null;
   const reports = pane?.status !== null && pane?.status !== undefined;
