@@ -200,3 +200,15 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+## Kilo Code logo
+
+- Source: https://github.com/Kilo-Org/kilocode, path `packages/kilo-docs/public/img/logo.svg`
+  (the file's last change is commit 8009ffe801de0f8df251dc015b4fec201c8e5267, 2026-02-18; read
+  at `main` e7ab222e8b5f065d7259568db11261080781c667 on 2026-11-28), copied unchanged to
+  `host/herdr-desktop/mods/shprd-tabs/icons/kilo.svg`
+- Used for: the Kilo harness icon in tabs, the Agents pane and Settings program tabs, where
+  Herdr's own list of agents has none
+- License: MIT, Copyright (c) 2026 Kilo Code (Kilo-Org/kilocode `LICENSE`; the repository has no
+  separate brand or trademark terms, and kilo.ai publishes none). The logo is the product's mark,
+  shown only to identify Kilo (nominative use) in this open-source tool.

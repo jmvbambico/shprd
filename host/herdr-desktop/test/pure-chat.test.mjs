@@ -83,3 +83,18 @@ test("the coordinator's tab is named by its role and wears its harness's icon", 
   [row] = tabRows(SPACE, [], state, coordinatorProgram(settings("nope"), ICONS));
   assert.equal(row.icon, null, "a harness with no icon draws none");
 });
+
+test("a kilo agent gets the Kilo icon, and Herdr's own icon still wins", async () => {
+  const { harnessIcons } = await import("../mods/lib/panel.js");
+  const known = [{ key: "claude", icon: "claude.svg", tint: false }, { key: "codex", icon: "codex.svg", tint: true }];
+  const icons = harnessIcons(known);
+  assert.equal(icons.kilo.icon, "mods/shprd-tabs/icons/kilo.svg");
+  assert.equal(icons.kilo.tint, true);
+  assert.equal(icons.claude.icon, "claude.svg");
+  assert.ok(readFileSync(new URL("../" + icons.kilo.icon, import.meta.url), "utf8").includes("<svg"), "the file exists");
+  // A kilo agent's tab, and the settings' program tabs, read the same map.
+  const [row] = tabRows(SPACE, [], { role_titles: {} }, coordinatorProgram(settings("kilo"), icons));
+  assert.equal(row.icon, "mods/shprd-tabs/icons/kilo.svg");
+  assert.equal(harnessIcons([{ key: "kilo", icon: "theirs.svg" }]).kilo.icon, "theirs.svg");
+  assert.equal(harnessIcons(null).kilo.icon, "mods/shprd-tabs/icons/kilo.svg", "Herdr failing leaves kilo's");
+});

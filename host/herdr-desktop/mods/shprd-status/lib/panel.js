@@ -551,6 +551,27 @@ export const ICONS = "mods/shprd-tabs/icons";
 export const iconFile = (name) => `${ICONS}/${name}.svg`;
 
 /**
+ * Harness icons shprd ships because Herdr's own list of agents (`knownAgents()`)
+ * has none for them, by harness id. Herdr's icons are never copied or changed; an
+ * icon Herdr does give always wins.
+ */
+export const OWN_HARNESS_ICONS = { kilo: { icon: iconFile("kilo"), tint: true } };
+
+/**
+ * The harnesses' icons by id (`{ icon, tint }`) from Herdr's known agents, plus
+ * shprd's own for a harness Herdr draws nothing for.
+ */
+export function harnessIcons(known) {
+  const icons = {};
+  for (const entry of known ?? []) {
+    const id = entry?.key ?? (entry?.run ?? [])[0];
+    if (id && entry.icon) icons[id] = { icon: entry.icon, tint: Boolean(entry.tint) };
+  }
+  for (const [id, own] of Object.entries(OWN_HARNESS_ICONS)) if (!icons[id]) icons[id] = { ...own };
+  return icons;
+}
+
+/**
  * The pie's picture for a progress: one file per 5 %, at least 5 (Shepherdr's
  * `lib/dot.js`, `mods/tasks/pie/`). No progress reads half full.
  */

@@ -35,7 +35,7 @@ import { closeOverlay, exec, knownAgents, nextCommand, openOverlay, props, setSh
 import { RepoCache, SEND_PROBLEM, activeFolder, attach, downNotice, press, reason, singleFlight } from "./lib/client.js";
 import * as files from "./attach.js";
 import { Dictation, available as dictationAvailable } from "./dictate.js";
-import { iconFile, openThread, popupAt, press as clickPress } from "./lib/panel.js";
+import { harnessIcons, iconFile, openThread, popupAt, press as clickPress } from "./lib/panel.js";
 import {
   MENU_W,
   PICK_KEY,
@@ -578,10 +578,7 @@ export default class Chat extends View {
       this.rosterAsked = false;
     }
     try {
-      for (const entry of (await knownAgents()) ?? []) {
-        const id = entry.key ?? (entry.run ?? [])[0];
-        if (id && entry.icon) this.icons[id] = { icon: entry.icon, tint: Boolean(entry.tint) };
-      }
+      this.icons = harnessIcons(await knownAgents());
     } catch {
       // Words only.
     }

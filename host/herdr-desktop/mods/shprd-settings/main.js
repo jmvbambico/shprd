@@ -91,6 +91,7 @@ import {
   badge,
   button,
   icon,
+  harnessIcons,
   iconFile,
   link,
   note,
@@ -315,11 +316,7 @@ export default class Settings extends View {
     if (this.iconsRead) return;
     this.iconsRead = true;
     try {
-      const known = await knownAgents();
-      for (const entry of known ?? []) {
-        const id = entry.key ?? (entry.run ?? [])[0];
-        if (id && entry.icon) this.icons[id] = { icon: entry.icon, tint: Boolean(entry.tint) };
-      }
+      this.icons = harnessIcons(await knownAgents());
     } catch {
       // No icons: the tabs and rows are words only.
     }
