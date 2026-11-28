@@ -87,15 +87,26 @@ done
 if [ "$VERSION" = unfoldable ]; then
   [ -f "$FAKE_STATE/unfoldable-served" ] && exit 1
   touch "$FAKE_STATE/unfoldable-served"
-  "$FAKE_REAL" --repo "$FAKE_BAD_REPO" --home "$FAKE_HOME" serve --port 0 &
+  # The real service keeps its own state directory, so the helper cannot see it
+  # until this script hands the record over: after the log has gone bad. That
+  # makes the order fixed (the helper's health check can never run first).
+  REAL_HOME="$FAKE_STATE.real"
+  mkdir -p "$REAL_HOME"
+  XDG_STATE_HOME="$REAL_HOME" "$FAKE_REAL" --repo "$FAKE_BAD_REPO" --home "$FAKE_HOME" serve --port 0 &
   real=$!
   trap 'kill $real 2>/dev/null' TERM INT
   # The repository was readable when the service started (the real service
   # refuses a log it cannot read at start-up); its log goes bad once the
   # service is up, which is what an old log under a newer fold looks like to a
   # service that already holds the repository. The health check folds it again.
-  until grep -q "$real" "$FAKE_STATE/service.json" 2>/dev/null; do sleep 0.02; done
+  until grep -q "$real" "$REAL_HOME/shprd/service.json" 2>/dev/null; do sleep 0.02; done
+  # The service records itself before it loads its repository, so wait until
+  # the repository is registered; a log spoiled earlier is simply not served.
+  port=$(sed 's/.*"port":\([0-9]*\).*/\1/' "$REAL_HOME/shprd/service.json")
+  until curl -s "http://127.0.0.1:$port/api/health/repos" 2>/dev/null | grep -q '"checked":1'; do sleep 0.02; done
   printf '{{"this": "is not an event"}}\n' > "$FAKE_BAD_REPO/.shprd/events.jsonl"
+  cp "$REAL_HOME/shprd/service.json" "$FAKE_STATE/service.json.tmp"
+  mv "$FAKE_STATE/service.json.tmp" "$FAKE_STATE/service.json"
   wait $real
   exit $?
 fi
