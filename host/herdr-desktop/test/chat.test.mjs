@@ -453,6 +453,7 @@ test("the switch is drawn on agent panes of a chat space, and on a chat with a l
     agent: "t1",
     space: "T1",
     canSwitch: true,
+    chatOnly: false,
   });
   assert.equal(agentOf("p9", [{ ...parked[0], state: "gone" }]), null, "a dead agent has nothing to go back to");
   assert.equal(paneChat({ pane: chat, terminals: [], spaces: SPACES }).canSwitch, false);
@@ -1049,4 +1050,29 @@ test("an open review-out ask draws a card with its three answers, through the ch
     assert.ok(words.includes(choice), `the drawn card offers "${choice}"`);
   }
   assert.ok(nodes.some((node) => node.idv === `chat-card-${made.id}`), "the card is drawn");
+});
+
+test("a chat pane showing a task inside the coordinator's tab reads the task, not the coordinator", () => {
+  const taskChat = { pane: "p7", terminal: null, mod: CHAT_MOD, tab: "tb1", props: { space: "T1" } };
+  const view = paneChat({ pane: taskChat, terminals: [], spaces: SPACES });
+  assert.equal(view.space, "T1");
+  assert.equal(view.chatOnly, true, "no agent is parked behind it");
+  const plain = paneChat({ pane: { ...taskChat, props: {} }, terminals: [], spaces: SPACES });
+  assert.equal(plain.space, COORDINATOR, "without props it still follows its tab");
+});
+
+test("Show terminal in a pane fixed to a task opens that task's terminal in the thread", () => {
+  herdr.reset();
+  herdr.setProps({ space: "T1" });
+  const { view } = panel();
+  view.fixed = "T1";
+  view.space = "T1";
+  view.showTerminal();
+  assert.equal(herdr.SHARED.has("shprd.pane.terminal"), false, "no request for a pane to act on");
+  assert.ok(herdr.RUNS.some((r) => r.name === "layout.select" && r.args?.child === "tasks-thread-term"));
+  herdr.reset();
+  view.fixed = null;
+  view.space = COORDINATOR;
+  view.showTerminal();
+  assert.equal(herdr.SHARED.get("shprd.pane.terminal").space, COORDINATOR, "the coordinator still asks its own pane");
 });

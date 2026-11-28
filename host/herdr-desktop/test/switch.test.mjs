@@ -157,3 +157,46 @@ test("the thread's Chat and Terminal segments select their stack children, both 
     record(false);
   }
 });
+
+test("the coordinator's terminal request is ignored by a task's chat-only pane, taken by its own", async () => {
+  herdr.reset();
+  const calls = listen();
+  herdr.setSpaces(SPACES);
+  herdr.setShared("shprd.pane.terminal", { space: "coordinator", at: Date.now() + 1 });
+  // A task chat in the coordinator's tab: props name T1, nothing parked behind it.
+  herdr.setProps({ pane: "chat9" });
+  herdr.setPanes([{ pane: "chat9", mod: "shprd-chat", tab: "tab1", props: { space: "T1" } }]);
+  herdr.setTerminals([]);
+  const view = new Pane();
+  view.terminalSeen = null;
+  view.takeTerminalRequest({ spawn() {}, notify() {} });
+  assert.deepEqual(calls, [], "a task's pane does not act on the coordinator's request");
+});
+
+test("closing a chat-only pane closes the pane and never kills an agent", async () => {
+  herdr.reset();
+  const calls = listen();
+  herdr.setProps({ pane: "chat9" });
+  herdr.setSpaces(SPACES);
+  herdr.setPanes([{ pane: "chat9", mod: "shprd-chat", tab: "tab1", props: { space: "T1" } }]);
+  herdr.setTerminals([{ address: "t1", state: "live", labels: {} }]);
+  const view = new Pane();
+  const { cx } = renderCx();
+  view.hovered = true;
+  record(true);
+  try {
+    const tree = view.render(cx);
+    const node = walk(tree).find((entry) => entry.idv === "pane-close-chat9");
+    assert.ok(node, "the header draws a close");
+    node.click({}, clickCx([]));
+  } finally {
+    record(false);
+  }
+  assert.equal(view.ending, undefined, "no 'End agent?' question is asked");
+  assert.deepEqual(herdr.RUNS.map((r) => r.name), ["pane.close"]);
+  assert.deepEqual(calls, []);
+  // closeAgent reached some other way still only closes the pane
+  herdr.RUNS.length = 0;
+  view.closeAgent("chat9", { chatMode: true, chatOnly: true, agent: null }, null);
+  assert.deepEqual(herdr.RUNS.map((r) => r.name), ["pane.close"]);
+});
