@@ -1868,7 +1868,20 @@ fn reuse_worktree(env: &SpawnEnv<'_>, path: &Path, branch: &str) -> Option<Workt
         return None;
     }
     let base = base_for_new_work(env);
-    if git.run(&["rebase", &base]).is_err() {
+    // A rebase writes commits, so git wants a committer. A machine with no
+    // git identity (a CI runner, a fresh account) would otherwise fail it and
+    // lose the kept build, so shprd lends one only when none is configured.
+    let mut rebase = vec!["-c", "rebase.autoStash=false"];
+    let has_identity = ["user.name", "user.email"].iter().all(|key| {
+        git.run(&["config", "--get", key])
+            .is_ok_and(|v| !v.trim().is_empty())
+    }) || (std::env::var_os("GIT_COMMITTER_NAME").is_some()
+        && std::env::var_os("GIT_COMMITTER_EMAIL").is_some());
+    if !has_identity {
+        rebase.extend(["-c", "user.name=shprd", "-c", "user.email=shprd@localhost"]);
+    }
+    rebase.extend(["rebase", base.as_str()]);
+    if git.run(&rebase).is_err() {
         let _ = git.run(&["rebase", "--abort"]);
         return None;
     }

@@ -19,7 +19,7 @@ describe("newsItems", () => {
       task("T2", "needs_you", { derived: { status: "needs_you", reason: "Wants a yes", for_you: true } }),
       task("T3", "queued", { attempts: [failedAttempt] }),
     ],
-    { needs: [{ task: "T2", body: "Pick a branch", default_action: "drop", seq: 3, kind: "decision", actions: [], key: "" }] },
+    { needs: [{ task: "T2", body: "Pick a branch", default_action: "drop", seq: 3, kind: "decision", actions: [], key: "", for_you: true }] },
   );
 
   it("tells a landing, a need and a failed review in the log's words", () => {
