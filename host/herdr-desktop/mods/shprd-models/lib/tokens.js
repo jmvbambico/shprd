@@ -27,7 +27,7 @@ export const H = { xs: 20, sm: 24, lg: 32 };
  * `role_titles` (an older service, a fixture).
  */
 export const ROLE_DEFAULTS = {
-  coordinator: "Assistant",
+  coordinator: "Orchestrator",
   worker: "Worker",
   reviewer: "Reviewer",
 };

@@ -70,7 +70,7 @@ const settings = (agent) => ({ values: [{ key: "roles.coordinator.agent", value:
 test("the coordinator's tab is named by its role and wears its harness's icon", () => {
   const state = { role_titles: {} };
   let [row] = tabRows(SPACE, [], state, coordinatorProgram(settings("claude"), ICONS));
-  assert.equal(row.label, "Assistant", "the default role name, not the repository");
+  assert.equal(row.label, "Orchestrator", "the default role name, not the repository");
   assert.equal(row.icon, "claude.svg");
   assert.equal(row.tint, false);
 

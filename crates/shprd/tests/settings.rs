@@ -228,7 +228,7 @@ fn show_prints_every_key_with_the_layer_it_came_from() {
         "{shown}"
     );
     assert!(
-        shown.contains("roles.coordinator.title = \"Assistant\"  (built in)"),
+        shown.contains("roles.coordinator.title = \"Orchestrator\"  (built in)"),
         "{shown}"
     );
     assert!(

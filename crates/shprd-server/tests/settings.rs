@@ -485,10 +485,10 @@ async fn naming_the_coordinator_renames_its_tab_and_the_state_carries_the_names(
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         tabs.named.lock().expect("lock").last().map(String::as_str),
-        Some("Assistant")
+        Some("Orchestrator")
     );
     let (_, state) = fixture.send(Method::GET, "/api/state", None).await;
-    assert_eq!(state["role_titles"]["coordinator"], "Assistant");
+    assert_eq!(state["role_titles"]["coordinator"], "Orchestrator");
     // A name is cut to its cap.
     fixture
         .put(json!({"key": "roles.reviewer.title", "value": "x".repeat(60)}))

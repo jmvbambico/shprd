@@ -11,7 +11,7 @@
 //! order = ["coordinator", "worker", "reviewer", "docs"]
 //!
 //! [roles.coordinator]
-//! title = "Assistant"                     # the word the person sees
+//! title = "Orchestrator"                  # the word the person sees
 //! about = "Plans the work and starts a task for each part."
 //! kind = "coordinator"                    # coordinator | worker | reviewer | helper
 //! prompt = "prompt:assistant"             # "prompt:<id>" or a path
@@ -1645,7 +1645,7 @@ fn builtin_roles() -> Vec<(String, RoleDefaults)> {
         (
             "coordinator".to_owned(),
             RoleDefaults {
-                title: "Assistant".to_owned(),
+                title: "Orchestrator".to_owned(),
                 about: "Plans the work and starts a task for each part.".to_owned(),
                 kind: RoleKind::Coordinator,
                 prompt: "prompt:assistant".to_owned(),

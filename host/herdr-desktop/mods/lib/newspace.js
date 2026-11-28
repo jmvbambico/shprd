@@ -79,8 +79,8 @@ export function spaceNewArgs(folder) {
   return ["do", "space.new", "--folder", folder, "--name", spaceName(folder)];
 }
 
-/** The tab the new space opens on: the shprd assistant's chat view, named like Shepherdr's. */
-export const ASSISTANT_TAB = "Assistant";
+/** The tab the new space opens on: the shprd assistant's chat view, named by its default role name. */
+export const ASSISTANT_TAB = "Orchestrator";
 
 /**
  * The `herdr-app do tab.new` arguments for the assistant's tab in a space: the
