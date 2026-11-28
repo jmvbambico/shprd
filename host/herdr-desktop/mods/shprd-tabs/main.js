@@ -45,6 +45,7 @@ import {
   shared,
   spaces,
   theme,
+  knownAgents,
   window,
 } from "herdr";
 
@@ -59,7 +60,7 @@ import {
   restartable,
   tabMenu,
 } from "./lib/menu.js";
-import { countsBadge, openAddTask, openNewSpace } from "./lib/panel.js";
+import { countsBadge, openAddTask, openNewSpace, sweepTaskTabs } from "./lib/panel.js";
 import { panelButtons, rememberPanel, seenWith, shownPanel, strayTab, tabRows, coordinatorProgram } from "./lib/tabstrip.js";
 import { RADIUS, TEXT, tone } from "./lib/tokens.js";
 
@@ -103,6 +104,11 @@ export default class Tabs extends View {
     this.cx = cx;
     this.state = null;
     this.client = null;
+    /** Harness icons by id (`{icon, tint}`), from the app's known agents: a task tab wears its agent's. */
+    this.icons = {};
+    this.iconsRead = false;
+    /** The shown tab at the last sweep of ended tasks' tabs: leaving a tab is what closes it. */
+    this.sweptActive = null;
     // What the panel showed in each space, and the space seen last: the panel
     // comes back as it was when a space is shown again (`rememberPanel`).
     this.memory = new Map();
@@ -177,6 +183,7 @@ export default class Tabs extends View {
       // Read each beat, so a role's new program shows without a restart.
       this.settings = await this.client.settings().catch(() => this.settings);
       await this.readIcons();
+      sweepTaskTabs(this.state);
       // The pills are painted before the roster is asked for: the roster can take
       // a moment (a program that lists its own models is a process), and a bar
       // that waits for it is a bar with no counts on the first frame. The "+"
@@ -367,7 +374,7 @@ export default class Tabs extends View {
 
   /** F2: the rename prompt for the shown tab, as a double-click on its pill. */
   renameActiveTab() {
-    const row = tabRows(this.space(), panes(), this.state, coordinatorProgram(this.settings, this.icons)).find((entry) => entry.active);
+    const row = tabRows(this.space(), panes(), this.state, coordinatorProgram(this.settings, this.icons), this.icons).find((entry) => entry.active);
     // A tab shprd titled keeps its title: it is how shprd finds the tab again.
     if (row && renamable({ name: row.name })) this.rename(row);
   }
@@ -405,7 +412,13 @@ export default class Tabs extends View {
     const t = theme();
     const colors = tone(t);
     const space = this.space();
-    const rows = tabRows(space, panes(), this.state, coordinatorProgram(this.settings, this.icons));
+    const rows = tabRows(space, panes(), this.state, coordinatorProgram(this.settings, this.icons), this.icons);
+    // Leaving a tab is when an ended task's tab can close: sweep when the shown tab changes.
+    const shownTab = rows.find((row) => row.active)?.id ?? null;
+    if (shownTab !== this.sweptActive) {
+      this.sweptActive = shownTab;
+      sweepTaskTabs(this.state);
+    }
     const pills = rows.map((row) => this.pill(t, colors, row));
     // The buttons are data until they are drawn: the same list is what says which
     // stacks the panel has, and each becomes one element below.
