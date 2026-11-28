@@ -195,8 +195,6 @@ pub const CLOSED_LANDED: &str = "task landed";
 pub const CLOSED_DROPPED: &str = "task dropped";
 /// The reason recorded when an override answers a spent review's card.
 pub const CLOSED_OVERRIDDEN: &str = "overridden";
-/// The reason recorded when a new attempt answers a spent review's card.
-pub const CLOSED_RETRIED: &str = "retried";
 
 impl RunState {
     /// Closes every open ask and escalation of `task`, recording `reason`.
@@ -701,7 +699,6 @@ impl RunState {
                 branch,
             } => {
                 self.agents.entry(agent.clone()).or_default();
-                self.close_review_asks(task, CLOSED_RETRIED, event.seq);
                 if let Some(entry) = self.tasks.get_mut(task) {
                     entry.status = TaskStatus::Working;
                     // A fresh attempt is fresh work, so a "nothing to merge"
@@ -2062,6 +2059,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::expect_used)]
     fn a_landing_closes_the_tasks_open_asks_and_escalations() {
         let state = fold_extra(vec![
             raise(3, "q-1"),
@@ -2092,6 +2090,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::expect_used)]
     fn a_drop_closes_the_tasks_open_asks_and_escalations() {
         let state = fold_extra(vec![
             raise(3, "review-stuck-1-1"),
@@ -2116,6 +2115,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::expect_used)]
     fn an_override_closes_the_out_of_rounds_ask_but_not_a_question() {
         let state = fold_extra(vec![
             raise(3, "review-out-1"),
@@ -2135,29 +2135,6 @@ mod tests {
             Some("overridden")
         );
         assert_eq!(answer_of(&state, "q-1"), None);
-    }
-
-    #[test]
-    fn a_retry_closes_the_out_of_rounds_ask() {
-        let state = fold_extra(vec![
-            raise(3, "review-out-1"),
-            ev(
-                4,
-                EventKind::Spawned {
-                    task: "a".to_string(),
-                    attempt: 1,
-                    agent: "claude".to_string(),
-                    model: None,
-                    worktree: "/tmp/wt".to_string(),
-                    branch: "feature/a".to_string(),
-                },
-            ),
-        ])
-        .expect("folds");
-        assert_eq!(
-            answer_of(&state, "review-out-1").as_deref(),
-            Some("retried")
-        );
     }
 
     #[test]
