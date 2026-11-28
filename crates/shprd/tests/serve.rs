@@ -26,7 +26,8 @@ use tempfile::TempDir;
 
 mod support;
 
-use support::herdr::{absent_socket, isolate};
+use support::herdr::absent_socket;
+use support::isolate;
 
 /// The binary under test, built by cargo for this integration test.
 const BIN: &str = env!("CARGO_BIN_EXE_shprd");
@@ -138,15 +139,14 @@ impl Service {
 
     /// Polls for `service.json`, which the service writes after it binds.
     fn wait_for_record(&self, state: &Path) {
-        let path = record_path(state);
         let deadline = Instant::now() + Duration::from_secs(15);
         while Instant::now() < deadline {
-            if path.exists() {
+            if record_path(state).exists() {
                 return;
             }
             sleep(Duration::from_millis(50));
         }
-        panic!("the service never wrote {}", path.display());
+        panic!("the service never wrote {}", record_path(state).display());
     }
 
     /// Stops the service with `SIGTERM`, as a supervisor would, and waits.
@@ -231,7 +231,7 @@ esac
 
 /// Where the service writes its discovery file.
 fn record_path(state: &Path) -> PathBuf {
-    state.join("shprd").join("service.json")
+    service_dir(state).join("service.json")
 }
 
 /// A throwaway repository root, with a run started in it.
@@ -320,9 +320,25 @@ fn read_record(state: &Path) -> Value {
     serde_json::from_str(&text).expect("the record is JSON")
 }
 
+/// The banner, once the service has printed it.
+///
+/// `service.json` is written before the banner, so the two are not the same
+/// signal: a test that read the file the instant the record appeared could see
+/// nothing, and flake on a busy machine.
+fn wait_for_banner(path: &Path) -> String {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let text = fs::read_to_string(path).unwrap_or_default();
+        if !text.trim().is_empty() || std::time::Instant::now() > deadline {
+            return text;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
 /// The token a client reads from the state directory.
 fn read_token(state: &Path) -> String {
-    fs::read_to_string(state.join("shprd").join("token"))
+    fs::read_to_string(service_dir(state).join("token"))
         .expect("the token is there")
         .trim()
         .to_string()
@@ -384,6 +400,70 @@ fn a_service_on_the_desktop_host_stops_with_code_zero_on_sigint() {
         status.success(),
         "Ctrl-C must stop the service quietly too, and it stopped with {status}"
     );
+}
+
+#[test]
+fn two_repositories_are_served_at_once_by_one_service() {
+    let (repo, state, home) = repo_with_a_run();
+    let other = TempDir::new().expect("a second repository");
+    let service = Service::start(repo.path(), state.path(), home.path());
+    let record = read_record(state.path());
+    let base = format!("http://127.0.0.1:{}", record["port"]);
+    let token = read_token(state.path());
+
+    // The second repository needs no second process: it is registered with the
+    // one that runs, by the token door, and answers on the same port.
+    let register = |folder: &Path| {
+        ureq::post(&format!("{base}/api/repos"))
+            .header("authorization", &format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .header("x-shprd", "1")
+            .send(serde_json::json!({ "folder": folder.display().to_string() }).to_string())
+            .expect("the registration is answered")
+            .body_mut()
+            .read_to_string()
+            .expect("a body")
+    };
+    let added: Value = serde_json::from_str(&register(other.path())).expect("JSON");
+    let real = fs::canonicalize(other.path()).expect("canonical");
+    assert_eq!(
+        fs::canonicalize(added["root"].as_str().unwrap()).expect("a root"),
+        real
+    );
+    let again: Value = serde_json::from_str(&register(other.path())).expect("JSON");
+    assert_eq!(
+        added["id"], again["id"],
+        "registering twice is one repository"
+    );
+
+    let (status, listed) = get(&format!("{base}/api/repos"), Some(&token)).expect("list");
+    assert_eq!(status, 200);
+    let listed: Value = serde_json::from_str(&listed).expect("JSON");
+    assert_eq!(
+        listed["repos"].as_array().map(Vec::len),
+        Some(2),
+        "{listed}"
+    );
+
+    // With two registered a request must name its repository, by id or path.
+    assert_eq!(
+        get(&format!("{base}/api/state"), Some(&token)).unwrap_err(),
+        400
+    );
+    let id = added["id"].as_str().unwrap();
+    let (status, _) = get(&format!("{base}/api/state?repo={id}"), Some(&token)).expect("by id");
+    assert_eq!(status, 200);
+    let by_path = format!(
+        "{base}/api/state?repo={}",
+        repo.path().canonicalize().unwrap().display()
+    );
+    assert_eq!(get(&by_path, Some(&token)).expect("by path").0, 200);
+    assert_eq!(
+        get(&format!("{base}/api/state?repo=/nowhere"), Some(&token)).unwrap_err(),
+        404,
+        "an unregistered repository is not opened as a path"
+    );
+    service.stop();
 }
 
 #[test]
@@ -587,7 +667,7 @@ fn serve_answers_the_api_and_leaves_no_record_behind() {
         "a clean shutdown removes service.json"
     );
     assert_eq!(
-        fs::read_to_string(state.path().join("shprd").join("token"))
+        fs::read_to_string(service_dir(state.path()).join("token"))
             .expect("the token stays for the next start")
             .trim()
             .len(),
@@ -617,12 +697,14 @@ fn a_service_started_before_the_run_says_so_and_sees_it_without_a_restart() {
     let base = format!("http://127.0.0.1:{port}");
     let token = read_token(state.path());
 
-    // The banner names the verb, not an empty run.
-    let text = fs::read_to_string(&banner_path).expect("the banner is written");
-    assert!(text.contains("no run yet"), "the banner says so: {text}");
+    // The banner names the verb, not an empty run. The record is written before
+    // the banner is printed, so a start that returned the moment the record
+    // appeared can find the banner still empty; wait for the sentence itself.
+    let text = wait_for_banner(&banner_path);
+    assert!(text.contains("no tasks yet"), "the banner says so: {text}");
     assert!(
-        text.contains("shprd run start"),
-        "the banner names the verb: {text}"
+        !text.contains("shprd run start"),
+        "the banner names no command: {text}"
     );
 
     // And the board says the same thing.
@@ -1015,14 +1097,22 @@ fn the_service_touches_a_change_file_a_herdr_mod_can_watch() {
     let (repo, state, home) = repo_with_a_run();
     // Held for the whole test: its `Drop` is what stops the service.
     let _service = Service::start(repo.path(), state.path(), home.path());
-    let change = state.path().join("shprd").join("changes");
 
     // It is there as soon as the service is: a window that starts first has a
     // real answer rather than a missing file.
-    let first: Value = serde_json::from_str(
-        &fs::read_to_string(&change).expect("the change file is written at start"),
-    )
-    .expect("the change file is JSON");
+    // The path is read fresh each time: under load the service's directory
+    // appears a moment after its banner.
+    let mut text = None;
+    for _ in 0..300 {
+        if let Ok(read) = fs::read_to_string(repo_dir(state.path()).join("changes")) {
+            text = Some(read);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let change = repo_dir(state.path()).join("changes");
+    let first: Value = serde_json::from_str(&text.expect("the change file is written at start"))
+        .expect("the change file is JSON");
     let start_seq = first["seq"].as_u64().expect("a sequence");
     assert_eq!(start_seq, 1, "the run start is the log's first event");
     assert!(first["at_ms"].as_u64().expect("a time") > 0);
@@ -1075,4 +1165,20 @@ fn the_service_touches_a_change_file_a_herdr_mod_can_watch() {
         Some(3),
         "a write by another process reaches a watching mod: {third}"
     );
+}
+
+/// The one service's directory under this state home.
+fn service_dir(state: &Path) -> PathBuf {
+    state.join("shprd")
+}
+
+/// The one repository's own directory under the service (its change file and
+/// last pass).
+fn repo_dir(state: &Path) -> PathBuf {
+    let repos = state.join("shprd").join("repos");
+    fs::read_dir(&repos)
+        .ok()
+        .and_then(|mut dirs| dirs.find_map(|entry| entry.ok()))
+        .map(|entry| entry.path())
+        .unwrap_or_else(|| repos.join("none"))
 }

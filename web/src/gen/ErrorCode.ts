@@ -3,4 +3,4 @@
 /**
  * Why a request was refused.
  */
-export type ErrorCode = "unauthorized" | "cross_origin" | "missing_header" | "bad_request" | "unknown_action" | "unknown_task" | "not_found" | "refused" | "ledger" | "internal";
+export type ErrorCode = "unauthorized" | "cross_origin" | "wrong_host" | "too_many_requests" | "reauth" | "missing_header" | "bad_request" | "unknown_action" | "unknown_task" | "not_found" | "refused" | "ledger" | "question_waiting" | "internal";

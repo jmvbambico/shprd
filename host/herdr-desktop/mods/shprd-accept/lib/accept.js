@@ -23,7 +23,8 @@
 // Shared: the source is `mods/lib/accept.js`; `bin/sync-shared` copies it into
 // every mod folder that uses it. Edit the source, never a copy.
 
-import { attempt, cut, taskById } from "./board.js";
+import { attempt, cut, rowActions, taskById } from "./board.js";
+import { agentsOfTask } from "./tree.js";
 
 /** How much of an agent's summary a card shows before the rest folds away. */
 export const SUMMARY_MAX = 160;
@@ -40,6 +41,7 @@ export const WORDS = {
   noSummary: "The agent wrote no summary.",
   changes: "Changes",
   checks: "Checks",
+  proof: "Proof",
   review: "Review",
   details: "Details",
   noChanges: "Nothing changed on its branch yet.",
@@ -49,12 +51,25 @@ export const WORDS = {
   accepting: "Accepting…",
   sendBack: "Send back",
   sendingBack: "Sending back…",
+  dropOpen: "Drop task…",
   drop: "Drop task",
+  dropQuestion: (ref) => `Drop ${ref}?`,
+  dropNote: "shprd stops working on it. Its branch and commits are kept.",
+  reasonDefault: "No reason given",
+  back: "Back",
   dropping: "Dropping…",
   cancel: "Cancel",
+  close: "Close",
+  moreLine: (n) => `And ${n} more`,
   reasonLabel: "Why drop it",
-  reasonPlaceholder: "One line, kept on the pull request",
+  reasonPlaceholder: "Why (optional). Shown on the pull request.",
 };
+
+/** The reason a drop is sent with: what was typed, trimmed, or the default when blank. */
+export function dropReason(text) {
+  const reason = String(text ?? "").trim();
+  return reason === "" ? WORDS.reasonDefault : reason;
+}
 
 /** The severity words, keyed by the API's `severity`, each with the tone it is drawn in. */
 export const SEVERITY = {
@@ -106,12 +121,63 @@ export function words(task) {
   return { summary: cutAt, details: said };
 }
 
-/** `3 files changed · +12 −4`, the line above the list. */
-export function changesLine(changes) {
+/** `3 commits`, `1 commit`. */
+export function commitsLine(count) {
+  return `${count} ${count === 1 ? "commit" : "commits"}`;
+}
+
+/** `4 files changed`, `1 file changed`. */
+export function filesLine(count) {
+  return `${count} ${count === 1 ? "file" : "files"} changed`;
+}
+
+/**
+ * The line above the list, in its parts: `3 commits · 4 files changed +12 −4`.
+ *
+ * Shepherdr's Changes line (`mods/accept-card/main.js` `changes()`): the counts
+ * are drawn in separate runs so the `+a` is green and the `−r` red. `commits` is
+ * null when the service did not say (an older service has no `commit_count`), and
+ * the line is then the files alone, never a made-up zero.
+ */
+export function changeCounts(changes) {
   const files = (changes?.files ?? []).length;
-  if (files === 0) return WORDS.noChanges;
-  const plural = files === 1 ? "file" : "files";
-  return `${files} ${plural} changed · +${changes.added ?? 0} −${changes.deleted ?? 0}`;
+  if (files === 0) return null;
+  return {
+    commits: typeof changes?.commit_count === "number" ? commitsLine(changes.commit_count) : null,
+    files: filesLine(files),
+    added: `+${changes.added ?? 0}`,
+    removed: `−${changes.deleted ?? 0}`,
+  };
+}
+
+/** The Changes line as plain text; the card draws [`changeCounts`] in colour. */
+export function changesLine(changes) {
+  const parts = changeCounts(changes);
+  if (parts === null) return WORDS.noChanges;
+  return `${[parts.commits, parts.files].filter(Boolean).join(" · ")} ${parts.added} ${parts.removed}`;
+}
+
+/**
+ * The one line a card shows when the task changed protected paths it did not
+ * declare (`protected` in `GET /api/tasks/<id>/changes`): "Touches protected
+ * paths: AGENTS.md, docs/plan.md". `null` when nothing is flagged. It is a flag
+ * for the person accepting, never a refusal.
+ */
+export function protectedLine(changes) {
+  const paths = Array.isArray(changes?.protected) ? changes.protected.filter(Boolean) : [];
+  return paths.length === 0 ? null : `Touches protected paths: ${paths.join(", ")}`;
+}
+
+/**
+ * The newest commits the service named, and how many more there are.
+ *
+ * `rest` is the count past what is listed, so the card says "And 2 more" instead
+ * of showing five of seven as if they were all of them.
+ */
+export function commitRows(changes) {
+  const rows = (changes?.commits ?? []).map((commit) => ({ sha: commit.sha, subject: commit.subject }));
+  const total = typeof changes?.commit_count === "number" ? changes.commit_count : rows.length;
+  return { rows, rest: Math.max(0, total - rows.length) };
 }
 
 /**
@@ -161,6 +227,17 @@ export function checks(task) {
     };
   });
   return { rows, alsoRan: report?.tests ?? [] };
+}
+
+/**
+ * The proof the hand-in named: one row per path, with its file name. Empty when
+ * the worker named none (or the service predates the field).
+ */
+export function proofs(task) {
+  return (attempt(task)?.report?.proofs ?? []).map((path) => ({
+    name: String(path).split("/").filter((part) => part !== "").pop() ?? String(path),
+    path: String(path),
+  }));
 }
 
 /**
@@ -233,25 +310,37 @@ export function reviewLine(task) {
  * A task that already landed, or was dropped, offers nothing: the card then says
  * where the task is instead ([`whereNow`]).
  */
-export function verbs(task, policy) {
+export function verbs(task, policy, changes = null) {
   const status = task?.status;
   const live = status !== "integrated" && status !== "dropped";
-  if (!live) return { accept: false, sendBack: false, drop: false, note: null };
+  if (!live) return { accept: false, acceptBlocked: null, sendBack: false, drop: false, note: null };
   // Accept is for work that has been decided: a review that passed, which is
   // what `passed` and the Ready word mean. A hand-in nobody has reviewed yet is
   // not a decision waiting for the person, and an approval there would be a
   // stamp on work the run has not looked at.
-  const reviewed = status === "passed" || task?.derived?.status === "ready";
-  const accept = reviewed && asksFirst(policy);
-  const note = reviewed && !asksFirst(policy)
-    ? `tasks.merge is ${policy}: ${task?.id ?? "it"} lands without an approval`
-    : null;
+  // A passed task whose agent took the work up again reads Working: that is not a
+  // decision waiting for the person either (the row's Review follows the same word).
+  const word = task?.derived?.status;
+  const reviewed = word === "ready" || task?.accepted_failure === true || (status === "passed" && (word == null || word === "needs_you"));
+  // A task that touched a protected path it did not declare waits for the
+  // person's Accept whatever the merge policy (`protected` in its changes).
+  const waits = asksFirst(policy) || protectedLine(changes) !== null;
+  const accept = reviewed && waits;
+  // Landing would refuse this task now (no review, a failing check, a failed
+  // gate): Accept stays on the card but disabled, with the reason, because an
+  // approval recorded here is one landing then refuses.
+  const blocked = accept && typeof task?.accept_blocked === "string" ? task.accept_blocked : null;
+  const note = blocked
+    ? `Can't accept yet: ${blocked}`
+    : reviewed && !waits
+      ? `tasks.merge is ${policy}: ${task?.id ?? "it"} lands without an approval`
+      : null;
   // A send-back is a spawn, and the rules refuse one while the task is not
   // failed: a "send back" on work in progress would spawn a second attempt at a
   // task that already has one.
   const sendBack = status === "failed";
   const drop = live;
-  return { accept, sendBack, drop, note };
+  return { accept, acceptBlocked: blocked, sendBack, drop, note };
 }
 
 /** Where a task the card can no longer accept is now, calmly. */
@@ -274,8 +363,134 @@ export function head(task) {
   return {
     id: task.id,
     title: task.title ?? "",
-    word: (derived.status ?? "").replace(/_/g, " "),
+    word: task.pending?.label ?? (derived.status ?? "").replace(/_/g, " "),
     tone: derived.status === "ready" ? "green" : derived.status === "needs_you" ? "red" : "dim",
     question: WORDS.question(task.id),
   };
+}
+
+/** The thread's views, by the stack child each one shows. */
+export const VIEW = {
+  chat: { id: "tasks-thread-chat", word: "Chat" },
+  term: { id: "tasks-thread-term", word: "Terminal" },
+  // The Terminal view's fallback: the agent's screen as read-only text, for an
+  // agent whose own terminal the window cannot show.
+  stream: { id: "tasks-thread-stream", word: "Terminal" },
+  pr: { id: "tasks-thread-pr", word: "Pull request" },
+  artifacts: { id: "tasks-thread-artifacts", word: "Artifacts" },
+};
+
+/** When an agent began: its `started_ms`, else the time it entered its state, else 0 (-1 for none). */
+function began(agent) {
+  if (!agent) return -1;
+  return agent.started_ms ?? agent.since_ms ?? 0;
+}
+
+/**
+ * The agent a task's Terminal view is about: the newest agent of the task that is
+ * still running, else the newest that ended (its screen stays readable), else null.
+ *
+ * A task has a worker and, once it handed in, a reviewer; the person who opens
+ * Terminal wants whoever is at work now, which is the newer of the two.
+ */
+export function threadAgent(state, taskId, now = Date.now()) {
+  const mine = agentsOfTask(state, taskId, now);
+  const newest = (list) =>
+    list.reduce((best, agent) => (began(agent) >= began(best) ? agent : best), null);
+  return newest(mine.filter((agent) => agent.state !== "done")) ?? newest(mine);
+}
+
+/**
+ * Whether the window holds `agent`'s terminal, so its block can show it: the
+ * terminal list the window reads (`terminals()`) names it by `address`, and a
+ * finished program is not a terminal to type into.
+ */
+export function terminalReachable(agent, terminals) {
+  if (!agent?.terminal || agent.state === "done") return false;
+  return (terminals ?? []).some(
+    (entry) => entry?.address === agent.terminal && !["done", "exited", "finished"].includes(String(entry?.state ?? "")),
+  );
+}
+
+/**
+ * The stack child the Terminal word shows: the agent's own live terminal when the
+ * window holds it ([`VIEW.term`]), else its read-only screen ([`VIEW.stream`]).
+ */
+export function terminalChild(agent, terminals) {
+  return terminalReachable(agent, terminals) ? VIEW.term.id : VIEW.stream.id;
+}
+
+/**
+ * Whether a task has anything for the Artifacts view: a hand-in report, which is
+ * what a worker leaves behind (the summary, its checks, the files it changed and
+ * the proof it names).
+ */
+export function hasArtifacts(task) {
+  return (task?.attempts ?? []).some((attempt) => attempt?.report);
+}
+
+/**
+ * The segmented switch the thread head draws: `Chat · Terminal · Pull request ·
+ * Artifacts`.
+ *
+ * Shepherdr's switcher (`mods/chat/panel.js`, `segs`): Pull request only once the
+ * task has one (`hasPr`), Terminal dim when the task has no agent at all (`live`
+ * false: "Not running"), Artifacts once there is a hand-in, and no Files or
+ * Changes — a task's changes are its pull request's. Chat is always on: it reads
+ * the agent's record through the service, and says so when there is none yet.
+ * `shown` is the stack child on screen, and Chat is what a thread opens on.
+ *
+ * `termChild` is the child the Terminal word shows ([`terminalChild`]); the
+ * Terminal segment is lit for either of its two children.
+ *
+ * Each segment: `{ key, word, on, dead, child }`, `child` the stack child it shows.
+ */
+export function threadViews(task, { live = false, shown = VIEW.chat.id, termChild = VIEW.term.id } = {}) {
+  const segs = [
+    { key: "chat", word: VIEW.chat.word, on: shown === VIEW.chat.id, dead: false, child: VIEW.chat.id },
+    {
+      key: "term",
+      word: VIEW.term.word,
+      on: shown === VIEW.term.id || shown === VIEW.stream.id,
+      dead: !live,
+      child: termChild,
+    },
+  ];
+  if (task?.pr) {
+    segs.push({ key: "pr", word: VIEW.pr.word, on: shown === VIEW.pr.id, dead: false, child: VIEW.pr.id });
+  }
+  if (hasArtifacts(task)) {
+    segs.push({ key: "artifacts", word: VIEW.artifacts.word, on: shown === VIEW.artifacts.id, dead: false, child: VIEW.artifacts.id });
+  }
+  return segs;
+}
+
+/**
+ * Whether the thread must fall back to the terminal: it shows the pull request of
+ * a task that has none (Shepherdr's `chat/panel.js:367`, "back to its chat": the view it opens on).
+ */
+export function mustLeavePr(task, shown) {
+  return (shown === VIEW.pr.id && !task?.pr) || (shown === VIEW.artifacts.id && !hasArtifacts(task));
+}
+
+/**
+ * The agent's last status line under the title, `message` and how far it said it
+ * had got (`· 40%`), or null when it said nothing.
+ *
+ * Shepherdr's `reportLine` ends with minutes left; the service reports none, so
+ * this ends with the progress percent it does report.
+ */
+export function reportLine(task) {
+  const said = String(task?.last_status?.message ?? "").trim();
+  if (said === "") return null;
+  const done = task?.last_status?.progress;
+  return typeof done === "number" ? `${said} · ${done}%` : said;
+}
+
+/**
+ * Whether the task head offers Review: the same rule as the Ready row's pill
+ * (`rowActions`), so the two never disagree.
+ */
+export function canReview(task) {
+  return rowActions(task).some((act) => act.id === "review");
 }

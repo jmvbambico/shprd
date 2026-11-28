@@ -232,10 +232,24 @@ pub fn run_with_timeout(
         program: program.to_owned(),
         source,
     })?;
+    // The pipes are drained while the probe runs: a listing larger than the
+    // pipe's buffer (codex's model catalog is a quarter of a megabyte) would
+    // otherwise block the child on its own write and read as a timeout.
+    let drain = |pipe: Option<Box<dyn std::io::Read + Send>>| {
+        thread::spawn(move || {
+            let mut bytes = Vec::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_end(&mut bytes);
+            }
+            bytes
+        })
+    };
+    let out = drain(child.stdout.take().map(|pipe| Box::new(pipe) as _));
+    let err = drain(child.stderr.take().map(|pipe| Box::new(pipe) as _));
     let deadline = Instant::now() + timeout;
-    loop {
+    let status = loop {
         match child.try_wait() {
-            Ok(Some(_)) => break,
+            Ok(Some(status)) => break status,
             Ok(None) => {}
             Err(source) => {
                 kill(&mut child);
@@ -253,13 +267,12 @@ pub fn run_with_timeout(
             });
         }
         thread::sleep(POLL_INTERVAL);
-    }
-    child
-        .wait_with_output()
-        .map_err(|source| DetectError::Wait {
-            program: program.to_owned(),
-            source,
-        })
+    };
+    Ok(Output {
+        status,
+        stdout: out.join().unwrap_or_default(),
+        stderr: err.join().unwrap_or_default(),
+    })
 }
 
 /// Kills a probe that timed out or failed, and every process it started, then
@@ -317,6 +330,90 @@ fn kill_group(leader: u32) -> bool {
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     retry_busy(|| command.status()).is_ok_and(|status| status.success())
+}
+
+/// Runs `program args` and reports why it did not start cleanly.
+///
+/// `Ok` when it ran and exited 0; otherwise the first non-empty line of what it
+/// said (a `dyld: Library not loaded` line, say), or the reason it could not be
+/// started, so a person sees the real cause rather than "version unknown". The
+/// line is for a doctor page, never a log: it is only what a version command
+/// prints.
+pub fn preflight_probe(
+    program: &Path,
+    args: &[String],
+    env: &[(String, Option<String>)],
+    timeout: Duration,
+) -> Result<(), String> {
+    let output = match run_with_timeout(program, args, env, timeout) {
+        Ok(output) => output,
+        Err(error) => return Err(error.to_string()),
+    };
+    if output.status.success() {
+        return Ok(());
+    }
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("no output");
+    Err(format!("exited {}: {line}", exit_word(&output.status)))
+}
+
+/// An exit status as a short word: its code, or the signal that ended it.
+fn exit_word(status: &std::process::ExitStatus) -> String {
+    if let Some(code) = status.code() {
+        return code.to_string();
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt as _;
+        if let Some(signal) = status.signal() {
+            return format!("signal {signal}");
+        }
+    }
+    "unknown".to_owned()
+}
+
+/// The version probe's budget, for callers outside this module.
+pub const PREFLIGHT_TIMEOUT: Duration = VERSION_TIMEOUT;
+
+/// Whether a model can read images: `Some(true)`, `Some(false)`, or [`None`]
+/// when nothing here knows.
+///
+/// A name-based table, because no catalog column carries it. It is deliberately
+/// short: an unlisted model is unknown, never guessed.
+pub fn model_reads_images(model: &str) -> Option<bool> {
+    let name = model.to_ascii_lowercase();
+    // A vision variant of a text family (`kimi-k2-vl`) breaks the family's
+    // rule: say nothing rather than guess.
+    let words: Vec<&str> = name
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+    if ["vl", "vision", "omni"].iter().any(|w| words.contains(w)) {
+        return None;
+    }
+    const SEES: [&str; 5] = ["claude", "gpt-5", "gpt-4o", "gemini", "codex"];
+    const BLIND: [&str; 5] = ["deepseek", "glm", "minimax", "qwen3-coder", "kimi-k2"];
+    // A family name matches whole words only: `gpt-5` is the words `gpt`, `5`,
+    // so it never matches inside a longer, unrelated word.
+    let has = |family: &str| {
+        let parts: Vec<&str> = family.split('-').collect();
+        words.windows(parts.len()).any(|w| w == parts.as_slice())
+    };
+    if SEES.iter().any(|word| has(word)) {
+        Some(true)
+    } else if BLIND.iter().any(|word| has(word)) {
+        Some(false)
+    } else {
+        None
+    }
 }
 
 /// Runs the version probe and scrapes a version number out of its output.
@@ -492,6 +589,24 @@ mod tests {
 
     use super::*;
 
+    /// Codex's catalog is a quarter of a megabyte: a probe that does not drain its
+    /// pipes blocks the child on its write and reads as a timeout.
+    #[test]
+    fn a_listing_larger_than_the_pipe_buffer_is_read_whole() {
+        let out = run_with_timeout(
+            Path::new("/bin/sh"),
+            &[
+                "-c".to_owned(),
+                "head -c 300000 /dev/zero | tr '\\0' x; echo done >&2".to_owned(),
+            ],
+            &[],
+            Duration::from_secs(10),
+        )
+        .unwrap_or_else(|error| panic!("the listing is read: {error}"));
+        assert_eq!(out.stdout.len(), 300_000);
+        assert_eq!(String::from_utf8_lossy(&out.stderr).trim(), "done");
+    }
+
     #[test]
     fn a_busy_spawn_is_retried_until_it_succeeds() {
         let mut attempts = 0;
@@ -538,6 +653,50 @@ mod tests {
             Some(io::ErrorKind::NotFound)
         );
         assert_eq!(attempts, 1, "only a busy file is worth retrying");
+    }
+
+    #[test]
+    fn preflight_names_the_first_error_line() {
+        let dir = match TempDir::new() {
+            Ok(dir) => dir,
+            Err(error) => panic!("tempdir failed: {error}"),
+        };
+        write_script(
+            dir.path(),
+            "broken",
+            "echo 'dyld[1]: Library not loaded: libfoo' >&2\necho more >&2\nexit 134",
+        );
+        let outcome = preflight_probe(
+            &dir.path().join("broken"),
+            &["--version".to_owned()],
+            &[],
+            Duration::from_secs(5),
+        );
+        let Err(err) = outcome else {
+            panic!("a crashing probe must fail");
+        };
+        assert!(err.contains("Library not loaded"), "{err}");
+        assert!(err.contains("134"), "{err}");
+        write_script(dir.path(), "fine", "echo 1.0.0");
+        assert!(
+            preflight_probe(&dir.path().join("fine"), &[], &[], Duration::from_secs(5)).is_ok()
+        );
+        assert!(
+            preflight_probe(&dir.path().join("gone"), &[], &[], Duration::from_secs(5)).is_err()
+        );
+    }
+
+    #[test]
+    fn image_reading_is_known_only_for_listed_models() {
+        assert_eq!(model_reads_images("claude-opus"), Some(true));
+        assert_eq!(model_reads_images("DeepSeek-V4"), Some(false));
+        assert_eq!(model_reads_images("mystery-1"), None);
+        assert_eq!(model_reads_images("kimi-k2-vl"), None);
+        assert_eq!(model_reads_images("gpt-5.2-codex"), Some(true));
+        assert_eq!(model_reads_images("glm-5"), Some(false));
+        // Whole words only: a name that merely contains a family is unknown.
+        assert_eq!(model_reads_images("englmx-1"), None);
+        assert_eq!(model_reads_images("minimaxed-model"), None);
     }
 
     /// A script interactive shell can run, standing in for a real agent CLI.

@@ -63,6 +63,23 @@ fn request(fake: &Fake, method: &str) -> Value {
         .unwrap_or_else(|| panic!("the host never called {method}"))
 }
 
+/// Every frame the host wrote on an attached stream, in order.
+fn streams(fake: &Fake) -> Vec<Value> {
+    // The fake logs after reading, so give it a beat to flush the close frame.
+    for _ in 0..50 {
+        let frames: Vec<Value> = std::fs::read_to_string(fake.dir().join("streams.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("a stream line"))
+            .collect();
+        if frames.iter().any(|frame| frame["kind"] == 2) {
+            return frames;
+        }
+        std::thread::sleep(Duration::from_millis(40));
+    }
+    panic!("the host never closed its stream");
+}
+
 /// Write what the fake's `terminal.read` should answer.
 fn screen(fake: &Fake, text: &str) {
     std::fs::write(fake.dir().join("screen"), text).expect("writes the screen");
@@ -180,6 +197,24 @@ fn a_space_the_window_makes_is_named_where_the_person_sees_it() {
     );
     // The window's answer is the id the space is found by afterwards.
     assert!(fake.requests().contains(&"doc.get".to_string()));
+}
+
+#[test]
+fn a_space_is_renamed_by_the_windows_own_verb_and_only_when_the_layout_holds_it() {
+    let (_fake, window, host) = host_with_window("normal");
+    host.rename_space(&SpaceId::new(SPACE), "shprd · repo")
+        .expect("the window renames the space");
+    let calls = window.calls();
+    assert!(
+        calls.iter().any(|call| call.starts_with("do space.rename")
+            && call.contains(&format!("--id {SPACE}"))
+            && call.contains("--name shprd · repo")),
+        "the window was asked to rename it: {calls:?}"
+    );
+    assert!(matches!(
+        host.rename_space(&SpaceId::new("spgone"), "x"),
+        Err(MuxError::NotFound { .. })
+    ));
 }
 
 #[test]
@@ -334,14 +369,70 @@ fn text_is_sent_as_the_persons_own_typing() {
         "{sent}"
     );
 
-    // herdr-core's send always presses enter, so typing without submitting is
-    // refused rather than quietly submitted — and the flags say so first, which
-    // is what a caller plans from.
+    // herdr-core's send always presses enter, so text left at the cursor goes
+    // through a short attach stream instead: the bytes, unchanged, as one data
+    // frame on the attach's channel, then a close. No `terminal.send`, no keys.
+    assert!(host.capabilities().type_without_submit);
+    let before = requests(&fake).len();
+    host.write(&PaneId::new("t20"), "echo $HOME \"hi\"?", false)
+        .expect("the stream takes the text");
+    let asked = requests(&fake);
+    let asked = &asked[before..];
+    assert!(
+        asked
+            .iter()
+            .all(|request| request["method"] != "terminal.send"
+                && request["method"] != "terminal.keys"),
+        "{asked:?}"
+    );
+    let attach = request(&fake, "terminal.attach");
+    assert_eq!(attach["params"]["terminal"], "t20");
+    assert_eq!(attach["params"]["cols"], 80);
+    assert_eq!(attach["params"]["rows"], 24);
+    assert!(
+        attach["params"].get("observe").is_none_or(|v| v == false),
+        "typing is a full attach: {attach}"
+    );
+    let frames = streams(&fake);
+    assert_eq!(
+        frames,
+        vec![
+            serde_json::json!({"channel": 7, "kind": 0, "data": "echo $HOME \"hi\"?"}),
+            serde_json::json!({"channel": 7, "kind": 2, "data": ""}),
+        ],
+        "no enter is added and the stream is closed"
+    );
+}
+
+#[test]
+fn a_core_without_attach_says_it_cannot_type_without_enter() {
+    let (_fake, host) = host("no-attach");
     assert!(!host.capabilities().type_without_submit);
     let error = host
         .write(&PaneId::new("t20"), "half a line", false)
-        .expect_err("no half-sent text on this host");
+        .expect_err("no stream to type on");
     assert!(matches!(error, MuxError::Unsupported(_)), "{error}");
+}
+
+#[test]
+fn typing_nothing_attaches_to_nothing() {
+    let (fake, host) = host("normal");
+    host.write(&PaneId::new("t20"), "", false)
+        .expect("nothing to do");
+    assert!(
+        requests(&fake)
+            .iter()
+            .all(|request| request["method"] != "terminal.attach")
+    );
+}
+
+#[test]
+fn typing_into_a_missing_pane_says_so() {
+    let (_fake, host) = host("normal");
+    let error = host
+        .write(&PaneId::new("t99"), "hi", false)
+        .expect_err("no such pane");
+    assert!(matches!(error, MuxError::NotFound { .. }), "{error}");
 }
 
 #[test]
@@ -622,4 +713,54 @@ fn the_probe_names_the_cores_version() {
     let version = HcHost::core_version(&endpoint, Duration::from_secs(5)).expect("it answers");
     assert_eq!(version, "0.1.21");
     assert!(Outcome::running().exit_code.is_none());
+}
+
+/// SHPR-66: an agent shprd starts must not look like another product's agent.
+/// Shepherdr reads `herdr.role=coordinator` as "this pane is my Assistant", so
+/// shprd's agent labels are its own (`shprd.*`); only the two placement labels
+/// the window needs stay `herdr.*`, and only on the coordinator.
+#[test]
+fn agents_carry_shprd_labels_not_shepherdrs() {
+    let (fake, host) = host("normal");
+    let space = SpaceId::new(SPACE);
+    let env = vec![("HC_TERMINAL_ID".to_string(), None)];
+    for (role, task) in [
+        (shprd_mux::AgentRole::Coordinator, None),
+        (shprd_mux::AgentRole::Worker, Some("T1#1")),
+        (shprd_mux::AgentRole::Reviewer, Some("T1#1")),
+    ] {
+        host.spawn_agent(&shprd_mux::AgentLaunch {
+            space: &space,
+            title: "agent",
+            argv: &["claude".to_string()],
+            env: &env,
+            cwd: Path::new("/work"),
+            role,
+            task,
+            program: "claude",
+            parent: None,
+        })
+        .expect("the core starts it");
+        let sent = requests(&fake)
+            .into_iter()
+            .rfind(|r| r["method"] == "terminal.run")
+            .expect("a terminal.run");
+        let labels = sent["params"]["labels"].as_object().expect("labels");
+        assert_eq!(labels["shprd.role"], role.as_str());
+        assert_eq!(labels["shprd.agent"], "claude");
+        assert!(labels.contains_key("shprd.task.space"));
+        for key in labels.keys() {
+            assert!(
+                matches!(key.as_str(), "herdr.space" | "herdr.tab") || key.starts_with("shprd."),
+                "{role:?}: {key} is another product's namespace"
+            );
+        }
+        let placed = labels.contains_key("herdr.space");
+        assert_eq!(placed, role == shprd_mux::AgentRole::Coordinator);
+        // The launch drops the terminal id Shepherdr's hook keys off.
+        let argv = sent["params"]["argv"].as_array().expect("argv");
+        assert_eq!(argv[0], "/usr/bin/env");
+        assert_eq!(argv[1], "-u");
+        assert_eq!(argv[2], "HC_TERMINAL_ID");
+    }
 }

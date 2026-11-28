@@ -1,4 +1,10 @@
 {
   "place": "none",
-  "title": "shprd settings"
+  "title": "Settings",
+  "overlay": {
+    "kind": "dialog",
+    "frame": "none",
+    "width": 860,
+    "height": 0.92
+  }
 }

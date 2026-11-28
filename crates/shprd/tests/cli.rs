@@ -10,7 +10,7 @@ use tempfile::TempDir;
 
 mod support;
 
-use support::herdr::isolate;
+use support::isolate;
 
 /// The binary under test, built by cargo for this integration test.
 const BIN: &str = env!("CARGO_BIN_EXE_shprd");
@@ -210,20 +210,7 @@ fn happy_path_reaches_integrated() {
             "tdd",
         ],
     );
-    ok(
-        root,
-        &[
-            "agent",
-            "gate",
-            "pass",
-            "--task",
-            "T1",
-            "--attempt",
-            "1",
-            "--gate",
-            "lint",
-        ],
-    );
+    support::pass_review(root, "T1");
     ok(
         root,
         &["agent", "integrate", "--task", "T1", "--record-only"],
@@ -336,7 +323,7 @@ fn a_proof_outside_the_worktree_is_refused() {
         "it names the worktree the proof belongs in: {stderr}"
     );
     assert!(
-        stderr.contains("--proof proof/tests.txt"),
+        stderr.contains("--proof .shprd/proof/tests.txt"),
         "and shows the shape that works: {stderr}"
     );
     // Nothing was written: the log has the spawn and nothing after it.
@@ -394,15 +381,36 @@ fn a_proof_inside_the_worktree_is_recorded() {
 }
 
 #[test]
-fn overlapping_scope_is_refused() {
+fn overlapping_scopes_start_side_by_side_and_add_warns() {
     let dir = repo();
     let root = dir.path();
     start(root);
     add_task(root, "T1", "crates/shprd");
-    add_task(root, "T2", "crates/shprd/src");
+    let added = run(
+        root,
+        &[
+            "agent",
+            "task",
+            "add",
+            "--id",
+            "T2",
+            "--title",
+            "a task",
+            "--scope",
+            "crates/shprd/src",
+            "--acceptance",
+            "it works",
+        ],
+    );
+    assert!(added.status.success(), "{added:?}");
+    let stderr = String::from_utf8_lossy(&added.stderr);
+    let warning: Vec<&str> = stderr
+        .lines()
+        .filter(|line| line.contains("shares paths with T1"))
+        .collect();
+    assert_eq!(warning.len(), 1, "one warning line: {stderr}");
     spawn(root, "T1");
-
-    let stderr = refused(
+    ok(
         root,
         &[
             "agent",
@@ -420,19 +428,46 @@ fn overlapping_scope_is_refused() {
             "feature/y",
         ],
     );
-    assert!(stderr.contains("T2"), "refusal named no task: {stderr}");
-    assert_eq!(status_of(&state(root), "T2"), "queued");
+    assert_eq!(status_of(&state(root), "T2"), "working");
 }
 
 #[test]
-fn changed_path_outside_scope_is_refused() {
+fn a_task_may_be_added_without_paths_and_widen_is_gone() {
+    let dir = repo();
+    let root = dir.path();
+    start(root);
+    ok(
+        root,
+        &[
+            "agent",
+            "task",
+            "add",
+            "--id",
+            "T1",
+            "--title",
+            "a task",
+            "--acceptance",
+            "it works",
+        ],
+    );
+    assert_eq!(status_of(&state(root), "T1"), "queued");
+    let widen = run(
+        root,
+        &[
+            "agent", "task", "widen", "--task", "T1", "--scope", "x", "--reason", "y",
+        ],
+    );
+    assert!(!widen.status.success(), "the widen verb is gone: {widen:?}");
+}
+
+#[test]
+fn a_changed_path_outside_the_declared_scope_is_recorded() {
     let dir = repo();
     let root = dir.path();
     start(root);
     add_task(root, "T1", "crates/shprd");
     spawn(root, "T1");
-
-    let stderr = refused(
+    ok(
         root,
         &[
             "agent",
@@ -451,30 +486,117 @@ fn changed_path_outside_scope_is_refused() {
             "docs/plan.md",
         ],
     );
-    assert!(stderr.contains("docs/plan.md"), "refusal was {:?}", stderr);
+    assert_eq!(status_of(&state(root), "T1"), "reported");
+    assert!(
+        !read_log(root).contains("\"ask_raised\""),
+        "no card for a path outside the declared scope"
+    );
+}
+
+/// The run log's text.
+fn read_log(root: &Path) -> String {
+    match std::fs::read_to_string(log_path(root)) {
+        Ok(text) => text,
+        Err(err) => panic!("reading the log failed: {err}"),
+    }
+}
+
+#[test]
+fn a_hand_in_that_commits_shprd_state_is_refused_without_a_card() {
+    let dir = repo();
+    let root = dir.path();
+    start(root);
+    add_task(root, "T1", "crates/shprd");
+    spawn(root, "T1");
+    let stderr = refused(
+        root,
+        &[
+            "agent",
+            "report",
+            "--check",
+            "tests|cargo test|0",
+            "--task",
+            "T1",
+            "--attempt",
+            "1",
+            "--status",
+            "completed",
+            "--summary",
+            "did it",
+            "--changed",
+            ".shprd/events.jsonl",
+        ],
+    );
+    assert!(
+        stderr.contains(".shprd/events.jsonl") && stderr.contains("hand in again"),
+        "a plain refusal naming the path: {stderr}"
+    );
     assert_eq!(status_of(&state(root), "T1"), "working");
+    assert!(!read_log(root).contains("\"ask_raised\""), "no card");
+}
+
+/// Runs git in `dir`, asserting it succeeded.
+fn git(dir: &Path, args: &[&str]) {
+    let out = match Command::new("git").args(args).current_dir(dir).output() {
+        Ok(out) => out,
+        Err(err) => panic!("git {args:?}: {err}"),
+    };
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn a_branch_that_commits_an_env_file_is_refused_even_when_unlisted() {
+    let dir = repo();
+    let root = dir.path();
+    git(root, &["init", "-q", "-b", "main"]);
+    git(root, &["config", "user.name", "tests"]);
+    git(root, &["config", "user.email", "tests@example.invalid"]);
+    git(root, &["config", "commit.gpgsign", "false"]);
+    std::fs::write(root.join("seed.txt"), "seed\n").unwrap_or_else(|err| panic!("{err}"));
+    git(root, &["add", "seed.txt"]);
+    git(root, &["commit", "-q", "-m", "seed"]);
+    git(root, &["branch", "integration/m1"]);
+    git(root, &["checkout", "-q", "-b", "feature/x"]);
+    std::fs::write(root.join(".env"), "TOKEN=x\n").unwrap_or_else(|err| panic!("{err}"));
+    git(root, &["add", "-f", ".env"]);
+    git(root, &["commit", "-q", "-m", "oops"]);
+    git(root, &["checkout", "-q", "main"]);
+    start(root);
+    add_task(root, "T1", "crates/shprd");
+    spawn(root, "T1");
+    // The worker lists only an innocent path; the branch's real diff is read.
+    let stderr = refused(
+        root,
+        &[
+            "agent",
+            "report",
+            "--check",
+            "tests|cargo test|0",
+            "--task",
+            "T1",
+            "--attempt",
+            "1",
+            "--status",
+            "completed",
+            "--summary",
+            "did it",
+            "--changed",
+            "crates/shprd/src/lib.rs",
+        ],
+    );
+    assert!(stderr.contains("\".env\""), "names the file: {stderr}");
+    assert_eq!(status_of(&state(root), "T1"), "working");
+    assert!(!read_log(root).contains("\"ask_raised\""), "no card");
 }
 
 #[test]
 fn verbs_before_run_start_are_refused() {
     let dir = repo();
     let root = dir.path();
-    refused(
-        root,
-        &[
-            "agent",
-            "task",
-            "add",
-            "--id",
-            "T1",
-            "--title",
-            "t",
-            "--scope",
-            "crates/shprd",
-            "--acceptance",
-            "ok",
-        ],
-    );
     refused(
         root,
         &["agent", "escalate", "--body", "b", "--default", "d"],
@@ -593,21 +715,7 @@ fn a_scripted_run_writes_the_document_and_the_views() {
         ],
         bin_dir,
     );
-    ok_with_path(
-        root,
-        &[
-            "agent",
-            "gate",
-            "pass",
-            "--task",
-            "T1",
-            "--attempt",
-            "1",
-            "--gate",
-            "lint",
-        ],
-        bin_dir,
-    );
+    support::pass_review(root, "T1");
     ok_with_path(
         root,
         &["agent", "integrate", "--task", "T1", "--record-only"],
@@ -1171,20 +1279,7 @@ fn integrated_task(root: &Path, branch: &str) {
             "crates/x/a.rs",
         ],
     );
-    ok(
-        root,
-        &[
-            "agent",
-            "gate",
-            "pass",
-            "--task",
-            "T1",
-            "--attempt",
-            "1",
-            "--gate",
-            "lint",
-        ],
-    );
+    support::pass_review(root, "T1");
     ok(
         root,
         &["agent", "integrate", "--task", "T1", "--record-only"],
@@ -1837,34 +1932,7 @@ fn run_that_needs_an_override(root: &Path) {
             "did it",
         ],
     );
-    ok(
-        root,
-        &[
-            "agent",
-            "gate",
-            "fail",
-            "--task",
-            "T1",
-            "--attempt",
-            "1",
-            "--gate",
-            "clippy",
-        ],
-    );
-    ok(
-        root,
-        &[
-            "agent",
-            "gate",
-            "pass",
-            "--task",
-            "T1",
-            "--attempt",
-            "1",
-            "--gate",
-            "clippy",
-        ],
-    );
+    support::pass_review_after_failed_gate(root, "T1", "clippy");
     let message = refused(
         root,
         &["agent", "integrate", "--task", "T1", "--record-only"],
@@ -2132,4 +2200,285 @@ fn a_drop_that_cannot_find_the_home_is_refused_and_logs_nothing() {
         "queued",
         "the task is still in the run"
     );
+}
+
+/// SHPR-70: the coordinator adds tasks with this verb, and nobody has typed
+/// `shprd run start`: the first task in a repository with a commit starts the run
+/// itself, on the checked-out branch.
+#[test]
+fn the_first_task_in_a_fresh_repo_starts_a_run() {
+    let root = repo();
+    for args in [
+        vec!["init", "--quiet", "-b", "main"],
+        vec!["config", "user.name", "t"],
+        vec!["config", "user.email", "t@example.invalid"],
+        vec!["config", "commit.gpgsign", "false"],
+        vec!["commit", "--quiet", "--allow-empty", "-m", "seed"],
+    ] {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(root.path())
+            .args(&args)
+            .status();
+        assert!(status.is_ok_and(|status| status.success()), "git {args:?}");
+    }
+    ok(
+        root.path(),
+        &[
+            "agent",
+            "task",
+            "add",
+            "--id",
+            "T1",
+            "--title",
+            "hello",
+            "--scope",
+            "hello.py",
+            "--acceptance",
+            "it prints hi",
+        ],
+    );
+    let state = ok(root.path(), &["state", "--json"]);
+    let Ok(value) = serde_json::from_str::<Value>(&state) else {
+        panic!("not json: {state}");
+    };
+    assert_eq!(value["run"]["base_branch"], "main", "{state}");
+    assert!(
+        value["run"]["integration_branch"]
+            .as_str()
+            .is_some_and(|name| name.starts_with("integration/r")),
+        "{state}"
+    );
+    assert!(value["tasks"].to_string().contains("T1"), "{state}");
+}
+
+/// Runs the binary with `--as` and `$SHPRD_ACTOR` set as given.
+fn run_with_actor(root: &Path, env_actor: &str, as_flag: &str, args: &[&str]) -> Output {
+    let mut all = vec![
+        "--repo".to_string(),
+        root.display().to_string(),
+        "--as".to_string(),
+        as_flag.to_string(),
+    ];
+    all.extend(args.iter().map(|arg| (*arg).to_string()));
+    let mut command = Command::new(BIN);
+    isolate(&mut command, root);
+    match command
+        .args(&all)
+        .env_remove("SHPRD_ACTOR")
+        .env("SHPRD_ACTOR", env_actor)
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) => panic!("running the binary: {err}"),
+    }
+}
+
+/// Every human verb, as the argument list that reaches its actor check.
+fn human_verbs() -> Vec<(&'static str, Vec<&'static str>)> {
+    vec![
+        (
+            "drop",
+            vec!["drop", "T1", "--reason", "not needed", "--yes"],
+        ),
+        (
+            "override",
+            vec![
+                "override",
+                "--task",
+                "T1",
+                "--rule",
+                OVERRIDE_RULE,
+                "--reason",
+                "cosmetic",
+                "--yes",
+            ],
+        ),
+        ("approve", vec!["approve", "T1", "--yes"]),
+        ("readmit", vec!["readmit", "w1", "--reason", "topped up"]),
+    ]
+}
+
+/// Item 13: `--as human` is honoured by every human verb, whatever
+/// `$SHPRD_ACTOR` says, and `--as` naming a non-human is refused by every one.
+#[test]
+fn every_human_verb_reads_the_actor_the_same_way() {
+    for (verb, args) in human_verbs() {
+        let dir = repo();
+        let root = dir.path();
+        run_that_needs_an_override(root);
+        mark_dry(root, "w1");
+
+        // `--as human` wins over an agent's environment: the actor check
+        // passes, so any refusal is about something else.
+        let output = run_with_actor(root, "agent:w9", "human", &args);
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        assert!(
+            !stderr.contains("only a human"),
+            "{verb}: --as human was ignored: {stderr}"
+        );
+
+        // A non-human `--as` is refused before anything is written, even with
+        // `$SHPRD_ACTOR` naming a human.
+        let before = last_event(root);
+        let output = run_with_actor(root, "human", "orchestrator", &args);
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        assert_eq!(output.status.code(), Some(2), "{verb}: {stderr}");
+        assert!(stderr.contains("only a human"), "{verb}: {stderr}");
+        assert_eq!(last_event(root), before, "{verb}: nothing was logged");
+
+        // And the environment alone says the same thing.
+        let output = run_as(root, "agent:w9", &args);
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        assert!(stderr.contains("only a human"), "{verb}: {stderr}");
+    }
+}
+
+/// Item 13, `sync`: `--as human` wins over an agent's environment too.
+#[test]
+fn sync_reads_the_actor_the_same_way() {
+    let dir = repo();
+    let root = dir.path();
+    start(root);
+    let output = run_with_actor(root, "agent:w9", "human", &["sync"]);
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(
+        !stderr.contains("cannot sync the base"),
+        "--as human was ignored: {stderr}"
+    );
+    let output = run_with_actor(root, "human", "agent:w9", &["sync"]);
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert_eq!(output.status.code(), Some(2), "{stderr}");
+    assert!(stderr.contains("cannot sync the base"), "{stderr}");
+}
+
+/// Item 14: `agent propose` raises a card and writes nothing else; an agent
+/// may raise one, and the verb is not run by raising it.
+#[test]
+fn a_proposal_raises_a_card_and_runs_nothing() {
+    let dir = repo();
+    let root = dir.path();
+    start(root);
+    add_task(root, "T1", "crates/shprd");
+    let output = run_as(
+        root,
+        "agent:w1",
+        &["agent", "propose", "drop", "T1", "--reason", "it is stuck"],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let last = last_event(root);
+    assert_eq!(last["kind"], "ask_raised", "{last}");
+    assert_eq!(last["ask"], "propose-drop-1");
+    assert_eq!(last["options"][0], "confirm drop");
+    assert_eq!(last["options"][1], "leave it");
+    assert!(
+        last["text"]
+            .as_str()
+            .is_some_and(|t| t.contains("reason: it is stuck")),
+        "{last}"
+    );
+    let log = std::fs::read_to_string(log_path(root)).unwrap_or_default();
+    assert!(!log.contains("task_dropped"), "nothing was dropped");
+
+    // A second proposal of the same verb gets the next number; an override
+    // must name a rule the run reads.
+    ok(
+        root,
+        &["agent", "propose", "drop", "T1", "--reason", "still stuck"],
+    );
+    assert_eq!(last_event(root)["ask"], "propose-drop-2");
+    let before = last_event(root);
+    let message = run(
+        root,
+        &[
+            "agent", "propose", "override", "T1", "--reason", "x", "--rule", "nope",
+        ],
+    );
+    assert_eq!(message.status.code(), Some(2));
+    assert_eq!(last_event(root), before);
+}
+
+/// Adds a task with no `--id` and returns the id shprd printed.
+fn add_without_id(root: &Path, title: &str) -> String {
+    let out = ok(
+        root,
+        &[
+            "agent",
+            "task",
+            "add",
+            "--title",
+            title,
+            "--acceptance",
+            "it works",
+        ],
+    );
+    out.lines()
+        .find_map(|line| line.strip_prefix("task ").map(str::to_string))
+        .unwrap_or_else(|| panic!("no `task <id>` line in {out:?}"))
+}
+
+#[test]
+fn a_task_without_an_id_gets_the_next_short_id_and_a_given_id_is_kept() {
+    let dir = repo();
+    let root = dir.path();
+    // The prefix comes from the repository directory's name, and stays the same.
+    let name = root
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let prefix = shprd_core::event::derive_id_prefix(&name);
+    start(root);
+    let first = format!("{prefix}-1");
+    let second = format!("{prefix}-2");
+    let tenth = format!("{prefix}-10");
+    let ninth = format!("{prefix}-9");
+    assert_eq!(add_without_id(root, "first"), first);
+    add_task(root, "long-slug", "src");
+    // An old `T27` id does not move the new numbering.
+    add_task(root, "T27", "src");
+    assert_eq!(add_without_id(root, "second"), second);
+    add_task(root, &ninth, "docs");
+    assert_eq!(add_without_id(root, "third"), tenth);
+    let state = state(root);
+    for id in [&first, &second, "long-slug", "T27", &ninth, &tenth] {
+        assert_eq!(status_of(&state, id), "queued", "{id}");
+    }
+}
+
+#[test]
+fn the_id_prefix_setting_overrides_the_derived_one() {
+    let dir = repo();
+    let root = dir.path();
+    start(root);
+    ok(root, &["settings", "set", "tasks.id_prefix", "abc"]);
+    assert_eq!(add_without_id(root, "x"), "ABC-1");
+    assert_eq!(add_without_id(root, "y"), "ABC-2");
+}
+
+#[test]
+fn two_adds_at_once_never_share_an_id() {
+    let dir = repo();
+    let root = dir.path();
+    start(root);
+    let handles: Vec<_> = (0..6)
+        .map(|n| {
+            let root = root.to_path_buf();
+            std::thread::spawn(move || add_without_id(&root, &format!("task {n}")))
+        })
+        .collect();
+    let mut ids: Vec<String> = handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap_or_else(|_| panic!("an add panicked")))
+        .collect();
+    ids.sort();
+    ids.dedup();
+    assert_eq!(ids.len(), 6, "every add got its own id: {ids:?}");
+    let state = state(root);
+    for id in &ids {
+        assert_eq!(status_of(&state, id), "queued", "{id}");
+    }
 }

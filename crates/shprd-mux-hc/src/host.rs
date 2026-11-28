@@ -71,8 +71,8 @@ use std::time::Duration;
 
 use serde_json::{Map, Value, json};
 use shprd_mux::{
-    AgentState, Capabilities, Direction, Host, Key, MuxError, MuxEvent, Outcome, PaneId, Result,
-    Space, SpaceId, Tab, TabId, Waited,
+    AgentLaunch, AgentRole, AgentState, Capabilities, Direction, Host, Key, LiveAgent, MuxError,
+    MuxEvent, Outcome, PaneId, Result, Space, SpaceId, Tab, TabId, Waited,
 };
 use tokio::sync::watch;
 
@@ -81,6 +81,98 @@ use crate::error::Error;
 use crate::events::State;
 use crate::model::{self, Terminal};
 use crate::placement::{self, Placement};
+
+/// The label a headless agent's own program carries.
+///
+/// The agent labels are in shprd's own `shprd.*` namespace, never `herdr.*`:
+/// Shepherdr reads `herdr.role=coordinator` as "this pane is my Assistant" and
+/// injects its own context into it (SHPR-66), so shprd claims none of its keys
+/// except the two the window itself needs for placement.
+const AGENT_LABEL: &str = "shprd.agent";
+/// The label that says what an agent is for.
+const ROLE_LABEL: &str = "shprd.role";
+/// The label naming the repository space an agent belongs to. Never
+/// `herdr.space`, which would make the window draw it.
+const TASK_SPACE_LABEL: &str = "shprd.task.space";
+/// The label naming the coordinator tab an agent reports to.
+const COORDINATOR_LABEL: &str = "shprd.coordinator";
+/// Whether a terminal is another product's agent: Shepherdr's per-space
+/// Assistant carries `herdr.coordinator.space` / `herdr.coordinator.tab`, a
+/// `herdr.chat.slot` of `coord-…` or the `assistant` template. Such a terminal
+/// is never shprd's, whatever else it carries, `shprd.*` labels included
+/// (SHPR-69): shprd's own agents carry none of these markers.
+pub(crate) fn is_foreign_agent(terminal: &Terminal) -> bool {
+    let marked = terminal.labels.contains_key("herdr.coordinator.space")
+        || terminal.labels.contains_key("herdr.coordinator.tab")
+        || terminal.labels.contains_key("herdr.coordinator")
+        || terminal
+            .labels
+            .get("herdr.chat.slot")
+            .is_some_and(|slot| slot.starts_with("coord-"));
+    let template = terminal.template.as_deref().is_some_and(|name| {
+        name == "assistant" || name == "coordinator" || name.starts_with("herdr-assistant")
+    });
+    marked || template
+}
+
+/// Whether a terminal that carries no `shprd.*` agent labels is one an older
+/// shprd build started: its brief or its environment is in its argv, or it was
+/// parked behind a shprd chat pane. `herdr.role=coordinator` alone is
+/// Shepherdr's marker too, so it proves nothing.
+fn is_legacy_shprd(terminal: &Terminal) -> bool {
+    if is_foreign_agent(terminal) {
+        return false;
+    }
+    terminal.labels.contains_key(PARK_LABEL)
+        || terminal.argv.iter().any(|arg| {
+            arg.starts_with("SHPRD_")
+                || arg.contains("/.shprd/briefs/")
+                || arg.contains("/briefs/coordinator.md")
+        })
+}
+
+/// An agent label's value, from the `shprd.*` key or, for a terminal an older
+/// shprd build started ([`is_legacy_shprd`]), the `herdr.*` key it used then,
+/// so a restart adopts the coordinator and workers already running instead of
+/// starting a second set. Another product's terminal gives nothing.
+fn agent_label<'a>(terminal: &'a Terminal, key: &str) -> Option<&'a String> {
+    if is_foreign_agent(terminal) {
+        return None;
+    }
+    terminal.labels.get(key).or_else(|| {
+        if !is_legacy_shprd(terminal) {
+            return None;
+        }
+        let legacy = key.replacen("shprd.", "herdr.", 1);
+        terminal.labels.get(&legacy)
+    })
+}
+
+/// The tab id shprd gives the coordinator's tab.
+///
+/// Fixed and its own: the window makes a tab whose id is exactly the label, and
+/// a tab's *name* (what a person reads) is chosen separately, so the id can
+/// never be mistaken for another product's tab of the same name (Shepherdr's
+/// "Assistant").
+pub const COORDINATOR_TAB: &str = "shprd-coordinator";
+
+/// Whether a tab id is one shprd gave a coordinator's tab: [`COORDINATOR_TAB`]
+/// itself (older starts) or [`COORDINATOR_TAB`] with its space's id after a dash
+/// (the window finds a tab by id across spaces, so each space's is its own).
+pub fn is_coordinator_tab(id: &str) -> bool {
+    id == COORDINATOR_TAB
+        || id
+            .strip_prefix(COORDINATOR_TAB)
+            .is_some_and(|rest| rest.starts_with('-'))
+}
+/// The mod a chat pane is (`mods/shprd-chat`).
+const CHAT_MOD: &str = "shprd-chat";
+/// The label a parked agent carries, naming the chat pane that shows it
+/// (`mods/lib/chat.js` `PARK_LABEL`).
+const PARK_LABEL: &str = "shprd.chat";
+/// What a headless agent's handle starts with: the rest is its terminal's
+/// address, and closing the handle kills that terminal.
+const HANDLE_PREFIX: &str = "term:";
 
 /// How long one window command may take before the call gives up on it.
 ///
@@ -94,6 +186,9 @@ pub const WINDOW_TIMEOUT: Duration = Duration::from_secs(20);
 /// The core holds a draft for about 2.2 s by design and refuses a `blocked`
 /// program, so the trait's 15 s default is not enough (M7ef §2.3, §2.10's 120 s).
 const SEND_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// How long typing raw text may take: an attach and a frame, never a turn.
+const TYPE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The margin a blocking core call is given over what it waits for.
 const CALL_MARGIN: Duration = Duration::from_secs(15);
@@ -488,15 +583,16 @@ impl HcHost {
         // whose plugin-installed reporters silently go nowhere, which is what
         // makes a program like opencode invisible here even though the terminal
         // is plainly drawing its TUI (M10 gate, bug 3).
-        let agent_reports = driver
+        let methods: Vec<String> = driver
             .block_on(client.hello())
             .and_then(std::result::Result::ok)
-            .is_some_and(|hello| {
-                hello
-                    .methods
-                    .iter()
-                    .any(|method| method == "pane.report_agent")
-            });
+            .map(|hello| hello.methods)
+            .unwrap_or_default();
+        let has = |wanted: &str| methods.iter().any(|method| method == wanted);
+        let agent_reports = has("pane.report_agent");
+        // Typing without enter rides a `terminal.attach` stream, so a core that
+        // lacks the method says it cannot, instead of failing on the first key.
+        let can_attach = has("terminal.attach");
         let capabilities = Capabilities {
             spawn: true,
             split: attached,
@@ -509,9 +605,9 @@ impl HcHost {
             pane_grants: false,
             human_ask: false,
             keys: true,
-            // `terminal.send` pastes and then presses enter: the core has no
-            // spelling for text left at the cursor.
-            type_without_submit: false,
+            // `terminal.send` pastes and then presses enter, so text left at the
+            // cursor goes through a short attach stream (`HcClient::type_raw`).
+            type_without_submit: can_attach,
             // `terminal.wait` answers in one call.
             wait: true,
             kill: true,
@@ -524,6 +620,7 @@ impl HcHost {
             agent_reports,
             close_space: attached,
             list_spaces: true,
+            headless_agents: true,
         };
         let host = Self {
             inner: Arc::new(Inner {
@@ -582,6 +679,51 @@ impl HcHost {
         self.inner.capabilities.close_space
     }
 
+    /// One `terminal.run`: the terminal's address.
+    ///
+    /// `parent` is `None` for a terminal placed in a tab (it keeps the core's
+    /// default), and `Some(parent)` for a headless agent: that terminal when
+    /// there is one, outliving it, else no parent at all.
+    fn run_terminal(
+        &self,
+        title: &str,
+        argv: &[String],
+        env: &[(String, Option<String>)],
+        cwd: &Path,
+        labels: BTreeMap<String, String>,
+        parent: Option<Option<&str>>,
+    ) -> Result<String> {
+        let launch = launch_argv(argv, env);
+        let mut params = json!({
+            "argv": launch.argv,
+            "cwd": cwd.display().to_string(),
+            "labels": labels,
+            "keep": false,
+        });
+        match parent {
+            Some(Some(parent)) => {
+                params["parent"] = json!(parent);
+                params["outlive_parent"] = json!(true);
+            }
+            Some(None) => params["no_parent"] = json!(true),
+            None => {}
+        }
+        if !launch.variables.is_empty() {
+            params["env"] = Value::Object(launch.variables);
+        }
+        let started = self.call_object("terminal.run", params, "terminal", title)?;
+        started
+            .get("address")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| {
+                MuxError::command(
+                    "starting a terminal",
+                    format!("herdr-core answered without an address: {started}"),
+                )
+            })
+    }
+
     /// One call, as the client's own error.
     fn core(&self, method: &str, params: Value) -> CoreResult<Value> {
         self.inner
@@ -596,6 +738,40 @@ impl HcHost {
             .driver
             .block_on(self.inner.client.call_with(method, params, timeout))
             .unwrap_or_else(|| Err(shutting_down()))
+    }
+
+    /// Leave `text` at the cursor of `pane`, byte for byte: an attach at the
+    /// terminal's own size, one `data` frame, then close (M7ef §2.6).
+    fn type_raw(&self, pane: &PaneId, text: &str) -> Result<()> {
+        if text.is_empty() {
+            return Ok(());
+        }
+        let record = self.call_object(
+            "terminal.get",
+            json!({"terminal": pane.as_str()}),
+            "pane",
+            pane.as_str(),
+        )?;
+        let size = |key: &str, fallback: u32| {
+            record
+                .get(key)
+                .and_then(Value::as_u64)
+                .and_then(|value| u32::try_from(value).ok())
+                .filter(|value| *value > 0)
+                .unwrap_or(fallback)
+        };
+        let (cols, rows) = (size("cols", 80), size("rows", 24));
+        self.inner
+            .driver
+            .block_on(self.inner.client.type_raw(
+                pane.as_str(),
+                cols,
+                rows,
+                text.as_bytes(),
+                TYPE_TIMEOUT,
+            ))
+            .unwrap_or_else(|| Err(shutting_down()))
+            .map_err(|error| core_error("terminal.attach", error))
     }
 
     /// One call, as the trait's error, for a verb that cannot be "not found".
@@ -665,6 +841,30 @@ impl HcHost {
     /// Every space the layout holds, as the full model.
     fn spaces(&self) -> Result<Vec<placement::Space>> {
         Ok(self.refresh_layout()?.spaces)
+    }
+
+    /// Write `body` as the core document `document`, compare-and-set, retrying
+    /// when somebody else wrote in between.
+    fn write_document(&self, document: &str, body: &str) -> Result<()> {
+        for _ in 0..DOC_RETRIES {
+            let current = self
+                .core("doc.get", json!({"name": document}))
+                .map_err(|error| core_error("doc.get", error))?;
+            let version = current.get("version").and_then(Value::as_u64).unwrap_or(0);
+            let write = self.core(
+                "doc.set",
+                json!({"name": document, "value": body, "version": version}),
+            );
+            match write {
+                Ok(_) => return Ok(()),
+                Err(error) if error.refusal_kind() == Some("conflict") => continue,
+                Err(error) => return Err(core_error("doc.set", error)),
+            }
+        }
+        Err(MuxError::command(
+            "writing a document",
+            format!("herdr-core kept refusing {document} as changed"),
+        ))
     }
 
     /// The space with `id`, from a fresh read.
@@ -818,8 +1018,105 @@ impl Host for HcHost {
         Ok(match_space(&spaces, name).map(space_of))
     }
 
+    /// The space shprd marked `mark`, found through the core document that
+    /// names its id. The document belongs to the host, not to a terminal, so a
+    /// space with no terminals keeps its mark and a rename never loses it.
+    fn marked_space(&self, mark: &str) -> Result<Option<Space>> {
+        let current = self
+            .core("doc.get", json!({"name": mark_document(mark)}))
+            .map_err(|error| core_error("doc.get", error))?;
+        let Some(id) = current.get("value").and_then(Value::as_str) else {
+            return Ok(None);
+        };
+        let spaces = self.spaces()?;
+        Ok(placement::find_space(&spaces, id).map(space_of))
+    }
+
+    fn mark_space(&self, space: &SpaceId, mark: &str) -> Result<()> {
+        // Refuse loudly for a space the layout does not hold.
+        let found = self.space_with(space.as_str(), "space")?;
+        self.write_document(&mark_document(mark), &found.id)
+    }
+
     fn list_spaces(&self) -> Result<Vec<Space>> {
         Ok(self.spaces()?.iter().map(space_of).collect())
+    }
+
+    /// Rename a space with the window's own `space.rename`: the id and the mark
+    /// stay, only the name a person reads changes.
+    fn rename_space(&self, space: &SpaceId, name: &str) -> Result<()> {
+        let found = self.space_with(space.as_str(), "space")?;
+        self.window_call(
+            "space.rename",
+            &[("--id", &found.id), ("--name", name)],
+            "renaming a space",
+        )?;
+        Ok(())
+    }
+
+    /// The spaces the layout opened on `folder`.
+    fn spaces_in_folder(&self, folder: &Path) -> Result<Vec<Space>> {
+        let wanted = comparable(folder);
+        Ok(self
+            .spaces()?
+            .iter()
+            .filter(|space| {
+                space
+                    .folder
+                    .as_deref()
+                    .is_some_and(|at| comparable(Path::new(at)) == wanted)
+            })
+            .map(space_of)
+            .collect())
+    }
+
+    /// Every terminal the core knows that runs as a coordinator, whichever tab
+    /// or space it was placed in.
+    fn list_coordinators(&self) -> Result<Vec<LiveAgent>> {
+        let state = self.inner.client.state();
+        Ok(state
+            .terminals()
+            .filter_map(|terminal| {
+                let role = AgentRole::parse(agent_label(terminal, ROLE_LABEL)?)?;
+                if role != AgentRole::Coordinator {
+                    return None;
+                }
+                let address = terminal.bare_address().to_string();
+                Some(LiveAgent {
+                    tab: Tab {
+                        id: TabId::new(format!("{HANDLE_PREFIX}{address}")),
+                        title: terminal.name.clone().unwrap_or_else(|| address.clone()),
+                        root_pane: PaneId::new(address),
+                    },
+                    task: None,
+                    role,
+                    program: agent_label(terminal, AGENT_LABEL)
+                        .cloned()
+                        .unwrap_or_default(),
+                    space: SpaceId::new(agent_label(terminal, TASK_SPACE_LABEL)?.clone()),
+                    state: reported_state(terminal),
+                    live: terminal.is_live(),
+                    started_ms: terminal.created_ms,
+                    ended_ms: terminal.finished_ms,
+                })
+            })
+            .collect())
+    }
+
+    fn foreign_agent_tabs(&self) -> Vec<TabId> {
+        let state = self.inner.client.state();
+        state
+            .terminals()
+            .filter(|terminal| is_foreign_agent(terminal))
+            .filter_map(|terminal| terminal.labels.get("herdr.coordinator.tab"))
+            .map(|tab| TabId::new(model::bare(tab)))
+            .collect()
+    }
+
+    fn is_foreign_agent(&self, pane: &PaneId) -> bool {
+        self.terminal(pane)
+            .map(|terminal| is_foreign_agent(&terminal))
+            .unwrap_or(false)
     }
 
     /// A space the window makes: named as shprd names it, with its first pane in
@@ -893,6 +1190,77 @@ impl Host for HcHost {
             .collect())
     }
 
+    /// Every tab's id and name from the layout, mod-only tabs included.
+    fn tab_names(&self, space: &SpaceId) -> Result<Vec<(TabId, String)>> {
+        let found = self.space_with(space.as_str(), "space")?;
+        Ok(found
+            .tabs
+            .iter()
+            .map(|tab| (TabId::new(tab.id.clone()), tab.name.clone()))
+            .collect())
+    }
+
+    /// Chat · Terminal, done as the pane header's own switch does it
+    /// (`mods/shprd-pane` `toChat`): split the chat mod in beside the agent's
+    /// pane, label the agent's terminal with the chat's pane, then park the
+    /// terminal — last, because parking removes its pane. The chat carries the
+    /// terminal in its props, so the tab still names its agent.
+    fn show_chat(&self, pane: &PaneId, chat_space: &str) -> Result<()> {
+        if !self.window_attached() {
+            return Err(MuxError::unsupported("showing a chat"));
+        }
+        // The window draws a placed terminal a moment after it starts.
+        let started = std::time::Instant::now();
+        let target = loop {
+            self.refresh_layout()?;
+            if let Some(target) = self.pane_of(pane.as_str()) {
+                break target;
+            }
+            if started.elapsed() >= PLACE_TIMEOUT {
+                return Err(MuxError::not_found("pane", pane.as_str()));
+            }
+            std::thread::sleep(PLACE_POLL);
+        };
+        let props = json!({"space": chat_space, "terminal": pane.as_str()}).to_string();
+        let made = self.window_call(
+            "pane.split",
+            &[
+                ("--direction", "right"),
+                ("--pane", &target),
+                ("--mod", CHAT_MOD),
+                ("--props", &props),
+            ],
+            "opening a chat",
+        )?;
+        let chat = made
+            .get("pane")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                MuxError::command(
+                    "opening a chat",
+                    format!("the window answered without a pane: {made}"),
+                )
+            })?
+            .to_string();
+        let mut labels = Map::new();
+        labels.insert(
+            PARK_LABEL.to_string(),
+            Value::String(model::bare(&chat).to_string()),
+        );
+        self.call_object(
+            "terminal.label",
+            json!({"terminal": pane.as_str(), "labels": labels}),
+            "terminal",
+            pane.as_str(),
+        )?;
+        self.window_call(
+            "terminal.park",
+            &[("--terminal", pane.as_str())],
+            "parking a terminal",
+        )?;
+        Ok(())
+    }
+
     fn rename_tab(&self, tab: &TabId, title: &str) -> Result<()> {
         let (_, found) = self.tab_with(tab.as_str())?;
         self.window_call(
@@ -910,6 +1278,11 @@ impl Host for HcHost {
     }
 
     fn close_tab(&self, tab: &TabId) -> Result<()> {
+        // A headless agent's handle: stopping it is a terminal kill, which also
+        // removes a finished one the core is keeping.
+        if let Some(address) = tab.as_str().strip_prefix(HANDLE_PREFIX) {
+            return self.kill(&PaneId::new(address));
+        }
         let (_, found) = self.tab_with(tab.as_str())?;
         self.window_call(
             "tab.close",
@@ -935,34 +1308,104 @@ impl Host for HcHost {
         cwd: &Path,
     ) -> Result<Tab> {
         let label = tab_label(title);
-        let placement = Placement::new(space.as_str(), &label);
-        let launch = launch_argv(argv, env);
-        let mut params = json!({
-            "argv": launch.argv,
-            "cwd": cwd.display().to_string(),
-            "labels": placement.labels(),
-            "keep": false,
-        });
-        if !launch.variables.is_empty() {
-            params["env"] = Value::Object(launch.variables);
-        }
-        let started = self.call_object("terminal.run", params, "terminal", title)?;
-        let address = started
-            .get("address")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                MuxError::command(
-                    "starting a terminal",
-                    format!("herdr-core answered without an address: {started}"),
-                )
-            })?
-            .to_string();
+        let labels = Placement::new(space.as_str(), &label).labels();
+        let address = self.run_terminal(title, argv, env, cwd, labels, None)?;
         self.name_spawned_tab(&label, title);
         Ok(Tab {
             id: TabId::new(label),
             title: title.to_string(),
             root_pane: PaneId::new(address),
         })
+    }
+
+    /// Start an agent. A coordinator is placed in a tab of the repository's
+    /// space like any `spawn`, plus the agent labels; a worker or a reviewer
+    /// carries **no placement labels at all**, so the window draws nothing for
+    /// it (the `shprd.task`, `shprd.task.space`, `shprd.agent`, `shprd.role`
+    /// and, under a parent that outlives it, `shprd.coordinator` labels).
+    fn spawn_agent(&self, launch: &AgentLaunch<'_>) -> Result<Tab> {
+        let mut labels = BTreeMap::new();
+        labels.insert(AGENT_LABEL.to_string(), launch.program.to_string());
+        labels.insert(ROLE_LABEL.to_string(), launch.role.as_str().to_string());
+        labels.insert(
+            TASK_SPACE_LABEL.to_string(),
+            model::bare(launch.space.as_str()).to_string(),
+        );
+        if let Some(task) = launch.task {
+            labels.insert(placement::TASK_LABEL.to_string(), task.to_string());
+        }
+        if launch.role == AgentRole::Coordinator {
+            // The tab's id is shprd's own; the title is only its name. The window
+            // finds a tab by its id across every space, so two repositories served
+            // at once (each with its own coordinator) need an id per space, or the
+            // second coordinator lands in the first one's tab.
+            let tab = format!("{COORDINATOR_TAB}-{}", model::bare(launch.space.as_str()));
+            labels.extend(Placement::new(launch.space.as_str(), &tab).labels());
+            let address = self.run_terminal(
+                launch.title,
+                launch.argv,
+                launch.env,
+                launch.cwd,
+                labels,
+                None,
+            )?;
+            self.name_spawned_tab(&tab, launch.title);
+            return Ok(Tab {
+                id: TabId::new(tab),
+                title: launch.title.to_string(),
+                root_pane: PaneId::new(address),
+            });
+        }
+        if let Some(parent) = launch.parent
+            && let Some(terminal) = self.inner.client.state().terminals.get(parent.as_str())
+            && let Some(tab) = terminal.labels.get(placement::TAB_LABEL)
+        {
+            labels.insert(COORDINATOR_LABEL.to_string(), tab.clone());
+        }
+        let address = self.run_terminal(
+            launch.title,
+            launch.argv,
+            launch.env,
+            launch.cwd,
+            labels,
+            Some(launch.parent.map(PaneId::as_str)),
+        )?;
+        Ok(Tab {
+            id: TabId::new(format!("{HANDLE_PREFIX}{address}")),
+            title: launch.title.to_string(),
+            root_pane: PaneId::new(address),
+        })
+    }
+
+    /// Every headless agent, from the core's own fold by label.
+    fn list_agents(&self) -> Result<Vec<LiveAgent>> {
+        let state = self.inner.client.state();
+        Ok(state
+            .terminals()
+            .filter(|terminal| agent_label(terminal, TASK_SPACE_LABEL).is_some())
+            .filter(|terminal| !terminal.labels.contains_key(placement::TAB_LABEL))
+            .filter_map(|terminal| {
+                let role = AgentRole::parse(agent_label(terminal, ROLE_LABEL)?)?;
+                let address = terminal.bare_address().to_string();
+                Some(LiveAgent {
+                    tab: Tab {
+                        id: TabId::new(format!("{HANDLE_PREFIX}{address}")),
+                        title: terminal.name.clone().unwrap_or_else(|| address.clone()),
+                        root_pane: PaneId::new(address),
+                    },
+                    task: agent_label(terminal, placement::TASK_LABEL).cloned(),
+                    role,
+                    program: agent_label(terminal, AGENT_LABEL)
+                        .cloned()
+                        .unwrap_or_default(),
+                    space: SpaceId::new(agent_label(terminal, TASK_SPACE_LABEL)?.clone()),
+                    state: reported_state(terminal),
+                    live: terminal.is_live(),
+                    started_ms: terminal.created_ms,
+                    ended_ms: terminal.finished_ms,
+                })
+            })
+            .collect())
     }
 
     /// Split the pane showing `pane` with the window's `pane.split`.
@@ -1041,10 +1484,14 @@ impl Host for HcHost {
     /// `terminal.send` carries no `caller`: the text must arrive as the person's
     /// own, never wrapped in a from-another-machine note (M7ef §2.10,
     /// `hub.ts:30-42`). herdr-core's send always presses enter, so a caller that
-    /// wants the text left at the cursor is refused rather than lied to.
+    /// wants the text left at the cursor goes through a short attach stream
+    /// instead: the bytes reach the terminal unchanged and no enter is added.
     fn write(&self, pane: &PaneId, text: &str, submit: bool) -> Result<()> {
         if !submit {
-            return Err(MuxError::unsupported("typing text without submitting it"));
+            if !self.inner.capabilities.type_without_submit {
+                return Err(MuxError::unsupported("typing text without submitting it"));
+            }
+            return self.type_raw(pane, text);
         }
         self.core_with(
             "terminal.send",
@@ -1227,25 +1674,8 @@ impl Host for HcHost {
     /// and the write is re-read and retried.
     fn doc(&self, space: &SpaceId, name: &str, body: &str) -> Result<String> {
         let document = format!("shprd.{}.{name}", model::bare(space.as_str()));
-        for _ in 0..DOC_RETRIES {
-            let current = self
-                .core("doc.get", json!({"name": document}))
-                .map_err(|error| core_error("doc.get", error))?;
-            let version = current.get("version").and_then(Value::as_u64).unwrap_or(0);
-            let write = self.core(
-                "doc.set",
-                json!({"name": document, "value": body, "version": version}),
-            );
-            match write {
-                Ok(_) => return Ok(document),
-                Err(error) if error.refusal_kind() == Some("conflict") => continue,
-                Err(error) => return Err(core_error("doc.set", error)),
-            }
-        }
-        Err(MuxError::command(
-            "writing a document",
-            format!("herdr-core kept refusing {document} as changed"),
-        ))
+        self.write_document(&document, body)?;
+        Ok(document)
     }
 
     /// Run `argv` once with `machine.exec` and answer its exit code and output.
@@ -1414,6 +1844,15 @@ fn reported_state(terminal: &Terminal) -> AgentState {
     }
 }
 
+/// A folder as it is compared: resolved when it exists, else as written, with
+/// no trailing slash.
+fn comparable(folder: &Path) -> PathBuf {
+    let resolved = folder
+        .canonicalize()
+        .unwrap_or_else(|_| folder.to_path_buf());
+    resolved.components().collect()
+}
+
 /// The space of a layout entry, named as a person sees it.
 fn space_of(space: &placement::Space) -> Space {
     Space {
@@ -1434,6 +1873,25 @@ fn tab_title(tab: &placement::Tab) -> String {
     } else {
         tab.name.clone()
     }
+}
+
+/// The core document that holds shprd's mark `mark`: its value is the id of the
+/// space that carries it.
+///
+/// herdr-core names a document 1-32 of `a-z 0-9 - _ .`, starting with a letter
+/// or digit, so the name is `shprd-mark-` and 16 hex digits of the mark's
+/// SHA-256: stable for a mark, valid for any mark (spaces, `·`, 40+ characters)
+/// and distinct per mark. An older build's name (`shprd.space-mark.<label>`)
+/// was never a name this core accepts, so no such document can exist to lose.
+fn mark_document(mark: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(mark.as_bytes());
+    let hex: String = digest
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    format!("shprd-mark-{hex}")
 }
 
 /// The space `name` matches: by id (a label-made space's id is its label), then
@@ -1642,9 +2100,48 @@ fn decode_base64(text: &str) -> Result<String> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    use super::{match_space, tab_label, terminal_of_pane};
+    use super::{
+        ROLE_LABEL, TASK_SPACE_LABEL, agent_label, is_foreign_agent, match_space, tab_label,
+        terminal_of_pane,
+    };
+    use crate::model::Terminal;
     use crate::placement::spaces_from_document;
-    use serde_json::json;
+    use serde_json::{Value, json};
+
+    #[test]
+    fn a_mark_lives_in_a_core_document_not_on_a_terminal() {
+        use super::mark_document;
+        // A document keyed by the mark holds the space id, so a space with no
+        // terminals keeps it and a rename never loses it.
+        assert_eq!(mark_document("shprd · repo"), mark_document("shprd · repo"));
+        assert_ne!(mark_document("shprd · a"), mark_document("shprd · b"));
+    }
+
+    #[test]
+    fn a_mark_document_name_satisfies_herdr_cores_rule_for_any_mark() {
+        use super::mark_document;
+        let long = format!("shprd · {}", "é·x ".repeat(30));
+        let longer = format!("{long}y");
+        for mark in [
+            "shprd · scratchpad",
+            "a b",
+            "·",
+            "",
+            long.as_str(),
+            "UPPER/..",
+        ] {
+            let name = mark_document(mark);
+            assert!((1..=32).contains(&name.len()), "{name}");
+            assert!(name.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit()));
+            assert!(
+                name.chars().all(|c| c.is_ascii_lowercase()
+                    || c.is_ascii_digit()
+                    || matches!(c, '-' | '_' | '.')),
+                "{name}"
+            );
+        }
+        assert_ne!(mark_document(&long), mark_document(&longer));
+    }
 
     #[test]
     fn a_tab_label_is_the_title_a_person_reads() {
@@ -1749,5 +2246,97 @@ mod tests {
         ]}]});
         assert_eq!(terminal_of_pane(&layout, "p2").as_deref(), Some("box/t9"));
         assert!(terminal_of_pane(&layout, "p9").is_none());
+    }
+
+    /// A terminal as the core reports it, from its labels and argv.
+    fn terminal_with(labels: Value, argv: Value, template: Option<&str>) -> Terminal {
+        serde_json::from_value(json!({
+            "address": "t1", "labels": labels, "argv": argv, "template": template,
+            "state": "live",
+        }))
+        .expect("a terminal")
+    }
+
+    /// SHPR-69: Shepherdr's per-space Assistant (labels as read live off one)
+    /// is never shprd's coordinator, even when something gave it a
+    /// `herdr.task.space`; shprd's own labels and an older shprd's terminal,
+    /// recognised by its brief, still are.
+    #[test]
+    fn shepherdrs_assistant_is_never_shprds_coordinator() {
+        let shepherdr = json!({
+            "herdr.role": "coordinator",
+            "herdr.coordinator.space": "spaf6081",
+            "herdr.coordinator.tab": "tb6b44",
+            "herdr.chat.slot": "coord-spaf6081-ndgoswzr",
+            "herdr.chat": "paff1f48",
+            "herdr.task.space": "spaf6081",
+        });
+        let assistant = terminal_with(
+            shepherdr.clone(),
+            json!(["claude", "--model", "opus"]),
+            Some("herdr-assistant-mwo65bwi"),
+        );
+        assert!(is_foreign_agent(&assistant));
+        assert!(agent_label(&assistant, ROLE_LABEL).is_none());
+        assert!(agent_label(&assistant, TASK_SPACE_LABEL).is_none());
+        // Its markers alone, with no template, settle it too.
+        let bare = terminal_with(shepherdr, json!(["claude"]), None);
+        assert!(is_foreign_agent(&bare));
+        assert!(agent_label(&bare, ROLE_LABEL).is_none());
+
+        // A bare `herdr.role=coordinator` proves nothing: not shprd's.
+        let unmarked = terminal_with(
+            json!({"herdr.role": "coordinator", "herdr.task.space": "sp1"}),
+            json!(["claude"]),
+            None,
+        );
+        assert!(agent_label(&unmarked, ROLE_LABEL).is_none());
+
+        // An older shprd's coordinator: its brief is in its argv.
+        let legacy = terminal_with(
+            json!({"herdr.role": "coordinator", "herdr.task.space": "sp1"}),
+            json!([
+                "env",
+                "SHPRD_ACTOR=agent:claude",
+                "claude",
+                "--append-system-prompt-file",
+                "/home/me/.shprd/briefs/coordinator.md"
+            ]),
+            None,
+        );
+        assert!(!is_foreign_agent(&legacy));
+        assert_eq!(
+            agent_label(&legacy, ROLE_LABEL).map(String::as_str),
+            Some("coordinator")
+        );
+        assert_eq!(
+            agent_label(&legacy, TASK_SPACE_LABEL).map(String::as_str),
+            Some("sp1")
+        );
+        // Its chat label (shprd.chat) also says it is shprd's.
+        let parked = terminal_with(
+            json!({"herdr.role": "coordinator", "herdr.task.space": "sp1", "shprd.chat": "p1"}),
+            json!(["claude"]),
+            None,
+        );
+        assert!(agent_label(&parked, ROLE_LABEL).is_some());
+        // Shepherdr's markers win over any shprd label that lands on it.
+        let both = terminal_with(
+            json!({"shprd.role": "coordinator", "shprd.task.space": "sp1",
+                "herdr.coordinator.space": "sp1"}),
+            json!(["claude"]),
+            None,
+        );
+        assert!(agent_label(&both, ROLE_LABEL).is_none());
+        // shprd's own labels are read as they are.
+        let own = terminal_with(
+            json!({"shprd.role": "coordinator", "shprd.task.space": "sp1"}),
+            json!(["claude"]),
+            None,
+        );
+        assert_eq!(
+            agent_label(&own, ROLE_LABEL).map(String::as_str),
+            Some("coordinator")
+        );
     }
 }

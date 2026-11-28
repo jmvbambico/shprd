@@ -6,6 +6,7 @@
 mod cli;
 mod cmd;
 mod ctx;
+mod guard;
 mod host;
 mod summary;
 

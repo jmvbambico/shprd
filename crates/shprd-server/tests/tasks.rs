@@ -27,6 +27,12 @@ use shprd_server::{App, Engine};
 use tempfile::TempDir;
 use tower::ServiceExt;
 
+/// The `Host` every fixture request is addressed to.
+///
+/// The gate refuses a request with no `Host` (`421`), so a test that drove the
+/// router without one would be testing the refusal, not the route.
+const HOST: &str = "127.0.0.1:18080";
+
 /// The port the fixtures claim; no `Origin` is sent, so it is only a label.
 const PORT: u16 = 18_120;
 
@@ -85,6 +91,7 @@ impl Fixture {
         let mut request = Request::builder()
             .method(method.clone())
             .uri(path)
+            .header(header::HOST, HOST)
             .header(header::AUTHORIZATION, format!("Bearer {}", self.token));
         if method != Method::GET {
             request = request.header("x-shprd", "1");
@@ -117,6 +124,7 @@ impl Fixture {
         let request = Request::builder()
             .method(method)
             .uri(path)
+            .header(header::HOST, HOST)
             .header(header::AUTHORIZATION, format!("Bearer {}", self.token))
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(body.to_string()))
@@ -233,6 +241,17 @@ fn git(dir: &Path, args: &[&str]) {
 /// while its card waits, so a diff against the wrong base is visible as files
 /// that are not T1's.
 fn with_a_task_branch() -> Fixture {
+    with_a_task_branch_also_changing(&[])
+}
+
+/// [`with_a_task_branch`] whose task also commits `extra`, which its declared
+/// paths do not name.
+fn with_a_task_branch_also_changing(extra: &[&str]) -> Fixture {
+    with_a_branch_for("T1", extra)
+}
+
+/// [`with_a_task_branch`] for the task `id` (e.g. `SHP-12`): its branch is `shprd/r1/<id>`.
+fn with_a_branch_for(id: &str, extra: &[&str]) -> Fixture {
     let repo = TempDir::new().expect("repo dir");
     let root = repo.path().to_path_buf();
     git(&root, &["init", "-q", "-b", "main"]);
@@ -243,9 +262,12 @@ fn with_a_task_branch() -> Fixture {
     git(&root, &["add", "."]);
     git(&root, &["commit", "-q", "-m", "seed"]);
     git(&root, &["checkout", "-q", "-b", "integration/m10"]);
-    git(&root, &["checkout", "-q", "-b", "shprd/r1/T1"]);
+    git(&root, &["checkout", "-q", "-b", &format!("shprd/r1/{id}")]);
     fs::write(root.join("kept.txt"), "one\nTWO\nthree\nfour\n").expect("the change");
     fs::write(root.join("new.txt"), "hello\n").expect("a new file");
+    for path in extra {
+        fs::write(root.join(path), "changed by the task\n").expect("an extra file");
+    }
     git(&root, &["add", "."]);
     git(&root, &["commit", "-q", "-m", "the task's work"]);
     git(&root, &["checkout", "-q", "integration/m10"]);
@@ -260,7 +282,7 @@ fn with_a_task_branch() -> Fixture {
     append(
         &fixture,
         EventKind::TaskAdded {
-            task: "T1".to_string(),
+            task: id.to_string(),
             title: "a task with work".to_string(),
             scope: vec!["kept.txt".to_string(), "new.txt".to_string()],
             acceptance: vec!["it works".to_string()],
@@ -272,12 +294,12 @@ fn with_a_task_branch() -> Fixture {
     append(
         &fixture,
         EventKind::Spawned {
-            task: "T1".to_string(),
+            task: id.to_string(),
             attempt: 1,
             agent: "claude".to_string(),
             model: None,
             worktree: root.display().to_string(),
-            branch: "shprd/r1/T1".to_string(),
+            branch: format!("shprd/r1/{id}"),
         },
     );
     // The attempt reports, so the task is a finished hand-in rather than work in
@@ -285,7 +307,7 @@ fn with_a_task_branch() -> Fixture {
     append(
         &fixture,
         EventKind::Reported {
-            task: "T1".to_string(),
+            task: id.to_string(),
             attempt: 1,
             status: shprd_core::event::ReportStatus::Completed,
             summary: "changed the file and added one".to_string(),
@@ -345,7 +367,7 @@ fn recording_engine(answer: Result<&'static str, &'static str>) -> (Engine, Call
 // -- POST /api/tasks -------------------------------------------------------
 
 #[tokio::test]
-async fn the_person_adds_a_task_and_it_is_named_from_the_title() {
+async fn the_person_adds_a_task_and_it_gets_a_prefixed_number() {
     let fixture = Fixture::new();
     let reply = fixture
         .add(json!({
@@ -357,7 +379,8 @@ async fn the_person_adds_a_task_and_it_is_named_from_the_title() {
     assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
     assert_eq!(reply.json()["ok"], json!(true));
     let task = &reply.json()["task"];
-    assert_eq!(task["id"], json!("add-the-board-s-add-task-form"));
+    let prefix = shprd_core::settings::task_id_prefix(None, fixture.repo.path());
+    assert_eq!(task["id"], json!(format!("{prefix}-1")));
     assert_eq!(task["derived"]["status"], json!("to_do"));
     assert_eq!(task["scope"], json!(["host/herdr-desktop"]));
 
@@ -365,7 +388,7 @@ async fn the_person_adds_a_task_and_it_is_named_from_the_title() {
     let events = fixture.events();
     let added: Vec<&shprd_core::event::Event> = events
         .iter()
-        .filter(|event| matches!(&event.kind, EventKind::TaskAdded { task, .. } if task.starts_with("add-the-board")))
+        .filter(|event| matches!(&event.kind, EventKind::TaskAdded { task, .. } if task.ends_with("-1")))
         .collect();
     assert_eq!(added.len(), 1, "one task, one event");
     assert_eq!(
@@ -376,7 +399,7 @@ async fn the_person_adds_a_task_and_it_is_named_from_the_title() {
 }
 
 #[tokio::test]
-async fn two_tasks_with_one_title_are_two_tasks() {
+async fn two_tasks_with_one_title_are_two_numbered_tasks() {
     let fixture = Fixture::new();
     let body = json!({
         "title": "Tabs",
@@ -384,10 +407,11 @@ async fn two_tasks_with_one_title_are_two_tasks() {
         "acceptance": ["it works"],
     });
     let first = fixture.add(body.clone()).await;
-    assert_eq!(first.json()["task"]["id"], json!("tabs"));
+    let prefix = shprd_core::settings::task_id_prefix(None, fixture.repo.path());
+    assert_eq!(first.json()["task"]["id"], json!(format!("{prefix}-1")));
     let second = fixture.add(body).await;
     assert_eq!(second.status, StatusCode::OK, "{:?}", second.body);
-    assert_eq!(second.json()["task"]["id"], json!("tabs-2"));
+    assert_eq!(second.json()["task"]["id"], json!(format!("{prefix}-2")));
 }
 
 #[tokio::test]
@@ -433,10 +457,30 @@ async fn adding_a_task_needs_the_write_header() {
 }
 
 #[tokio::test]
-async fn a_task_with_no_title_scope_or_acceptance_is_refused() {
+async fn a_task_with_no_paths_is_added() {
+    let fixture = Fixture::new();
+    let reply = fixture
+        .add(json!({"title": "x", "scope": [], "acceptance": ["y"]}))
+        .await;
+    assert!(
+        reply.status.is_success(),
+        "{} {:?}",
+        reply.status,
+        reply.body
+    );
+    assert!(
+        fixture
+            .events()
+            .iter()
+            .any(|event| matches!(&event.kind, EventKind::TaskAdded { .. })),
+        "declared paths are an optional hint"
+    );
+}
+
+#[tokio::test]
+async fn a_task_with_no_title_or_acceptance_or_a_bad_path_is_refused() {
     for body in [
         json!({"title": "   ", "scope": ["a"], "acceptance": ["y"]}),
-        json!({"title": "x", "scope": [], "acceptance": ["y"]}),
         json!({"title": "x", "scope": ["a"], "acceptance": []}),
         json!({"title": "x", "scope": ["../escape"], "acceptance": ["y"]}),
         // Not a task at all: no title field to complain about.
@@ -506,6 +550,16 @@ async fn the_changes_of_a_task_are_its_branch_against_its_base() {
     assert_eq!(kept["deleted"], json!(1), "two");
     assert_eq!(body["added"], json!(3));
     assert_eq!(body["deleted"], json!(1));
+    // The commits the branch holds past the merge base, newest first.
+    let listed = body["commits"].as_array().expect("the commits");
+    assert_eq!(
+        body["commit_count"],
+        json!(listed.len()),
+        "the count covers what is listed here"
+    );
+    assert!(!listed.is_empty(), "the branch has work on it");
+    assert!(listed[0]["sha"].as_str().is_some_and(|sha| !sha.is_empty()));
+    assert!(listed[0]["subject"].is_string());
 }
 
 /// Bug 8 of the M10 gate: another task lands on the integration branch after
@@ -551,7 +605,7 @@ async fn changes_after_another_task_landed_list_only_this_tasks_files() {
 async fn a_task_with_no_attempt_has_nothing_to_compare() {
     let fixture = Fixture::new();
     let added = fixture
-        .add(json!({"title": "fresh", "scope": ["a"], "acceptance": ["y"]}))
+        .add(json!({"id": "fresh", "title": "fresh", "scope": ["a"], "acceptance": ["y"]}))
         .await;
     assert_eq!(added.status, StatusCode::OK);
     let reply = fixture
@@ -651,6 +705,7 @@ async fn an_engine_failure_is_the_persons_refusal() {
             Request::builder()
                 .method(Method::POST)
                 .uri("/api/action")
+                .header(header::HOST, HOST)
                 .header(header::AUTHORIZATION, format!("Bearer {}", fixture.token))
                 .header("x-shprd", "1")
                 .header(header::CONTENT_TYPE, "application/json")
@@ -735,6 +790,160 @@ fn with_a_working_task() -> Fixture {
         },
     );
     fixture
+}
+
+#[tokio::test]
+async fn a_reopen_moves_a_handed_in_task_back_to_working_and_refuses_a_working_one() {
+    let fixture = with_a_working_task();
+    // A task that is still working is already open.
+    let early = fixture
+        .act(json!({"kind": "task.reopen", "task": "T1"}))
+        .await;
+    assert_eq!(early.status, StatusCode::CONFLICT, "{:?}", early.body);
+    assert_eq!(early.code(), "refused");
+
+    append(
+        &fixture,
+        EventKind::Reported {
+            task: "T1".to_string(),
+            attempt: 1,
+            status: shprd_core::event::ReportStatus::Completed,
+            summary: "done".to_string(),
+            tests: Vec::new(),
+            checks: vec![shprd_core::event::CheckReport {
+                gate: "unit".to_string(),
+                command: "cargo test".to_string(),
+                exit_code: Some(0),
+                output_tail: String::new(),
+                pre_existing: None,
+            }],
+            changed_paths: vec!["kept.txt".to_string()],
+            commit: None,
+            skills_used: Vec::new(),
+            proofs: Vec::new(),
+        },
+    );
+    let reopened = fixture
+        .act(json!({"kind": "task.reopen", "task": "T1"}))
+        .await;
+    assert_eq!(reopened.status, StatusCode::OK, "{:?}", reopened.body);
+    assert_eq!(reopened.json()["task"]["status"], json!("working"));
+    let recorded = fixture
+        .events()
+        .into_iter()
+        .find_map(|event| match event.kind {
+            EventKind::TaskReopened { task, attempt } => Some((event.actor, task, attempt)),
+            _ => None,
+        })
+        .expect("the reopen is recorded");
+    assert_eq!(recorded, (Actor::Human, "T1".to_string(), 1));
+
+    let unknown = fixture
+        .act(json!({"kind": "task.reopen", "task": "nope"}))
+        .await;
+    assert_eq!(unknown.status, StatusCode::NOT_FOUND, "{:?}", unknown.body);
+}
+
+#[tokio::test]
+async fn a_resend_delivers_the_brief_again_and_clears_the_lost_brief_card() {
+    let fixture = with_a_working_task();
+    append(
+        &fixture,
+        EventKind::Escalated {
+            task: Some("T1".to_string()),
+            body: "brief not delivered".to_string(),
+            default_action: "resend the brief".to_string(),
+        },
+    );
+    let sent: Calls = Arc::default();
+    let seen = Arc::clone(&sent);
+    let engine = Engine::new(Arc::new(|_repo: &Path, _task: &str| Ok(String::new()))).with_resend(
+        Arc::new(move |repo: &Path, task: &str| {
+            seen.lock()
+                .expect("the lock")
+                .push((repo.display().to_string(), task.to_string()));
+            Ok("delivered".to_string())
+        }),
+    );
+    let fixture = Fixture {
+        app: fixture.app.with_engine(engine),
+        ..fixture
+    };
+    let before = fixture.send(Method::GET, "/api/state", None).await;
+    assert_eq!(before.json()["needs"].as_array().map(Vec::len), Some(1));
+    let reply = fixture
+        .act(json!({"kind": "task.resend_brief", "task": "T1"}))
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+    assert_eq!(calls(&sent).len(), 1);
+    let after = fixture.send(Method::GET, "/api/state", None).await;
+    assert_eq!(
+        after.json()["needs"].as_array().map(Vec::len),
+        Some(0),
+        "the card clears once the brief went: {}",
+        after.json()
+    );
+    let unknown = fixture
+        .act(json!({"kind": "task.resend_brief", "task": "T9"}))
+        .await;
+    assert_eq!(unknown.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn a_resend_without_a_host_is_refused_and_the_card_stays() {
+    let fixture = with_a_working_task();
+    append(
+        &fixture,
+        EventKind::Escalated {
+            task: Some("T1".to_string()),
+            body: "brief not delivered".to_string(),
+            default_action: "resend the brief".to_string(),
+        },
+    );
+    let (engine, _, _) = recording_engine(Ok("x"));
+    let fixture = Fixture {
+        app: fixture.app.with_engine(engine),
+        ..fixture
+    };
+    let reply = fixture
+        .act(json!({"kind": "task.resend_brief", "task": "T1"}))
+        .await;
+    assert_eq!(reply.status, StatusCode::CONFLICT, "{:?}", reply.body);
+    let after = fixture.send(Method::GET, "/api/state", None).await;
+    assert_eq!(after.json()["needs"].as_array().map(Vec::len), Some(1));
+}
+
+#[tokio::test]
+async fn retry_review_without_a_host_is_refused_and_an_unknown_task_is_not_found() {
+    // SHPR-83: the card "review kickoff not delivered" has a Retry review button
+    // (`task.review_again`); a service without a host says so, and a task nobody added is unknown.
+    let fixture = with_a_working_task();
+    let reply = fixture
+        .act(json!({"kind": "task.review_again", "task": "T1"}))
+        .await;
+    assert_eq!(reply.status, StatusCode::CONFLICT, "{:?}", reply.body);
+    let (engine, _, _) = recording_engine(Ok("x"));
+    let fixture = Fixture {
+        app: fixture.app.with_engine(engine),
+        ..fixture
+    };
+    let reply = fixture
+        .act(json!({"kind": "task.review_again", "task": "T9"}))
+        .await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND, "{:?}", reply.body);
+    // With a host that starts the review, the press is accepted.
+    let (engine, _, _) = recording_engine(Ok("x"));
+    let engine = engine.with_review_again(Arc::new(|_repo: &Path, _task: &str| {
+        Ok("started a review".to_string())
+    }));
+    let fixture = Fixture {
+        app: fixture.app.with_engine(engine),
+        ..fixture
+    };
+    let reply = fixture
+        .act(json!({"kind": "task.review_again", "task": "T1"}))
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
 }
 
 #[tokio::test]
@@ -843,7 +1052,7 @@ async fn a_second_stop_is_refused_with_its_reason() {
 async fn a_stop_of_a_task_nobody_started_is_refused() {
     let fixture = Fixture::new();
     fixture
-        .add(json!({"title": "not started", "scope": ["a"], "acceptance": ["y"]}))
+        .add(json!({"id": "not-started", "title": "not started", "scope": ["a"], "acceptance": ["y"]}))
         .await;
     let (engine, _, stopped) = recording_engine(Ok("closed the space"));
     let fixture = Fixture {
@@ -894,7 +1103,9 @@ async fn a_stopped_task_reads_the_same_from_the_cli_and_the_board() {
 async fn dropping_a_task_records_the_persons_reason_once() {
     let fixture = Fixture::new();
     let add = fixture
-        .add(json!({"title": "not needed", "scope": ["a"], "acceptance": ["y"]}))
+        .add(
+            json!({"id": "not-needed", "title": "not needed", "scope": ["a"], "acceptance": ["y"]}),
+        )
         .await;
     assert_eq!(add.status, StatusCode::OK);
     let drop = fixture
@@ -916,6 +1127,81 @@ async fn dropping_a_task_records_the_persons_reason_once() {
         .await;
     assert_eq!(again.status, StatusCode::CONFLICT);
     assert_eq!(again.code(), "refused");
+}
+
+#[tokio::test]
+async fn dropping_many_tasks_takes_one_reason_and_skips_the_ones_it_cannot() {
+    let fixture = Fixture::new();
+    for (title, scope) in [("old one", "a"), ("old two", "b"), ("new one", "c")] {
+        let add = fixture
+            .add(json!({"id": title.replace(' ', "-"), "title": title, "scope": [scope], "acceptance": ["y"]}))
+            .await;
+        assert_eq!(add.status, StatusCode::OK);
+    }
+    // One of the three is already dropped: it is skipped, not a failure.
+    fixture
+        .act(json!({"kind": "task.drop", "task": "old-two", "reason": "first"}))
+        .await;
+    let reply = fixture
+        .act(json!({
+            "kind": "task.drop_many",
+            "tasks": ["old-one", "old-two", "no-such-task", "old-one"],
+            "reason": "an earlier session's leftovers",
+        }))
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+    assert_eq!(reply.json()["dropped"], json!(["old-one"]));
+    let skipped = reply.json()["skipped"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(skipped.len(), 2, "{skipped:?}");
+    let state = fixture
+        .send(Method::GET, "/api/state", None)
+        .await
+        .json()
+        .clone();
+    let status = |id: &str| {
+        state["tasks"]
+            .as_array()
+            .and_then(|tasks| tasks.iter().find(|t| t["id"] == json!(id)))
+            .map(|t| t["status"].clone())
+    };
+    assert_eq!(status("old-one"), Some(json!("dropped")));
+    assert_eq!(status("new-one"), Some(json!("queued")), "untouched");
+    // Nothing droppable at all is a refusal, never a quiet success.
+    let none = fixture
+        .act(json!({"kind": "task.drop_many", "tasks": ["old-one"], "reason": "again"}))
+        .await;
+    assert_eq!(none.status, StatusCode::CONFLICT);
+    assert_eq!(none.code(), "refused");
+    // A missing reason is refused before anything is dropped.
+    let blank = fixture
+        .act(json!({"kind": "task.drop_many", "tasks": ["new-one"], "reason": " "}))
+        .await;
+    assert_eq!(blank.status, StatusCode::CONFLICT);
+    let empty = fixture
+        .act(json!({"kind": "task.drop_many", "tasks": [], "reason": "x"}))
+        .await;
+    assert_eq!(empty.status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn a_task_says_when_it_was_added_and_last_touched() {
+    let fixture = Fixture::new();
+    fixture
+        .add(json!({"title": "dated task", "scope": ["a"], "acceptance": ["y"]}))
+        .await;
+    let state = fixture
+        .send(Method::GET, "/api/state", None)
+        .await
+        .json()
+        .clone();
+    let task = &state["tasks"][0];
+    assert!(task["added_at_ms"].as_u64().unwrap_or(0) > 0, "{task}");
+    assert!(
+        task["touched_at_ms"].as_u64().unwrap_or(0) >= task["added_at_ms"].as_u64().unwrap_or(0)
+    );
 }
 
 #[tokio::test]
@@ -972,7 +1258,7 @@ async fn accepting_a_task_pins_the_head_its_branch_is_at() {
 async fn accepting_a_task_with_no_attempt_is_refused() {
     let fixture = Fixture::new();
     fixture
-        .add(json!({"title": "fresh", "scope": ["a"], "acceptance": ["y"]}))
+        .add(json!({"id": "fresh", "title": "fresh", "scope": ["a"], "acceptance": ["y"]}))
         .await;
     let reply = fixture
         .act(json!({"kind": "task.accept", "task": "fresh"}))
@@ -1004,6 +1290,28 @@ async fn accepting_is_refused_where_nothing_waits_for_an_acceptance() {
             .iter()
             .any(|event| matches!(&event.kind, EventKind::TaskApproved { .. })),
         "nothing was written"
+    );
+}
+
+#[tokio::test]
+async fn a_task_flagged_for_a_protected_path_is_accepted_under_auto_and_its_card_says_why() {
+    let fixture =
+        with_a_task_branch_also_changing(&["AGENTS.md"]).settings("[tasks]\nmerge = \"auto\"\n");
+    let changes = fixture
+        .send(Method::GET, "/api/tasks/T1/changes", None)
+        .await;
+    assert_eq!(changes.status, StatusCode::OK, "{:?}", changes.body);
+    assert_eq!(changes.json()["protected"], json!(["AGENTS.md"]));
+    let reply = fixture
+        .act(json!({"kind": "task.accept", "task": "T1"}))
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+    assert!(
+        fixture
+            .events()
+            .iter()
+            .any(|event| matches!(&event.kind, EventKind::TaskApproved { .. })),
+        "the person's Accept is recorded"
     );
 }
 
@@ -1043,4 +1351,119 @@ async fn a_tasks_pull_request_reaches_the_board() {
     assert_eq!(pr["state"], json!("open"));
     assert_eq!(pr["url"], json!("https://example.invalid/pr/42"));
     assert_eq!(pr["approved"], json!(false));
+}
+
+#[tokio::test]
+async fn a_disclosed_decision_is_listed_for_the_card_and_answered_once_as_an_event() {
+    // Item 18: a choice the worker disclosed is a decision to confirm, kept apart from
+    // the findings; the person answers each as an event and the first answer stands.
+    let fixture = with_a_working_task();
+    let (engine, _, _) = recording_engine(Ok("x"));
+    let engine = engine.with_report_reader(Arc::new(|_repo: &Path, _task: &str, attempt: u32| {
+        (attempt == 1).then(|| shprd_core::review::ReviewReport {
+            findings: vec![],
+            decisions: vec![shprd_core::review::Decision {
+                title: "Titan card stays dark".to_string(),
+                detail: "disclosed in the summary".to_string(),
+            }],
+        })
+    }));
+    let fixture = Fixture {
+        app: fixture.app.with_engine(engine),
+        ..fixture
+    };
+    let before = fixture
+        .send(Method::GET, "/api/tasks/T1/decisions?attempt=1", None)
+        .await;
+    assert_eq!(before.status, StatusCode::OK, "{:?}", before.body);
+    assert_eq!(
+        before.json()["decisions"][0]["title"],
+        "Titan card stays dark"
+    );
+    assert!(before.json()["decisions"][0].get("answer").is_none());
+
+    let answer = json!({"attempt": 1, "of": "decision", "index": 1, "answer": "follow_up"});
+    let sent = fixture
+        .send(
+            Method::POST,
+            "/api/tasks/T1/remarks/answer",
+            Some(answer.clone()),
+        )
+        .await;
+    assert_eq!(sent.status, StatusCode::OK, "{:?}", sent.body);
+    let after = fixture
+        .send(Method::GET, "/api/tasks/T1/decisions?attempt=1", None)
+        .await;
+    assert_eq!(after.json()["decisions"][0]["answer"], "follow_up");
+    let recorded = fixture
+        .events()
+        .into_iter()
+        .filter(|event| {
+            matches!(&event.kind, EventKind::AskAnswered { ask, answer, .. }
+                if ask == "remark-1-d1" && answer == "follow-up task")
+        })
+        .count();
+    assert_eq!(recorded, 1, "the answer is in the log");
+
+    let again = fixture
+        .send(Method::POST, "/api/tasks/T1/remarks/answer", Some(answer))
+        .await;
+    assert_eq!(again.status, StatusCode::CONFLICT, "{:?}", again.body);
+    let unknown = fixture
+        .send(
+            Method::POST,
+            "/api/tasks/T1/remarks/answer",
+            Some(json!({"attempt": 1, "of": "finding", "index": 1, "answer": "fix_it"})),
+        )
+        .await;
+    assert_eq!(unknown.status, StatusCode::CONFLICT, "{:?}", unknown.body);
+}
+
+#[tokio::test]
+async fn override_readmit_and_sync_actions_run_the_rules_and_say_why_they_refuse() {
+    // The board's Override, Readmit and Sync buttons: each is the verb's own rules.
+    let fixture = with_a_working_task();
+    // No failed gate on T1, or no reason: the override is refused with words.
+    let reply = fixture
+        .act(json!({"kind": "task.override", "task": "T1", "reason": ""}))
+        .await;
+    assert_eq!(reply.status, StatusCode::CONFLICT, "{:?}", reply.body);
+    // An agent nothing marked dry cannot be readmitted.
+    let reply = fixture
+        .act(json!({"kind": "agent.readmit", "agent": "pi", "reason": "quota is back"}))
+        .await;
+    assert_eq!(reply.status, StatusCode::CONFLICT, "{:?}", reply.body);
+    // A service without a binary cannot sync, and says so.
+    let reply = fixture.act(json!({"kind": "run.sync"})).await;
+    assert_eq!(reply.status, StatusCode::CONFLICT, "{:?}", reply.body);
+    assert!(
+        reply.json().to_string().contains("sync"),
+        "the reason names the verb: {:?}",
+        reply.body
+    );
+}
+
+#[tokio::test]
+async fn a_hyphenated_id_survives_spawn_and_land() {
+    let fixture = with_a_branch_for("SHP-12", &[]);
+    let (engine, started, _) = recording_engine(Ok("started the worker"));
+    let fixture = Fixture {
+        app: fixture.app.with_engine(engine),
+        ..fixture
+    };
+    let start = fixture
+        .act(json!({"kind": "task.start", "task": "SHP-12"}))
+        .await;
+    assert_eq!(start.status, StatusCode::OK, "{:?}", start.body);
+    assert_eq!(start.json()["task"]["id"], json!("SHP-12"));
+    assert_eq!(calls(&started)[0].1, "SHP-12");
+
+    let accept = fixture
+        .act(json!({"kind": "task.accept", "task": "SHP-12"}))
+        .await;
+    assert_eq!(accept.status, StatusCode::OK, "{:?}", accept.body);
+    let approved = fixture.events().into_iter().any(
+        |event| matches!(&event.kind, EventKind::TaskApproved { task, .. } if task == "SHP-12"),
+    );
+    assert!(approved, "the landing names SHP-12");
 }

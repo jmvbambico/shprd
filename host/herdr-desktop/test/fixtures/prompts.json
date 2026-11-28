@@ -26,7 +26,7 @@
     },
     {
       "id": "backup",
-      "about": "Takes a task over once, when the worker's CLI cannot go on.",
+      "about": "Opens the brief of a program that takes a task over.",
       "path": "/tmp/shs58/cfg/shprd/prompts/backup.md",
       "state": "default",
       "shipped": true,

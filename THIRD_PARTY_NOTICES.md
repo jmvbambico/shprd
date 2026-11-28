@@ -47,7 +47,12 @@ SOFTWARE.
   `settings_for()`, `task_settings()`),
   `core/settings.js` (`ROLES`, the role pick and level resolution,
   `otherCli()`), `mods/shepherdr-settings/main.js` (the per-scope level switch
-  and the rule that a value equal to the inherited one is deleted),
+  and the rule that a value equal to the inherited one is deleted, the
+  self-drawn `frame:"none"` dialog with its page list, its row anatomy — a
+  title, one line about it, the value and the scope line at the right, the box
+  underneath — and its stepwise controls),
+  `mods/shepherdr-settings/core/settings.js` (`SECTIONS`, `LEVEL`, `TITLE`),
+  `lib/ui.js` (`link`, `segmented`, `toggleSwitch`, `openSettings`),
   `mods/tasks/bin/herdr_task/provider.py` (`PROVIDER_WAITS`, `NUDGE`,
   `provider_cut`, `provider_error`),
   `mods/tasks/bin/herdr_task/takeover.py` (`backup_for`, `handover`,
@@ -66,31 +71,58 @@ SOFTWARE.
   colours and the space marks) from `lib/ui.js`, the status glyph shapes from
   `lib/dot.js`, the status-bar, tab-bar, pane-header and footer rows from
   `mods/workspace-status-chat`, `mods/tabs-tasks`, `mods/pane-chat` and
-  `mods/workspace-chrome-shepherdr`, the sidebar's rows — a coloured mark, the
-  name, the count that needs the person, and a quiet section heading above them
-  — from `mods/spaces-chat/main.js` and `mods/spaces-chat/sections.js`, the
+  `mods/workspace-chrome-shepherdr`, the sidebar's rows — one 30 px line a space,
+  its mark, its name and the red/green count badge at the end, the "Spaces"
+  heading with its "+", the rail under 160 px, the row's right-click menu and the
+  close confirm it asks in — from `mods/spaces-chat/main.js`,
+  `mods/spaces-chat/sections.js`, `mods/spaces-chat/popups.js`, `core/menus.js`
+  and `mods/confirm-chat/main.js`, and the split red/green badge itself (Shepherdr's
+  `AttentionBadge`, `lib/ui.js`'s `countBadge`) in
+  `host/herdr-desktop/mods/shprd-spaces/main.js`, the
   toast float and the numbers it follows — three at once, 360 px wide, a body cut
   at 140 characters, a dot per level, and a timeout per level with the older ones
   going first — from `mods/toasts/main.js` and `core/toasts.js`, the grouped
   two-line task rows and their second line from `mods/tasks/main.js` and
-  `core/tasks.js`, the settings page's role rows, its picker button and its
-  write-with-no-Save-step rule from `mods/shepherdr-settings/main.js`,
-  `mods/shepherdr-settings/settings.js` and `core/settings.js`, the needs-you
+  `core/tasks.js`, the settings page's role rows, its picker button, its
+  write-with-no-Save-step rule, its dialog frame, its page list and its level
+  switch from `mods/shepherdr-settings/main.js`,
+  `mods/shepherdr-settings/core/settings.js` and
+  `mods/shepherdr-settings/settings.js`, the needs-you
   cards — a question, permission or plan as one card with its choices and the
   answer it waits on — from `mods/chat/main.js` and `core/asks.js` in
-  `host/herdr-desktop/mods/{shprd-settings,shprd-asks}/main.js` and their
-  `lib/{settings,asks}.js`, the Accept card's sections and folded Details, its
+  `host/herdr-desktop/mods/{shprd-settings,shprd-chat}/main.js` and their
+  `lib/{settings,asks}.js` (the cards are drawn in the chat's timeline since M11 U4), the Accept card's sections and folded Details, its
   summary rule and its Changes count line from `mods/accept-card/main.js` and
   `core/accept.js`, the task's pull-request card — the state word in a soft tint
   beside the number, and a quiet line when there is nothing — from
   `mods/task-pr/main.js`, and the task's head with its back link and switcher
-  from `mods/chat/main.js`'s `head` branch, the installer's
+  from `mods/chat/main.js`'s `head` branch, the web app's Chat screen (`web/src/agent/`: the bubbles, the show-more folding, the literal-markdown rule and the composer) from `mods/chat/main.js` and `core/chat-view.js`, the installer's
   ownership rules — own only what we wrote, never overwrite a file that is not
   ours, merge keys rather than replace them, back a change out on uninstall —
   from `bin/shepherdr` (`plan_files`, `merge_keys`) and `lib/UI.md`'s house
-  rules, and the mod-to-service discovery — `service.json`'s port and id, the
+  rules, the window's own glyphs — the tab bar's spinner and close mark, the side
+  panel's four icons and the tab, app and pane menus' row icons — copied whole
+  from `mods/workspace-chrome-shepherdr/*.svg`, `mods/tasks/tasks.svg`,
+  `mods/pane-chat/{split-right,split-down,zoom}.svg`,
+  `mods/coordinator/rotate-ccw.svg` and `mods/keybinds/keyboard.svg` into
+  `host/herdr-desktop/mods/{shprd-tabs,shprd-menu,shprd-new-menu}/icons/`, the
+  status glyphs — the ring, tick, merging, queued, scheduled and dashed shapes
+  and the 20 pie steps — from `mods/tasks/{circle,tick,merging,queued,scheduled,off}.svg`
+  and `mods/tasks/pie/*.svg`, with the status bar's and the foot's `monitor`,
+  `branch`, `plus`, `search`, `chevron-down` and `crook` from
+  `mods/workspace-chrome-shepherdr/`, the pane header's `unzoom` from
+  `mods/pane-chat/`, all into `host/herdr-desktop/mods/shprd-tabs/icons/`, and the
+  status glyph's drawing, the pane header's hover buttons and "End <agent>?"
+  question and the toasts' hover × and hover pause from `lib/dot.js`,
+  `mods/pane-chat/main.js` and `mods/toasts/main.js`, and the
+  mod-to-service discovery — `service.json`'s port and id, the
   `/api/health` id handshake before the token is sent, bearer auth — from
-  `lib/local.js`, `lib/bridge.js` and `service/main.ts` — in
+  `lib/local.js`, `lib/bridge.js` and `service/main.ts`, and Jump and Keybinds —
+  the find box's groups, rows and keys from `mods/jump/main.js`, the grouped
+  key list and its words from `mods/keybinds/{main.js,core/keys.js}`, the
+  `keys.json` bindings from `keys.json`, and the `search.svg` icon from
+  `mods/workspace-chrome-shepherdr/`, and the settings window's nav icons
+  `bot`, `globe` and `list-checks` from `mods/shepherdr-settings/` — in
   `host/herdr-desktop/{layouts,mods,bin}/` and `crates/shprd/src/cmd/install.rs`
 - Used for: the derived task status rules in
   `crates/shprd-views/src/derived.rs`, the per-task landing workflow —
@@ -134,9 +166,17 @@ SOFTWARE.
   `crates/shprd-mux-hc/src/host.rs`; and the chat's reading of an agent's own
   record — the line kinds each CLI keeps, the fields a message and its tool calls
   are read from, and the newest-page-then-what-it-gained shape — in
-  `crates/shprd-agents/src/transcript.rs`; and the coordinator chat panel — the
-  transcript's bubbles, the composer and the sidebar placement — in
-  `host/herdr-desktop/mods/shprd-coordinator/`
+  `crates/shprd-agents/src/transcript.rs`; and the chat — the
+  transcript's bubbles, markdown in a text view, "Show more" folding, the
+  composer, the cards in the timeline and `literal` — in
+  `host/herdr-desktop/mods/shprd-chat/` and `lib/chat.js`, and the pane header's
+  Chat │ Terminal switch (`toChat`, `toTerminal`, the parked-agent label and the
+  end-agent question) from `mods/pane-chat/main.js` in
+  `host/herdr-desktop/mods/shprd-pane/`; and the tailnet share — the
+  owner and machine name read from `status --json`, what `serve status --json`
+  says about the mount, the refusal to serve where Funnel is on, never replacing
+  a mount that points elsewhere, and the taken-HTTPS-port handling — from
+  `service/tailscale.ts`, in `crates/shprd-remote/src/tunnel/{parse,tailscale}.rs`
 - License: MIT
 
 MIT License
@@ -160,3 +200,21 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+## Kilo Code logo
+
+- Source: https://github.com/Kilo-Org/kilocode, path `packages/kilo-docs/public/img/logo.svg`
+  (the file's last change is commit 8009ffe801de0f8df251dc015b4fec201c8e5267, 2026-02-18; read
+  at `main` e7ab222e8b5f065d7259568db11261080781c667 on 2026-11-28), copied unchanged to
+  `host/herdr-desktop/mods/shprd-tabs/icons/kilo.svg`
+- Used for: the Kilo harness icon in tabs, the Agents pane and Settings program tabs, where
+  Herdr's own list of agents has none
+- Where the other harness icons (Claude, Codex, Pi, OpenCode) come from: not shprd's files. They
+  are Herdr's own agent icons, read at run time from `knownAgents()` (the `herdr` module) and
+  mapped harness id to `{icon, tint}` by `harnessIcons()` in
+  `host/herdr-desktop/mods/lib/panel.js` (copied into each mod by `bin/sync-shared`). shprd
+  never copies or changes them; `OWN_HARNESS_ICONS` there adds only Kilo, and an icon Herdr
+  gives always wins.
+- License: MIT, Copyright (c) 2026 Kilo Code (Kilo-Org/kilocode `LICENSE`; the repository has no
+  separate brand or trademark terms, and kilo.ai publishes none). The logo is the product's mark,
+  shown only to identify Kilo (nominative use) in this open-source tool.

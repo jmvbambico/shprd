@@ -198,7 +198,7 @@ fn a_reference_reads_an_id_or_a_path() {
         by_id
             .read(temp.path(), home.path())
             .expect("the shipped prompt"),
-        worker().text
+        strip_leading_comment(worker().text)
     );
 
     let file = temp.path().join("notes.md");
@@ -321,7 +321,7 @@ fn an_untouched_m10_proof_default_is_upgraded() {
     let installed = ensure(temp.path(), "worker").expect("the upgrade runs");
     assert_eq!(installed.change, Change::Upgraded, "{installed:?}");
     assert!(
-        installed.text.contains("inside the task's worktree"),
+        installed.text.contains("inside your worktree"),
         "the artifact has a place to live in today's words: {}",
         installed.text
     );
@@ -530,4 +530,468 @@ fn the_prompts_directory_sits_under_the_config_root() {
         )),
         Path::new("/xdg/shprd/prompts")
     );
+}
+
+/// SHPR-66: every role's words open by saying it is shprd's, so another
+/// product's session note in the same CLI cannot make it answer as that one.
+#[test]
+fn every_role_opens_with_who_it_is() {
+    for (id, first) in [
+        ("assistant", "You are shprd's coordinator"),
+        ("worker", "You are a shprd worker"),
+        ("reviewer", "You are a shprd reviewer"),
+        ("backup", "You are a shprd worker taking over"),
+    ] {
+        let text = shipped_prompt(id).expect("shipped").text;
+        let body = text.split("-->").nth(1).expect("a licence header");
+        assert!(body.trim_start().starts_with(first), "{id}: {body:.80}");
+        assert!(!body.contains("Shepherdr"), "{id} names no other product");
+    }
+}
+
+#[test]
+fn the_pre_identity_defaults_are_retired_and_upgrade() {
+    for (id, old, old_digest) in [
+        (
+            "assistant",
+            ASSISTANT_PRE_IDENTITY,
+            ASSISTANT_PRE_IDENTITY_DIGEST,
+        ),
+        ("worker", WORKER_PRE_IDENTITY, WORKER_PRE_IDENTITY_DIGEST),
+        (
+            "reviewer",
+            REVIEWER_PRE_IDENTITY,
+            REVIEWER_PRE_IDENTITY_DIGEST,
+        ),
+    ] {
+        let shipped = shipped_prompt(id).expect("shipped");
+        assert_eq!(digest(old.as_bytes()), old_digest, "{id}");
+        assert!(shipped.old.contains(&old_digest), "{id}");
+        let temp = dir();
+        std::fs::create_dir_all(temp.path()).expect("dir");
+        std::fs::write(temp.path().join(format!("{id}.md")), old).expect("an old install");
+        let installed = ensure(temp.path(), id).expect("the upgrade runs");
+        assert_eq!(installed.change, Change::Upgraded, "{id}: {installed:?}");
+    }
+}
+
+/// SHPR-71: the identity-era coordinator wording is retired and upgrades.
+#[test]
+fn the_identity_era_coordinator_words_are_retired_and_upgrade() {
+    let shipped = shipped_prompt("assistant").expect("shipped");
+    assert_eq!(
+        digest(ASSISTANT_M11_IDENTITY.as_bytes()),
+        ASSISTANT_M11_IDENTITY_DIGEST
+    );
+    assert!(shipped.old.contains(&ASSISTANT_M11_IDENTITY_DIGEST));
+    assert!(ASSISTANT_M11_IDENTITY != shipped.text);
+    let temp = dir();
+    std::fs::create_dir_all(temp.path()).expect("dir");
+    std::fs::write(temp.path().join("assistant.md"), ASSISTANT_M11_IDENTITY)
+        .expect("an old install");
+    let installed = ensure(temp.path(), "assistant").expect("the upgrade runs");
+    assert_eq!(installed.change, Change::Upgraded, "{installed:?}");
+}
+
+/// SHPR-71: whatever the ask's wording, the coordinator makes tasks and never
+/// edits; several items are several tasks; a dependency is `--dep`; a question
+/// the person wants asked is the task's first acceptance line.
+#[test]
+fn the_coordinator_turns_every_ask_into_tasks_and_never_does_the_work() {
+    let text = shipped_prompt("assistant").expect("shipped").text;
+    for needed in [
+        "Every ask that changes the repository becomes tasks, however it is worded",
+        "\"Add a hello.py that prints hi\"",
+        "\"do it yourself, it is one line\"",
+        "I'll make that a task",
+        "Never create, edit, move or delete a file",
+        "never run `git add`, `git commit`",
+        "one task per item",
+        "`--dep <ID>`",
+        "asks the person that question before it changes anything",
+        "Questions about the repository are yours to answer by reading it",
+        "do not look for a way around that with the shell",
+    ] {
+        assert!(text.contains(needed), "the brief must say {needed:?}");
+    }
+}
+
+/// SHPR-74: the tasks-only coordinator wording is retired and upgrades.
+#[test]
+fn the_tasks_only_coordinator_words_are_retired_and_upgrade() {
+    let shipped = shipped_prompt("assistant").expect("shipped");
+    assert_eq!(
+        digest(ASSISTANT_M11_TASKS_ONLY.as_bytes()),
+        ASSISTANT_M11_TASKS_ONLY_DIGEST
+    );
+    assert!(shipped.old.contains(&ASSISTANT_M11_TASKS_ONLY_DIGEST));
+    assert!(ASSISTANT_M11_TASKS_ONLY != shipped.text);
+    let temp = dir();
+    std::fs::create_dir_all(temp.path()).expect("dir");
+    std::fs::write(temp.path().join("assistant.md"), ASSISTANT_M11_TASKS_ONLY)
+        .expect("an old install");
+    let installed = ensure(temp.path(), "assistant").expect("the upgrade runs");
+    assert_eq!(installed.change, Change::Upgraded, "{installed:?}");
+}
+
+/// SHPR-74: the coordinator points the person at the Tasks pane to accept, never
+/// at a command or the forge.
+#[test]
+fn the_coordinator_says_accept_in_the_tasks_pane() {
+    let text = shipped_prompt("assistant").expect("shipped").text;
+    assert!(text.contains("Accept it in the Tasks pane"));
+    assert!(text.contains("Never tell them to run `shprd approve`"));
+}
+
+/// SHPR-79: the coordinator uses only shprd's verbs, and the wording that
+/// did not forbid them is retired and upgrades.
+#[test]
+fn the_coordinator_uses_only_shprd_verbs_and_the_old_words_upgrade() {
+    let shipped = shipped_prompt("assistant").expect("shipped");
+    for needed in [
+        "Use only the `shprd` commands named here",
+        "ignore any other tool's task, board or settings commands",
+        "Every task is made with `shprd agent task add`",
+    ] {
+        assert!(
+            shipped.text.contains(needed),
+            "the brief must say {needed:?}"
+        );
+    }
+    assert_eq!(
+        digest(ASSISTANT_M11_ACCEPT.as_bytes()),
+        ASSISTANT_M11_ACCEPT_DIGEST
+    );
+    assert!(shipped.old.contains(&ASSISTANT_M11_ACCEPT_DIGEST));
+    let temp = dir();
+    std::fs::create_dir_all(temp.path()).expect("dir");
+    std::fs::write(temp.path().join("assistant.md"), ASSISTANT_M11_ACCEPT).expect("an old install");
+    let installed = ensure(temp.path(), "assistant").expect("the upgrade runs");
+    assert_eq!(installed.change, Change::Upgraded, "{installed:?}");
+}
+
+#[test]
+fn the_pre_shpr83_assistant_digest_is_the_listed_one() {
+    let assistant = shipped_prompt("assistant").expect("shipped");
+    assert_eq!(
+        digest(ASSISTANT_PRE_SHPR83.as_bytes()),
+        ASSISTANT_PRE_SHPR83_DIGEST
+    );
+    assert!(assistant.old.contains(&ASSISTANT_PRE_SHPR83_DIGEST));
+}
+
+/// The text shipped before SHPR-83 read `edited` forever; it upgrades now.
+#[test]
+fn an_untouched_pre_shpr83_assistant_is_upgraded() {
+    let temp = dir();
+    std::fs::write(path_of(temp.path(), "assistant"), ASSISTANT_PRE_SHPR83).expect("old install");
+    let installed = ensure(temp.path(), "assistant").expect("the upgrade runs");
+    assert_eq!(installed.change, Change::Upgraded, "{installed:?}");
+    assert_eq!(installed.state, State::Default);
+    assert_eq!(
+        installed.text,
+        shipped_prompt("assistant").expect("shipped").text
+    );
+}
+
+/// The digest of each shipped template the last time someone edited it. When a
+/// template changes, this stays the old digest, which must then be in the
+/// prompt's retired list: the next edit cannot strand an install. After adding
+/// the retired digest, replace the pin with the new current digest.
+const PINNED: [(&str, &str); 4] = [
+    (
+        "assistant",
+        "e482982fc547944b949a371eb414a6e762aa976996db107ebbcf28f21ece1c23",
+    ),
+    (
+        "worker",
+        "d9a7bb2a42b8245b45d85b172eb659138329186079b7d4bd2303a202e48df9fa",
+    ),
+    (
+        "reviewer",
+        "c187a5267112fc4148487499f64ef7ac444e10bce3a0a2a901bd38daf2ef0488",
+    ),
+    (
+        "backup",
+        "40180bf431489a9f95b6e0ff762b8a03cf54b8477cbb44f67ee0884f0961eefa",
+    ),
+];
+
+#[test]
+fn a_shipped_templates_previous_digest_is_retired() {
+    for (id, pinned) in PINNED {
+        let prompt = shipped_prompt(id).expect("shipped");
+        let current = digest(prompt.text.as_bytes());
+        assert!(
+            pinned == current || prompt.old.contains(&pinned),
+            "`{id}` changed (now {current}, pinned {pinned}): add {pinned} to its retired list, keep the old text under data/templates/history/, then pin {current}"
+        );
+    }
+}
+
+#[test]
+fn the_loader_drops_the_credit_comment_and_the_file_keeps_it() {
+    let temp = dir();
+    let home = TempDir::new().expect("home");
+    for prompt in shipped() {
+        let words = PromptRef::Prompt(prompt.id.to_owned())
+            .read(temp.path(), home.path())
+            .expect("reads");
+        assert!(!words.contains("<!--") && !words.contains("-->"), "{words}");
+        assert!(!words.contains("eliasstravik"), "{}", prompt.id);
+        assert!(!words.trim().is_empty());
+        let on_disk = std::fs::read_to_string(path_of(temp.path(), prompt.id)).expect("file");
+        assert!(on_disk.starts_with("<!--"), "the file keeps its credit");
+    }
+    assert_eq!(strip_leading_comment("<!-- a\nb -->\n\nhello"), "hello");
+    assert_eq!(
+        strip_leading_comment("plain <!-- x -->"),
+        "plain <!-- x -->"
+    );
+    assert_eq!(strip_leading_comment("<!-- open"), "<!-- open");
+}
+
+/// The coordinator's long wording is retired, upgrades, and the shipped body
+/// names no other product and states the verbs the rewrite must keep.
+#[test]
+fn the_condensed_coordinator_replaces_the_long_one() {
+    let shipped = shipped_prompt("assistant").expect("shipped");
+    assert_eq!(
+        digest(ASSISTANT_M11_LONG.as_bytes()),
+        ASSISTANT_M11_LONG_DIGEST
+    );
+    assert!(shipped.old.contains(&ASSISTANT_M11_LONG_DIGEST));
+    let body = strip_leading_comment(shipped.text);
+    assert!(!body.contains("Shepherdr"), "{body}");
+    assert!(!body.contains("shepherdr"), "{body}");
+    for needed in [
+        "shprd settings set",
+        "Accept it in the Tasks pane",
+        "never approve, push, merge",
+    ] {
+        assert!(body.contains(needed), "the brief must say {needed:?}");
+    }
+    let temp = dir();
+    std::fs::write(path_of(temp.path(), "assistant"), ASSISTANT_M11_LONG).expect("old install");
+    let installed = ensure(temp.path(), "assistant").expect("the upgrade runs");
+    assert_eq!(installed.change, Change::Upgraded, "{installed:?}");
+}
+
+/// The worker's long wording is retired and upgrades; the shipped body names no
+/// other product and keeps the rules the rewrite must keep.
+#[test]
+fn the_condensed_worker_replaces_the_long_one() {
+    let shipped = shipped_prompt("worker").expect("shipped");
+    assert_eq!(digest(WORKER_M11_LONG.as_bytes()), WORKER_M11_LONG_DIGEST);
+    assert!(shipped.old.contains(&WORKER_M11_LONG_DIGEST));
+    let body = strip_leading_comment(shipped.text);
+    assert!(!body.to_lowercase().contains("shepherdr"), "{body}");
+    assert!(!body.contains("herdr-task"), "{body}");
+    for needed in [
+        "shprd task status",
+        "`Asking the person` section",
+        "Never push",
+        "pass every gate you ran as `--check",
+        "`.shprd/proof/`",
+        "`--proof <path>`",
+        "not a limit",
+        "wire it end to end",
+        "Reviewing is the engine's job",
+        "shprd agent report",
+    ] {
+        assert!(body.contains(needed), "the worker must say {needed:?}");
+    }
+    let temp = dir();
+    std::fs::write(path_of(temp.path(), "worker"), WORKER_M11_LONG).expect("old install");
+    let installed = ensure(temp.path(), "worker").expect("the upgrade runs");
+    assert_eq!(installed.change, Change::Upgraded, "{installed:?}");
+}
+
+/// The reviewer's long wording is retired and upgrades; the shipped body names
+/// no other product and keeps the instructions the findings file depends on.
+#[test]
+fn the_condensed_reviewer_replaces_the_long_one() {
+    let shipped = shipped_prompt("reviewer").expect("shipped");
+    assert_eq!(
+        digest(REVIEWER_M11_LONG.as_bytes()),
+        REVIEWER_M11_LONG_DIGEST
+    );
+    assert!(shipped.old.contains(&REVIEWER_M11_LONG_DIGEST));
+    let body = strip_leading_comment(shipped.text);
+    assert!(!body.to_lowercase().contains("shepherdr"), "{body}");
+    for needed in [
+        "never edit files",
+        "ARE the gate evidence",
+        "`answer: unanswered`",
+        "`critical` and `major`",
+        "named in a finding",
+        "never aim for an empty array",
+        "`findings.json`",
+        "degraded review",
+        "Run no `shprd` command",
+    ] {
+        assert!(body.contains(needed), "the reviewer must say {needed:?}");
+    }
+    let temp = dir();
+    std::fs::write(path_of(temp.path(), "reviewer"), REVIEWER_M11_LONG).expect("old install");
+    let installed = ensure(temp.path(), "reviewer").expect("the upgrade runs");
+    assert_eq!(installed.change, Change::Upgraded, "{installed:?}");
+}
+
+/// The scope-limit wordings are retired and upgrade: the worker is told the
+/// declared paths are a hint and to wire the change end to end, and the reviewer
+/// judges whether each change serves the task.
+#[test]
+fn the_scope_limit_wordings_upgrade_to_the_hint() {
+    for (id, old, old_digest) in [
+        ("worker", WORKER_M11_SCOPE, WORKER_M11_SCOPE_DIGEST),
+        ("reviewer", REVIEWER_M11_SCOPE, REVIEWER_M11_SCOPE_DIGEST),
+    ] {
+        let shipped = shipped_prompt(id).expect("shipped");
+        assert_eq!(digest(old.as_bytes()), old_digest, "{id}");
+        assert!(shipped.old.contains(&old_digest), "{id}");
+        let body = strip_leading_comment(shipped.text);
+        assert!(!body.contains("stay within"), "{id}: {body}");
+        assert!(!body.contains("and the scope:"), "{id}: {body}");
+        let temp = dir();
+        std::fs::write(path_of(temp.path(), id), old).expect("old install");
+        let installed = ensure(temp.path(), id).expect("the upgrade runs");
+        assert_eq!(installed.change, Change::Upgraded, "{id}: {installed:?}");
+    }
+    let assistant = strip_leading_comment(shipped_prompt("assistant").expect("shipped").text);
+    assert!(!assistant.contains("task widen"), "{assistant}");
+    assert!(assistant.contains("`--scope` is optional"), "{assistant}");
+    assert_eq!(
+        digest(ASSISTANT_M11_SCOPE.as_bytes()),
+        ASSISTANT_M11_SCOPE_DIGEST
+    );
+    let temp = dir();
+    std::fs::write(path_of(temp.path(), "assistant"), ASSISTANT_M11_SCOPE).expect("old install");
+    let installed = ensure(temp.path(), "assistant").expect("the upgrade runs");
+    assert_eq!(installed.change, Change::Upgraded, "{installed:?}");
+    let reviewer = strip_leading_comment(shipped_prompt("reviewer").expect("shipped").text);
+    assert!(
+        reviewer.contains("whether each change serves the task"),
+        "{reviewer}"
+    );
+}
+
+/// The coordinator settles operational cards itself, and an install of the
+/// wording before that upgrades.
+#[test]
+fn the_coordinator_settles_operational_cards_itself() {
+    let assistant = strip_leading_comment(shipped_prompt("assistant").expect("shipped").text);
+    assert!(
+        assistant.contains("Everything operational is yours"),
+        "{assistant}"
+    );
+    assert!(
+        assistant.contains("tell the person in one line what you chose"),
+        "{assistant}"
+    );
+    assert_eq!(
+        digest(ASSISTANT_M11_ASK_PERSON.as_bytes()),
+        ASSISTANT_M11_ASK_PERSON_DIGEST
+    );
+    let temp = dir();
+    std::fs::write(path_of(temp.path(), "assistant"), ASSISTANT_M11_ASK_PERSON).expect("old");
+    let installed = ensure(temp.path(), "assistant").expect("the upgrade runs");
+    assert_eq!(installed.change, Change::Upgraded, "{installed:?}");
+}
+
+/// Every shipped body (credit comment stripped) names no other product.
+#[test]
+fn no_shipped_body_names_another_product() {
+    for prompt in shipped() {
+        let body = prompt.text.split("-->").nth(1).unwrap_or(prompt.text);
+        assert!(!body.contains("Shepherdr"), "{}", prompt.id);
+    }
+}
+
+#[test]
+fn the_backup_m11_long_digest_is_the_listed_one() {
+    let backup = shipped_prompt("backup").expect("shipped");
+    assert_eq!(digest(BACKUP_M11_LONG.as_bytes()), BACKUP_M11_LONG_DIGEST);
+    assert!(backup.old.contains(&BACKUP_M11_LONG_DIGEST));
+    assert!(
+        !backup.text.contains("put the proof path")
+            && !backup.text.contains("say where it is in your summary")
+    );
+}
+
+/// A choice the worker disclosed is a decision to confirm, not a finding, and
+/// the retired wording upgrades.
+#[test]
+fn the_reviewer_keeps_disclosed_decisions_apart_from_findings() {
+    let shipped = shipped_prompt("reviewer").expect("shipped");
+    assert_eq!(
+        digest(REVIEWER_M11_PRE_DECISIONS.as_bytes()),
+        REVIEWER_M11_PRE_DECISIONS_DIGEST
+    );
+    assert!(shipped.old.contains(&REVIEWER_M11_PRE_DECISIONS_DIGEST));
+    let body = strip_leading_comment(shipped.text);
+    assert!(body.contains("not a defect by itself"), "{body}");
+    assert!(body.contains("`decisions`"), "{body}");
+    let temp = dir();
+    std::fs::write(path_of(temp.path(), "reviewer"), REVIEWER_M11_PRE_DECISIONS).expect("old");
+    let installed = ensure(temp.path(), "reviewer").expect("the upgrade runs");
+    assert_eq!(installed.change, Change::Upgraded, "{installed:?}");
+}
+
+/// The reviewer blocks only on a defect in the diff or an unmet criterion of
+/// the task, and the retired wording upgrades.
+#[test]
+fn the_reviewer_blocks_only_on_code_defects_and_the_tasks_criteria() {
+    let shipped = shipped_prompt("reviewer").expect("shipped");
+    assert_eq!(
+        digest(REVIEWER_M11_PRE_BLOCKING.as_bytes()),
+        REVIEWER_M11_PRE_BLOCKING_DIGEST
+    );
+    assert!(shipped.old.contains(&REVIEWER_M11_PRE_BLOCKING_DIGEST));
+    let body = strip_leading_comment(shipped.text);
+    assert!(body.contains("how the worker operates"), "{body}");
+    assert!(body.contains("merge base with origin"), "{body}");
+    let temp = dir();
+    std::fs::write(path_of(temp.path(), "reviewer"), REVIEWER_M11_PRE_BLOCKING).expect("old");
+    let installed = ensure(temp.path(), "reviewer").expect("the upgrade runs");
+    assert_eq!(installed.change, Change::Upgraded, "{installed:?}");
+}
+
+/// The worker bans real data in proofs and phrases asks as board actions; the
+/// coordinator names board buttons and checks for a moved base. The retired
+/// wordings upgrade.
+#[test]
+fn worker_and_coordinator_wordings_are_current_and_retired_ones_upgrade() {
+    let worker = shipped_prompt("worker").expect("shipped").text;
+    assert!(worker.contains("never run the work against real or shared data"));
+    assert!(worker.contains("never phrase one as the person running a command"));
+    assert!(worker.contains("UI proof:"));
+    assert!(worker.contains("by their literal path"));
+    let assistant = shipped_prompt("assistant").expect("shipped").text;
+    assert!(!assistant.contains("they never type a command here"));
+    assert!(assistant.contains("agent propose"));
+    assert!(assistant.contains("check whether the base moved"));
+    for (id, old, old_digest) in [
+        (
+            "worker",
+            WORKER_M11_PRE_REAL_DATA,
+            WORKER_M11_PRE_REAL_DATA_DIGEST,
+        ),
+        (
+            "worker",
+            WORKER_M11_PRE_PROOF_UI,
+            WORKER_M11_PRE_PROOF_UI_DIGEST,
+        ),
+        (
+            "assistant",
+            ASSISTANT_M11_PRE_BOARD_BUTTONS,
+            ASSISTANT_M11_PRE_BOARD_BUTTONS_DIGEST,
+        ),
+    ] {
+        assert_eq!(digest(old.as_bytes()), old_digest);
+        let temp = dir();
+        std::fs::write(path_of(temp.path(), id), old).expect("old");
+        let installed = ensure(temp.path(), id).expect("the upgrade runs");
+        assert_eq!(installed.change, Change::Upgraded, "{installed:?}");
+    }
 }

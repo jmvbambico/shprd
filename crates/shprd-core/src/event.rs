@@ -7,9 +7,88 @@
 use serde::{Deserialize, Serialize};
 
 use crate::ask::{AskId, AskKind};
+use crate::baseline::BaselineEntry;
 
 /// Identifies a task inside a run.
 pub type TaskId = String;
+
+/// The three-letter task id prefix for a repository called `name`.
+///
+/// Uppercase: the first letter, then the next two consonants, padded with the
+/// letters skipped on the way (the vowels, in order) when there are fewer than
+/// two. `shprd` gives `SHP`, `jmanager` gives `JMN`. A name with no letters
+/// gives `TSK`, and a short one is padded with `X`.
+pub fn derive_id_prefix(name: &str) -> String {
+    let letters: Vec<char> = name
+        .chars()
+        .filter(char::is_ascii_alphabetic)
+        .map(|c| c.to_ascii_uppercase())
+        .collect();
+    let Some((&first, rest)) = letters.split_first() else {
+        return "TSK".to_owned();
+    };
+    let is_vowel = |c: &char| "AEIOU".contains(*c);
+    let mut prefix = vec![first];
+    prefix.extend(rest.iter().filter(|c| !is_vowel(c)).take(2));
+    prefix.extend(rest.iter().filter(|c| is_vowel(c)).take(3 - prefix.len()));
+    while prefix.len() < 3 {
+        prefix.push('X');
+    }
+    prefix.into_iter().collect()
+}
+
+/// Cleans a prefix a person set: letters and digits only, uppercase. Empty
+/// when nothing usable is left, which means "derive it".
+pub fn clean_id_prefix(prefix: &str) -> String {
+    prefix
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|c| c.to_ascii_uppercase())
+        .collect()
+}
+
+/// The next free task id, `<prefix>-<n>` (e.g. `SHP-12`), for a log that holds
+/// `events`.
+///
+/// It is one more than the highest `<prefix>-<n>` any `TaskAdded` event already
+/// names, and is bumped past any id in use, so a long id a person gave, or an
+/// old `T<n>` id, never blocks it. Ids that do not match are ignored when
+/// counting. An empty `prefix` falls back to the old `T<n>` form.
+pub fn next_task_id(events: &[Event], prefix: &str) -> TaskId {
+    let lead = if prefix.is_empty() {
+        "T".to_owned()
+    } else {
+        format!("{prefix}-")
+    };
+    let used: std::collections::HashSet<&str> = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::TaskAdded { task, .. } => Some(task.as_str()),
+            _ => None,
+        })
+        .collect();
+    let mut n = used
+        .iter()
+        .filter_map(|id| id.strip_prefix(lead.as_str())?.parse::<u64>().ok())
+        .max()
+        .map_or(1, |highest| highest.saturating_add(1));
+    // Past u64::MAX there is no next number: fall back to the first free one
+    // below, and if every number is taken stop rather than loop forever.
+    while used.contains(format!("{lead}{n}").as_str()) {
+        n = match n.checked_add(1) {
+            Some(next) => next,
+            None => (1..u64::MAX)
+                .find(|k| !used.contains(format!("{lead}{k}").as_str()))
+                .unwrap_or(1),
+        };
+    }
+    format!("{lead}{n}")
+}
+
+/// How an attempt is named for a person: `<id>·a<n>`, e.g. `SHP-12·a2`.
+pub fn attempt_label(task: &str, attempt: u32) -> String {
+    format!("{task}·a{attempt}")
+}
 
 /// Identifies an agent (a worker slot in the roster).
 pub type AgentId = String;
@@ -67,6 +146,10 @@ pub enum ReportStatus {
 /// A status is a progress line, not a message: the cap is what keeps a pasted
 /// agent message out of the log.
 pub const TASK_STATUS_MAX_CHARS: usize = 40;
+
+/// The longest status line the engine itself writes: it says why a step is
+/// waiting, which needs room for a path and a task id.
+pub const ENGINE_STATUS_MAX_CHARS: usize = 120;
 
 /// A one-line task status, trimmed and capped for the log.
 ///
@@ -164,6 +247,12 @@ pub struct CheckReport {
     /// The last lines it printed, capped at [`CHECK_OUTPUT_LINES`].
     #[serde(default)]
     pub output_tail: String,
+    /// Set by the engine when the check failed no worse than the gate did on
+    /// the base: `pre-existing on base (<sha>, N errors on base; exit E)`. The
+    /// exit code above stays the real one; the rules, not this note, decide a
+    /// hand-in may carry the failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_existing: Option<String>,
 }
 
 impl CheckReport {
@@ -177,6 +266,7 @@ impl CheckReport {
             command: command.to_string(),
             exit_code: Some(0),
             output_tail: String::new(),
+            pre_existing: None,
         }
     }
 }
@@ -516,6 +606,18 @@ pub enum EventKind {
         /// request lists, so a reader sees what was left out and why.
         reason: String,
     },
+    /// A person widened a task's scope.
+    ///
+    /// The scope is what a hand-in may change, so widening it is the person's
+    /// own call (a worker that could widen its own scope would have none). It
+    /// is what a refused hand-in's card offers: the paths named are added to the
+    /// task's scope, and the worker hands in again.
+    ScopeWidened {
+        /// The task.
+        task: TaskId,
+        /// The paths added, as the person gave them.
+        paths: Vec<String>,
+    },
     /// The agent working on a task was stopped, so the attempt has no agent.
     ///
     /// It is the person's own verb (`task.stop` on the API), and the fact it
@@ -529,6 +631,20 @@ pub enum EventKind {
         /// The task.
         task: TaskId,
         /// The attempt whose agent was stopped.
+        attempt: u32,
+    },
+    /// A person moved a handed-in task back to Working, for the same attempt.
+    ///
+    /// The recovery for a task stuck at Reported or Passed (a review that
+    /// cannot start, a scope fix the worker has to hand in again): the attempt,
+    /// its worktree and its branch stay, and the attempt's report, review
+    /// requests and gate results are cleared so the worker can hand in again
+    /// and be reviewed afresh. The earlier ones stay in the log. It is a human's
+    /// verb alone.
+    TaskReopened {
+        /// The task.
+        task: TaskId,
+        /// The attempt that is open again.
         attempt: u32,
     },
     /// A review was handed to a reviewer for an attempt.
@@ -545,6 +661,25 @@ pub enum EventKind {
         reviewer: String,
         /// True when the reviewer shares the author's vendor.
         degraded: bool,
+        /// One plain line when this review is not the first choice, for the
+        /// task's card: "codex is out of quota until Dec 18; GLM (pi) reviews
+        /// instead". Empty for an ordinary review.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
+    /// Review is off for this repository, so a hand-in that passed its own
+    /// checks passes on them alone.
+    ///
+    /// The engine records it, once, for an attempt that no review was ever
+    /// requested for while the repository's review is switched off
+    /// (`tasks.review_rounds = 0`, or no reviewer). It is the one way to
+    /// `Passed` that has no review verdict, and being an event it is on the
+    /// log: a review that merely failed to start never records it.
+    ReviewSkipped {
+        /// The task.
+        task: TaskId,
+        /// Attempt number.
+        attempt: u32,
     },
     /// An agent was put on cooldown (rate limit, quota, auth).
     Dry {
@@ -588,6 +723,17 @@ pub enum EventKind {
         body: String,
         /// The action taken if nobody answers.
         default_action: String,
+    },
+    /// A person dismissed a card: the escalation recorded at `seq` is no longer
+    /// in front of them.
+    ///
+    /// A human writes it, or the engine when the cause of a card it raised is
+    /// gone; only for the sequence number of an `Escalated` event the run holds. The card reads as history from then on;
+    /// a log written before this event existed folds unchanged.
+    NeedDismissed {
+        /// Sequence number of the `Escalated` event whose card is dismissed
+        /// (not called `seq`: the event's own `seq` shares its object).
+        need: u64,
     },
     /// A human overrode a rule.
     Override {
@@ -760,6 +906,18 @@ pub enum EventKind {
         /// The integration branch's head after the merge.
         int_sha: String,
     },
+    /// Each worker gate was run on the base: how it fared, with a fingerprint
+    /// of any failure.
+    ///
+    /// Recorded when a run starts and again on every sync that moves the base.
+    /// A hand-in whose gate fails no worse than its baseline is accepted as
+    /// pre-existing; only a regression refuses it.
+    GateBaselined {
+        /// The base commit the gates ran on.
+        base_sha: String,
+        /// One entry per worker gate command.
+        entries: Vec<BaselineEntry>,
+    },
     /// A provider cut a turn off and the fallback ladder sent the agent a
     /// carry-on message.
     ///
@@ -847,7 +1005,7 @@ impl EventKind {
     /// The log is how a reader follows one task: which events name it is the
     /// same question every reader asks, so it is answered once here rather
     /// than matched again in each view. Run-wide events (`RunStarted`,
-    /// `FullGate`, `BaseSynced`, the two launcher events) name none, and
+    /// `FullGate`, `BaseSynced`, `GateBaselined`, the two launcher events) name none, and
     /// `Escalated` names one only when it is not run-wide.
     pub fn task(&self) -> Option<&str> {
         match self {
@@ -861,8 +1019,11 @@ impl EventKind {
             | Self::GateFailed { task, .. }
             | Self::Integrated { task, .. }
             | Self::TaskDropped { task, .. }
+            | Self::ScopeWidened { task, .. }
             | Self::TaskStopped { task, .. }
+            | Self::TaskReopened { task, .. }
             | Self::ReviewRequested { task, .. }
+            | Self::ReviewSkipped { task, .. }
             | Self::HandedOff { task, .. }
             | Self::Override { task, .. }
             | Self::TaskPrOpened { task, .. }
@@ -880,6 +1041,75 @@ impl EventKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn added(seq: u64, id: &str) -> Event {
+        Event {
+            seq,
+            at_ms: seq,
+            actor: Actor::Human,
+            kind: EventKind::TaskAdded {
+                task: id.to_string(),
+                title: "t".to_string(),
+                scope: Vec::new(),
+                acceptance: vec!["ok".to_string()],
+                tags: Vec::new(),
+                skills: Vec::new(),
+                deps: Vec::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn the_allocator_ends_at_the_u64_limit() {
+        let log = [added(1, "T18446744073709551615")];
+        assert_eq!(next_task_id(&log, ""), "T1");
+        let log = [added(1, "SHP-18446744073709551615")];
+        assert_eq!(next_task_id(&log, "SHP"), "SHP-1");
+    }
+
+    #[test]
+    fn the_prefix_is_the_first_letter_and_the_next_two_consonants() {
+        assert_eq!(derive_id_prefix("shprd"), "SHP");
+        assert_eq!(derive_id_prefix("jmanager"), "JMN");
+        assert_eq!(derive_id_prefix("sweatbrain"), "SWT");
+        // Too few consonants: padded with the skipped letters, then X.
+        assert_eq!(derive_id_prefix("aeon"), "ANE");
+        assert_eq!(derive_id_prefix("ab"), "ABX");
+        assert_eq!(derive_id_prefix("--"), "TSK");
+        assert_eq!(derive_id_prefix("my-app2"), "MYP");
+    }
+
+    #[test]
+    fn a_set_prefix_is_cleaned() {
+        assert_eq!(clean_id_prefix(" shp "), "SHP");
+        assert_eq!(clean_id_prefix("-"), "");
+    }
+
+    #[test]
+    fn the_next_task_id_is_one_past_the_highest_id_with_that_prefix() {
+        assert_eq!(next_task_id(&[], "SHP"), "SHP-1");
+        let log = [
+            added(1, "SHP-1"),
+            added(2, "long-slug"),
+            added(3, "SHP-7"),
+            added(4, "T40"),
+            added(5, "JMN-90"),
+        ];
+        assert_eq!(next_task_id(&log, "SHP"), "SHP-8");
+        // Old ids and long ids never block, and numbering continues past them.
+        assert_eq!(
+            next_task_id(&[added(1, "M1.6"), added(2, "T27")], "SHP"),
+            "SHP-1"
+        );
+        // The old form stays reachable with no prefix.
+        assert_eq!(next_task_id(&log, ""), "T41");
+    }
+
+    #[test]
+    fn an_attempt_reads_as_the_task_id_and_a_number() {
+        assert_eq!(attempt_label("T3", 2), "T3·a2");
+        assert_eq!(attempt_label("long-slug", 1), "long-slug·a1");
+    }
 
     fn to_json<T: Serialize>(value: &T) -> String {
         match serde_json::to_string(value) {
@@ -910,6 +1140,7 @@ mod tests {
             command: "cargo test --workspace".to_string(),
             exit_code: Some(0),
             output_tail: "test result: ok. 42 passed".to_string(),
+            pre_existing: None,
         }
     }
 
@@ -983,8 +1214,20 @@ mod tests {
                 task: "M1.2".to_string(),
                 reason: "not needed after all".to_string(),
             },
+            EventKind::ScopeWidened {
+                task: "M1.3".to_string(),
+                paths: vec!["tests".to_string()],
+            },
             EventKind::TaskStopped {
                 task: "M1.3".to_string(),
+                attempt: 1,
+            },
+            EventKind::TaskReopened {
+                task: "M1.3".to_string(),
+                attempt: 1,
+            },
+            EventKind::ReviewSkipped {
+                task: "M1.1".to_string(),
                 attempt: 1,
             },
             EventKind::ReviewRequested {
@@ -992,6 +1235,7 @@ mod tests {
                 attempt: 1,
                 reviewer: "codex".to_string(),
                 degraded: true,
+                note: None,
             },
             EventKind::Dry {
                 agent: "codex".to_string(),
@@ -1010,6 +1254,7 @@ mod tests {
                 body: "two gates disagree".to_string(),
                 default_action: "stop the run".to_string(),
             },
+            EventKind::NeedDismissed { need: 7 },
             EventKind::Override {
                 task: "M1.1".to_string(),
                 rule: "no_main_push".to_string(),
@@ -1062,6 +1307,16 @@ mod tests {
                 base_sha: "abc1234".to_string(),
                 int_sha: "def5678".to_string(),
             },
+            EventKind::GateBaselined {
+                base_sha: "abc1234".to_string(),
+                entries: vec![BaselineEntry {
+                    command: "npm run lint".to_string(),
+                    passed: false,
+                    exit_code: Some(1),
+                    fingerprint: Default::default(),
+                    base_sha: "abc1234".to_string(),
+                }],
+            },
             EventKind::Nudged {
                 task: "M1.1".to_string(),
                 attempt: 1,
@@ -1101,7 +1356,7 @@ mod tests {
     #[test]
     fn every_kind_round_trips() {
         let kinds = every_kind();
-        assert_eq!(kinds.len(), 27, "one case per EventKind variant");
+        assert_eq!(kinds.len(), 32, "one case per EventKind variant");
 
         for (index, kind) in kinds.into_iter().enumerate() {
             let event = Event {

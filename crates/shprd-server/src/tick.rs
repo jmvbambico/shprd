@@ -15,7 +15,7 @@
 //! 5. appends one ledger event per step that changed something and publishes it
 //!    on the service's [`Hub`], so the web app and a Herdr mod see it;
 //! 6. when a [`FallbackSource`] is wired, plans and runs the provider ladder —
-//!    a nudge, one backup handover, or a give-up — and records what it did.
+//!    a nudge, a handover to the next line, or a give-up — and records what it did.
 //!
 //! A step that fails is recorded and logged and the pass carries on: one broken
 //! landing must not stop a task from starting, and one bad pass must not stop
@@ -36,14 +36,14 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use shprd_core::config::{Config, MergePolicy};
 use shprd_core::event::{
-    Actor, EventKind, FallbackAction, Finding, LandOutcome, ProviderClass, ResourceKind, Severity,
+    Actor, EventKind, FallbackAction, LandOutcome, ProviderClass, ResourceAction, ResourceKind,
 };
 use shprd_core::gate;
 use shprd_core::log::{Clock, SystemClock};
 use shprd_core::rules::RuleError;
-use shprd_core::state::{ResourceStatus, RunState, Task};
+use shprd_core::state::{ResourceStatus, RunState, Task, TaskStatus};
 use shprd_core::tick::{self, Facts, Input, Phase, PrFacts, Step};
-use shprd_git::forge::{Forge, ForgeError};
+use shprd_git::forge::Forge;
 use shprd_git::git::Git;
 use shprd_git::integrate;
 use shprd_git::land::{self, LandError, Landing, LocalLanding};
@@ -58,12 +58,14 @@ use shprd_watch::fallback::{
 };
 use shprd_watch::records::ErrorKind as CutKind;
 
+use crate::clean;
 use crate::error::ServerError;
 use crate::hub::Hub;
 use crate::ledger;
 use crate::news::{self, NewsDesk, NewsSent};
 use crate::pass;
 use crate::service::AfterWrite;
+use crate::start_queue;
 
 /// Where the facts a pass needs come from.
 ///
@@ -82,6 +84,17 @@ pub trait FactsSource: Send + Sync {
 
     /// The tasks that have an agent running right now.
     fn live(&self, state: &RunState) -> BTreeSet<String>;
+
+    /// The live tasks whose agent is idle, each with when it was first seen
+    /// idle (ms since the epoch).
+    ///
+    /// An agent that ended its turn without handing in is alive but not at
+    /// work; the pass reads it as quiet, so the task stops holding a slot and
+    /// reads "Needs you" once the grace has passed. The default says no agent
+    /// is idle, which is the old behaviour.
+    fn idle_since(&self, _state: &RunState, _now_ms: u64) -> BTreeMap<String, u64> {
+        BTreeMap::new()
+    }
 }
 
 /// A forge a pass may read and write from its own thread.
@@ -94,12 +107,38 @@ pub type SharedForge = Arc<dyn Forge + Send + Sync>;
 /// Which tasks have an agent running, as the host reports it.
 pub type LiveFn = Arc<dyn Fn(&RunState) -> BTreeSet<String> + Send + Sync>;
 
+/// Which live tasks have an agent that is idle, as the host reports it.
+pub type IdleFn = Arc<dyn Fn(&RunState) -> BTreeSet<String> + Send + Sync>;
+
 /// The production facts: the forge the binary drives, and the host's agents.
 pub struct LiveFacts {
     /// The forge a landing would use, and the one its facts come from.
     pub forge: SharedForge,
     /// Whether a task has a live agent, as the host and the watchdog see it.
     pub live: LiveFn,
+    /// Which live tasks have an idle agent; `None` reads every live agent as
+    /// at work.
+    pub idle: Option<IdleFn>,
+    /// When each task was first seen idle, kept across passes.
+    seen_idle: std::sync::Mutex<BTreeMap<String, u64>>,
+}
+
+impl LiveFacts {
+    /// Facts from a forge and the host's live set, with no idle reading.
+    pub fn new(forge: SharedForge, live: LiveFn) -> Self {
+        Self {
+            forge,
+            live,
+            idle: None,
+            seen_idle: std::sync::Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    /// The same facts with the host's idle reading.
+    pub fn with_idle(mut self, idle: IdleFn) -> Self {
+        self.idle = Some(idle);
+        self
+    }
 }
 
 impl FactsSource for LiveFacts {
@@ -146,6 +185,22 @@ impl FactsSource for LiveFacts {
 
     fn live(&self, state: &RunState) -> BTreeSet<String> {
         (self.live)(state)
+    }
+
+    fn idle_since(&self, state: &RunState, now_ms: u64) -> BTreeMap<String, u64> {
+        let Some(idle) = &self.idle else {
+            return BTreeMap::new();
+        };
+        let now_idle = idle(state);
+        let Ok(mut seen) = self.seen_idle.lock() else {
+            return BTreeMap::new();
+        };
+        // A task that is no longer idle starts its grace over next time.
+        seen.retain(|task, _| now_idle.contains(task));
+        for task in now_idle {
+            seen.entry(task).or_insert(now_ms);
+        }
+        seen.clone()
     }
 }
 
@@ -234,6 +289,48 @@ impl StepReport {
             seq: None,
         }
     }
+
+    /// This report with the real cause of its failure on the lines after the
+    /// plain one: the command, its exit code and the last lines of its stderr.
+    /// The first line is what a person reads (`shprd status` shows only it); the
+    /// rest is what the pass's record keeps for whoever has to find out why.
+    fn with_cause(mut self, cause: Option<String>) -> Self {
+        if let Some(cause) = cause {
+            self.detail = format!("{}\n{cause}", self.detail);
+        }
+        self
+    }
+}
+
+/// A landing that failed: the line a person reads, and the real cause.
+struct LandFail {
+    /// The plain line, when the failure is one a person is already told in full
+    /// (a clash, a refusal); `None` for a raw error, which gets the generic line.
+    line: Option<String>,
+    /// The command, its exit code and the last lines of its stderr.
+    cause: String,
+}
+
+impl LandFail {
+    /// A failure of `step` (a few plain words: "reading the branch tip") whose
+    /// raw error is `err`.
+    fn at(task: &str, step: &str, err: impl std::fmt::Display) -> Self {
+        Self {
+            line: Some(format!(
+                "Couldn't merge {task}: it hit a problem on this machine while {step}, and the details are in the shprd log"
+            )),
+            cause: land::tail_lines(&format!("{step}: {err}")),
+        }
+    }
+}
+
+impl From<String> for LandFail {
+    fn from(cause: String) -> Self {
+        Self {
+            line: None,
+            cause: land::tail_lines(&cause),
+        }
+    }
 }
 
 /// What one pass did.
@@ -300,6 +397,14 @@ pub type Starter = Arc<dyn Fn(&Path, &str) -> Result<String, String> + Send + Sy
 /// closure returns one line about the reviewer it opened.
 pub type Reviewer = Arc<dyn Fn(&Path, &str) -> Result<String, String> + Send + Sync>;
 
+/// What the tick needs to move a review off a reviewer that is out of quota.
+///
+/// The binary passes its own `review::switch_exhausted`, which looks at every
+/// running reviewer's pane, remembers a spent program as dry and starts the
+/// review again on the next reviewer in the settings list. The closure takes
+/// the repository and reports what it did.
+pub type ReviewSwitcher = Arc<dyn Fn(&Path) -> Vec<shprd_core::review::ReviewSwitch> + Send + Sync>;
+
 /// What the tick needs to close a reviewer's tab once its verdict is recorded.
 ///
 /// The verdict itself is the service's to decide and record; the tab belongs to
@@ -308,15 +413,13 @@ pub type Reviewer = Arc<dyn Fn(&Path, &str) -> Result<String, String> + Send + S
 /// log, and failing the step would tell the caller the review decided nothing.
 pub type ReviewCloser = Arc<dyn Fn(&Path, &str, u32) -> Result<(), String> + Send + Sync>;
 
-/// What the tick needs to close a landed task's space.
+/// What the tick needs to stop a landed task's agents.
 ///
-/// A landing is the engine's record and the space is the host's, so the binary
-/// passes the same `spawn::close_task_space` the CLI's `agent integrate` uses:
-/// one task, one space, so a landing closes the space rather than the worker's
-/// tab and leaves the reviewer's behind. Only the space labelled from that task
-/// is in reach, and only the records shprd wrote for it when the host cannot
-/// close a whole space. A host that refuses the close is logged and never fails
-/// the step: the landing is already in the log.
+/// A landing is the engine's record and the agents are the host's, so the binary
+/// passes the same `spawn::stop_task_agents` the CLI's `agent integrate` uses:
+/// the worker's and the reviewer's handles are in the records shprd wrote for
+/// the task, and only those are in reach. A host that refuses the close is
+/// logged and never fails the step: the landing is already in the log.
 pub type WorkerCloser = Arc<dyn Fn(&Path, &str) -> Result<(), String> + Send + Sync>;
 
 /// Everything one pass runs against.
@@ -361,6 +464,10 @@ pub struct Worker {
     /// `None` when the caller has no host (a test, a record-only pass): a
     /// verdict is still recorded, and nothing is left open to close.
     pub close_reviewer: Option<ReviewCloser>,
+    /// Moves a review off a reviewer that is out of quota.
+    ///
+    /// `None` when the caller has no host (a test, a record-only pass).
+    pub switch_reviewers: Option<ReviewSwitcher>,
     /// Closes a landed task's space once the landing is recorded.
     ///
     /// `None` when the caller has no host (a test, a record-only pass): a
@@ -419,6 +526,7 @@ impl Worker {
             live: self.facts.live(&state),
             local: self.local,
             settled_findings: self.settled_findings(&state),
+            protected: self.protected_tasks(&state),
         };
         // The ladder's facts are read before the phases because a provider cut
         // is what makes a task read "Needs you" rather than "Working".
@@ -429,7 +537,8 @@ impl Worker {
             phases: &phases,
             facts: &facts,
             config: &config,
-            review: self.review.is_some() && self.reviews_hand_ins(),
+            // `tasks.review_rounds = 0` is Off: no review is asked for at all.
+            review: self.review.is_some() && self.reviews_hand_ins() && config.review.rounds > 0,
         });
         let mut report = TickReport {
             run: state.run.as_ref().map(|run| run.run_id.clone()),
@@ -442,15 +551,35 @@ impl Worker {
         // says it on the debug channel instead. The step still runs and its
         // failure is still recorded: what goes quiet is the terminal.
         let quiet = self.quiet_failures(&state);
+        let landing = steps.iter().any(|step| matches!(step, Step::Land { .. }));
+        self.clear_scope_waits(&state);
+        let planned: BTreeSet<String> = steps.iter().map(|step| step.task().to_string()).collect();
         for step in steps {
             let result = self.run_step(&config, &state, &step, &quiet);
             report.steps.push(result);
         }
+        // Starts the cap held back (a retry, a start action, an agent spawn)
+        // go next, once a slot is free, so a wait is never a refusal.
+        self.start_queued(&config, &planned, &mut report);
+        // With no land pending, the `_int` worktree must not hold the integration
+        // branch: a base sync takes it back and nothing else lets it go.
+        if !landing {
+            self.release_idle_integration(&state);
+            self.realign_integration(&state);
+        }
+        // Finished tasks give their worktrees back after the steps, so a task
+        // this pass just landed has its windows closed now and is cleaned on the
+        // next pass, once those windows are gone.
+        self.auto_clean(&facts.live, &mut report);
         // The ladder runs after the advance steps so a task this pass just
         // started is looked at on the next one, with its record already open.
         for action in &ladder.actions {
             report.steps.push(self.run_ladder(&state, action));
         }
+        // A review that has been out too long is a card, whatever its reviewer
+        // is doing: the pass cannot see into the reviewer, only how long ago it
+        // was asked.
+        self.watch_reviews(SystemClock.now_ms());
         // And the news last, from the log as the steps left it, so a task this
         // pass started is news on this pass rather than the next one.
         report.news = self.news_pass(&ladder.retries);
@@ -461,6 +590,379 @@ impl Worker {
             SystemClock.now_ms(),
         ));
         Ok(report)
+    }
+
+    /// Starts the tasks whose start waited for a slot, while slots are free.
+    ///
+    /// A queued task leaves the queue when it started, or can no longer start
+    /// (it is working, handed in, landed or gone); one the cap still holds
+    /// back stays for the next pass. A task the pass planned a step for is left
+    /// to that step.
+    fn start_queued(&self, config: &Config, planned: &BTreeSet<String>, report: &mut TickReport) {
+        for task in start_queue::waiting(&self.state_dir) {
+            let Ok((state, _)) = ledger::load(&self.repo) else {
+                return;
+            };
+            let startable = state.tasks.get(&task).is_some_and(|found| {
+                matches!(found.status, TaskStatus::Queued | TaskStatus::Failed)
+            });
+            if !startable {
+                let _ = start_queue::dequeue(&self.state_dir, &task);
+                continue;
+            }
+            if planned.contains(&task) {
+                continue;
+            }
+            let working = state
+                .tasks
+                .values()
+                .filter(|other| other.status == TaskStatus::Working)
+                .count();
+            if working >= usize::try_from(config.tick.max_running.max(1)).unwrap_or(usize::MAX) {
+                return;
+            }
+            let step = Step::Start { task: task.clone() };
+            match (self.start)(&self.repo, &task) {
+                Ok(detail) if detail.starts_with(start_queue::QUEUED_PREFIX) => return,
+                Ok(detail) => {
+                    let _ = start_queue::dequeue(&self.state_dir, &task);
+                    match self.report_spawn(&step, detail) {
+                        Ok(done) => report.steps.push(done),
+                        Err(reason) => report.steps.push(StepReport::failed(&step, reason)),
+                    }
+                }
+                Err(reason) => {
+                    // A start the rules refuse is not waiting for a slot.
+                    let _ = start_queue::dequeue(&self.state_dir, &task);
+                    report.steps.push(StepReport::failed(&step, reason));
+                }
+            }
+        }
+    }
+
+    /// Cleans up the worktrees, branches and windows of tasks that landed or were
+    /// dropped, and the review packets nobody needs any more.
+    ///
+    /// `tasks.auto_clean` (on unless the person turned it off) gates the whole
+    /// sweep. A task is cleaned only when [`clean::eligible`] says so: finished,
+    /// nothing of it running, no open card. A finished task that still has a
+    /// worker or reviewer window gets that window closed and waits for the next
+    /// pass. The removals are the janitor's own plan, taken under the run's
+    /// integration lock without waiting; one that fails is tried again on every
+    /// later pass and, after [`clean::FAILURES_BEFORE_A_CARD`] passes in a row, is
+    /// one run-wide card for the coordinator naming the path and git's error.
+    fn auto_clean(&self, live: &BTreeSet<String>, report: &mut TickReport) {
+        use shprd_core::settings::Loaded;
+
+        let Ok(loaded) = Loaded::read(&self.home, Some(&self.repo)) else {
+            return;
+        };
+        let tasks = loaded.resolve(None).tasks();
+        if !tasks.auto_clean {
+            return;
+        }
+        let Ok((state, events)) = ledger::load(&self.repo) else {
+            return;
+        };
+        let Some(run) = state.run.clone() else {
+            return;
+        };
+        let now_ms = SystemClock.now_ms();
+        for task in clean::lingering(&state, live) {
+            self.close_worker_task(&task);
+            // A reviewer tab keeps the task live as much as its worker's does,
+            // so every attempt's reviewer is closed too.
+            if let Some(entry) = state.tasks.get(&task) {
+                for attempt in &entry.attempts {
+                    self.close_reviewer_task(&task, attempt.n);
+                }
+            }
+        }
+        let layout = Layout::from_settings(&self.home, &self.repo);
+        let ready = clean::eligible(&state, live, now_ms);
+        let mut failed: Vec<(String, String, String)> = Vec::new();
+        let previous = clean::CleanFailures::read(&self.state_dir, &self.repo);
+        let actions = clean::only_for(
+            shprd_git::janitor::plan(&state, &events, &layout, now_ms, u32::MAX),
+            &ready,
+        );
+        let repo_name = self
+            .repo
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned());
+        // Another verb holds the lock: leave everything, and the failure record,
+        // exactly as they were, and look again next pass.
+        let lock = match repo_name
+            .as_deref()
+            .map(|name| integrate::try_lock_run(&self.home, name, &run.run_id))
+        {
+            Some(Ok(Some(lock))) => Some(lock),
+            Some(Ok(None)) | None => return,
+            Some(Err(err)) => {
+                tracing::warn!(%err, "could not take the integration lock for the cleanup");
+                return;
+            }
+        };
+        if !actions.is_empty() {
+            for outcome in shprd_git::janitor::execute(&self.repo, &layout, &actions) {
+                let task = outcome.action.task().cloned().unwrap_or_default();
+                match outcome.result {
+                    Ok(kinds) => {
+                        for kind in kinds {
+                            if let Err(err) = self.commit(kind) {
+                                tracing::warn!(%task, %err, "could not record a cleanup");
+                            }
+                        }
+                        report.steps.push(StepReport::ok(
+                            "clean",
+                            &task,
+                            outcome.action.describe(),
+                            self.last_seq(),
+                        ));
+                    }
+                    Err(error) => {
+                        tracing::warn!(%task, step = %outcome.action.describe(), %error, "a cleanup failed; it is tried again");
+                        failed.push((task, outcome.action.describe(), error));
+                    }
+                }
+            }
+        }
+        drop(lock);
+        let record = previous.next(&self.repo, &failed);
+        for failure in record.reached_the_count() {
+            self.raise_clean_card(failure);
+        }
+        if record != previous
+            && let Err(err) = record.write(&self.state_dir)
+        {
+            tracing::warn!(%err, "could not write the cleanup failure record");
+        }
+        let keep: BTreeSet<String> = if state.finished {
+            BTreeSet::new()
+        } else {
+            BTreeSet::from([run.run_id])
+        };
+        let reviews = self.home.join(".shprd").join("reviews");
+        for dir in clean::expire_review_packets(
+            &reviews,
+            std::time::SystemTime::now(),
+            tasks.archive_after,
+            &keep,
+        ) {
+            tracing::info!(dir = %dir.display(), "removed old review packets");
+        }
+    }
+
+    /// One run-wide card for the coordinator about a removal that kept failing.
+    ///
+    /// It is the engine's own, so it is operational (the coordinator settles it)
+    /// and never "For you". It hangs on the run rather than the task, because a
+    /// finished task draws no card of its own.
+    fn raise_clean_card(&self, failure: &clean::CleanFailure) {
+        let body = clean::card_body(failure);
+        if let Err(err) = self.commit(EventKind::Escalated {
+            task: None,
+            body,
+            default_action: String::from(
+                "shprd tries the cleanup again on every pass; free the path (stop what holds it) or remove it by hand, then `shprd janitor --apply`",
+            ),
+        }) {
+            tracing::warn!(%err, "the card for a failed cleanup could not be recorded");
+        }
+    }
+
+    /// With a forge, brings the local copy of the run's target branch back to
+    /// origin's, so a landing that once moved it on its own is undone and the
+    /// local ref never stays apart from the remote's.
+    fn realign_integration(&self, state: &RunState) {
+        if self.local {
+            return;
+        }
+        let Some(run) = state.run.as_ref() else {
+            return;
+        };
+        let Some(repo_name) = self
+            .repo
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+        else {
+            return;
+        };
+        let Ok(Some(_lock)) = integrate::try_lock_run(&self.home, &repo_name, &run.run_id) else {
+            return;
+        };
+        // The idle sweep has just let go of the worktree, so the branch is
+        // free to move unless the person has it checked out.
+        let repo = self.repo.clone();
+        let outcome = integrate::realign_outcome(&repo, &run.base_branch, |host| {
+            shprd_git::land::gh_authed(&repo, host)
+        });
+        if outcome == integrate::Realign::Moved {
+            tracing::warn!(branch = %run.base_branch, "moved the local branch back to the remote's copy");
+        }
+        for kind in diverged_events(&run.base_branch, &outcome, state) {
+            let told = match &kind {
+                EventKind::Escalated {
+                    body,
+                    default_action,
+                    ..
+                } => Some(shprd_views::news::run_wide_line(body, default_action)),
+                _ => None,
+            };
+            if let Ok(seq) = self.commit(kind)
+                && let Some(line) = told
+            {
+                self.notify(Some(seq));
+                self.tell_coordinator(state, &line);
+            }
+        }
+    }
+
+    /// Tells the coordinator one line of news about the run itself, when a news
+    /// desk is wired and a coordinator is reachable. A host that refuses the
+    /// write is logged; the card stays on the board for the coordinator's next
+    /// look.
+    fn tell_coordinator(&self, state: &RunState, line: &str) {
+        let Some(desk) = &self.news else {
+            return;
+        };
+        let Some(pane) = desk.coordinator.pane(state) else {
+            return;
+        };
+        if let Err(reason) = desk.coordinator.tell(&pane, line) {
+            tracing::warn!(%reason, "a run-wide card could not be told to the coordinator");
+        }
+    }
+
+    /// Detaches the run's `_int` worktree when a command left it on the
+    /// integration branch and no landing is pending, so the person can `git
+    /// switch` to that branch in their own checkout.
+    ///
+    /// A run whose integration branch is shprd's own `<namespace><run>/int` is
+    /// left alone: no person's checkout wants that branch, and the commands
+    /// that open it expect it attached.
+    ///
+    /// The sweep takes the run's integration lock without waiting, because the
+    /// worktree it is looking at is the one every other verb writes: a clean
+    /// worktree sitting on the branch is also what a landing looks like between
+    /// its own open and its merge, and detaching `HEAD` then would land the work
+    /// on a detached head while the branch never moved. A landing, a sync, a gate
+    /// or an approval that holds the lock is therefore left alone, and the next
+    /// idle pass releases the branch after it.
+    fn release_idle_integration(&self, state: &RunState) {
+        let Some(run) = state.run.as_ref() else {
+            return;
+        };
+        let Some(repo_name) = self
+            .repo
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+        else {
+            return;
+        };
+        let layout = Layout::from_settings(&self.home, &self.repo);
+        if run.integration_branch == layout.branch_name(&run.run_id, "int") {
+            return;
+        }
+        // Held for exactly the detach: a verb that starts between the check and
+        // the switch waits for it, and one already running makes this a no-op.
+        let _lock = match integrate::try_lock_run(&self.home, &repo_name, &run.run_id) {
+            Ok(Some(lock)) => lock,
+            Ok(None) => {
+                tracing::debug!(run = %run.run_id, "a verb holds the integration lock, so the idle sweep left the worktree alone");
+                return;
+            }
+            Err(err) => {
+                tracing::warn!(%err, "could not take the integration lock for the idle sweep");
+                return;
+            }
+        };
+        let path = layout.path(&repo_name, &run.run_id, "_int");
+        if integrate::release_if_held(&path) {
+            tracing::debug!(path = %path.display(), "released the integration worktree");
+        }
+    }
+
+    /// Puts a card in front of a person for every review that has been out for
+    /// [`shprd_core::review::STUCK_AFTER_MS`] without a verdict.
+    ///
+    /// The card is an answerable ask, like the one a spent review raises: its
+    /// `review again` closes the reviewer and starts a new one. A request that
+    /// already has a card since it was made is not raised again.
+    pub fn watch_reviews(&self, now_ms: u64) {
+        // A reviewer out of quota is moved on first, so a review that has just
+        // been handed to the next reviewer is not also a stuck one.
+        if let Some(switch) = &self.switch_reviewers {
+            for outcome in switch(&self.repo) {
+                self.report_switch(outcome);
+            }
+        }
+        let Ok((state, events)) = ledger::load(&self.repo) else {
+            return;
+        };
+        for stuck in shprd_core::review::stuck_reviews(
+            &state,
+            &events,
+            now_ms,
+            shprd_core::review::STUCK_AFTER_MS,
+        ) {
+            let text = shprd_core::review::stuck_body(
+                &stuck.task,
+                stuck.attempt,
+                &stuck.reviewer,
+                stuck.minutes,
+            );
+            if let Err(err) = self.raise_card(
+                &stuck.task,
+                &stuck.ask,
+                &text,
+                shprd_core::review::stuck_options(),
+            ) {
+                tracing::warn!(task = %stuck.task, %err, "the card for a stuck review could not be recorded");
+            }
+        }
+    }
+
+    /// Puts a review that no reviewer can take in front of the person, once.
+    ///
+    /// A switch to the next reviewer needs no card: the log and the task's card
+    /// already say it. Only a review with no reviewer left is a question, and it
+    /// is the same answerable card a stuck review raises, so `review again` and
+    /// `drop it` mean what they always do.
+    fn report_switch(&self, outcome: shprd_core::review::ReviewSwitch) {
+        let shprd_core::review::ReviewSwitch::NoneLeft { task, attempt, why } = outcome else {
+            return;
+        };
+        let Ok((state, _)) = ledger::load(&self.repo) else {
+            return;
+        };
+        let Some(request) = state
+            .tasks
+            .get(&task)
+            .and_then(|task| task.latest_attempt())
+            .and_then(|current| current.reviews.last())
+        else {
+            return;
+        };
+        let prefix = format!("{}{attempt}-", shprd_core::review::STUCK_ASK_PREFIX);
+        let own: Vec<_> = state
+            .asks
+            .values()
+            .filter(|ask| ask.task == task && ask.id.starts_with(&prefix))
+            .collect();
+        // A card still waiting is the one question; an answered one that led
+        // nowhere (the retry was refused too) is asked again.
+        if own
+            .iter()
+            .any(|ask| ask.raised_seq > request.seq && ask.answer.is_none())
+        {
+            return;
+        }
+        let text = shprd_core::review::none_left_body(&task, attempt, &why);
+        let id = shprd_core::review::stuck_ask(attempt, own.len() + 1);
+        if let Err(err) = self.raise_card(&task, &id, &text, shprd_core::review::stuck_options()) {
+            tracing::warn!(%task, %err, "the card for a review with no reviewer left could not be recorded");
+        }
     }
 
     /// Counts this pass's failures against the last one's, and asks a person
@@ -540,13 +1042,15 @@ impl Worker {
             return Ok(());
         }
         let error = run.error.lines().next().unwrap_or_default().trim();
+        // The card for a review with no reviewer left is already raised, in
+        // plain words, by the review step itself.
+        if error.contains(shprd_core::review::NO_REVIEWER_LEFT) {
+            return Ok(());
+        }
         let seq = self.commit(EventKind::Escalated {
             task: Some(run.task.clone()),
             body: format!("{marker}{error}"),
-            default_action: format!(
-                "fix what the card names, then the engine retries `{}` on its next pass",
-                run.step
-            ),
+            default_action: repeated_failure_action(&run.step, error, &self.state_dir),
         })?;
         self.notify(Some(seq));
         Ok(())
@@ -597,11 +1101,12 @@ impl Worker {
     fn reviews_hand_ins(&self) -> bool {
         match shprd_core::settings::Loaded::read(&self.home, Some(&self.repo)) {
             Ok(loaded) => loaded.resolve(None).role("reviewer").is_some_and(|role| {
+                // A reviewer list kept under `agents` alone is a reviewer too.
                 role.may_review()
                     && role
-                        .agent
-                        .as_ref()
-                        .is_some_and(|agent| !agent.value.trim().is_empty())
+                        .lines()
+                        .iter()
+                        .any(|line| !line.agent.trim().is_empty())
             }),
             Err(_) => self.config.roster.reviewer.is_some(),
         }
@@ -641,31 +1146,62 @@ impl Worker {
             .collect()
     }
 
-    /// The programs a cut worker is handed to, in order: the worker role's own
-    /// fallback list, then the configured workers.
+    /// The tasks ready to land whose real diff touches a protected path they did
+    /// not declare: they wait for the person's Accept whatever the merge policy.
+    ///
+    /// Only a task the planner could land is read, so a pass runs git for the
+    /// few tasks at the gate and not for the whole plan. A task git cannot read
+    /// here is not flagged; its landing reads the same branch and fails loudly.
+    fn protected_tasks(&self, state: &RunState) -> BTreeSet<String> {
+        state
+            .tasks
+            .values()
+            .filter(|task| {
+                !matches!(task.status, TaskStatus::Integrated | TaskStatus::Dropped)
+                    && shprd_core::rules::ready_to_land(task).is_ok()
+            })
+            .filter(|task| {
+                !shprd_git::changed::protected_for_task(&self.repo, state, task).is_empty()
+            })
+            .map(|task| task.id.clone())
+            .collect()
+    }
+
+    /// The programs a cut worker is handed to, in order: the worker role's program
+    /// lines, then the configured workers.
     ///
     /// The role's list is what the brief's Settings block prints, so the ladder
     /// and the block agree. A settings file that cannot be read (or a role that
     /// names nobody) leaves the configured workers, which is the order a run had
     /// before the role settings existed. A `program/model` entry counts as its
     /// program, because a backup is chosen by program.
-    fn worker_fallbacks(&self) -> Vec<String> {
+    fn worker_fallbacks(&self) -> (Vec<String>, usize) {
         let mut programs: Vec<String> =
             match shprd_core::settings::Loaded::read(&self.home, Some(&self.repo)) {
                 Ok(loaded) => loaded
                     .resolve(None)
                     .role("worker")
-                    .map(|role| role.fallback.value)
+                    .map(|role| {
+                        // The worker's program lines, in order: the ladder
+                        // moves a cut task to the next one. The first line is
+                        // listed too, so a task on a later line can wrap round.
+                        role.lines().iter().map(|line| line.agent_ref()).collect()
+                    })
                     .unwrap_or_default(),
                 Err(_) => Vec::new(),
             };
+        let lines = programs.len();
         for worker in &self.config.roster.workers {
             let program = worker.split('/').next().unwrap_or(worker).trim();
-            if !program.is_empty() && !programs.iter().any(|kept| kept == program) {
+            if !program.is_empty()
+                && !programs
+                    .iter()
+                    .any(|kept| kept.split('/').next() == Some(program))
+            {
                 programs.push(program.to_owned());
             }
         }
-        programs
+        (programs, lines)
     }
 
     /// Tells the coordinator what changed, when a news desk is wired.
@@ -686,21 +1222,30 @@ impl Worker {
         };
         let now_ms = desk.clock.now_ms();
         let live = self.facts.live(&state);
+        let idle = self.facts.idle_since(&state, now_ms);
         let rows = self.rows(
             &state,
             &live,
+            &idle,
             retries,
             Some(&news::started_at(&events)),
             now_ms,
         );
         let snapshot = news::readings(&state, &self.repo, &rows, &events, &live, now_ms);
-        news::tell(desk, &self.repo, &state, &snapshot)
+        // The settle window is read afresh, so a change saved in the settings is
+        // the next pass's window and not the next service start's.
+        let desk = NewsDesk {
+            coordinator: std::sync::Arc::clone(&desk.coordinator),
+            settle_ms: settle_override_ms(&self.home, &self.repo).unwrap_or(desk.settle_ms),
+            clock: std::sync::Arc::clone(&desk.clock),
+        };
+        news::tell(&desk, &self.repo, &state, &snapshot)
     }
 
     /// Reads the ladder's facts and plans its actions.
     ///
-    /// The fallback list is the worker role's own (`roles.worker.fallback`),
-    /// which is the list the brief's Settings block prints, then the configured
+    /// The list is the worker role's program lines (`roles.worker.agents`, with
+    /// the old `fallback` read as lines too), which the brief's Settings block prints, then the configured
     /// workers, so a setting nobody made keeps the roster's order.
     fn ladder_plan(&self, state: &RunState) -> LadderPass {
         let Some(source) = &self.fallback else {
@@ -713,9 +1258,11 @@ impl Worker {
         if !agents.iter().any(|agent| agent.cut.is_some()) {
             return LadderPass::default();
         }
+        let (worker_list, worker_lines) = self.worker_fallbacks();
         let config = LadderConfig {
             waits_ms: Vec::new(),
-            fallbacks: BTreeMap::from([(String::from("worker"), self.worker_fallbacks())]),
+            fallbacks: BTreeMap::from([(String::from("worker"), worker_list.clone())]),
+            lines: BTreeMap::from([(String::from("worker"), worker_lines)]),
             installed: source.installed(),
             signed_in: source.signed_in(),
         };
@@ -774,7 +1321,9 @@ impl Worker {
         facts: &Facts,
         retries: &BTreeMap<String, derived::ProviderCut>,
     ) -> BTreeMap<String, Phase> {
-        self.rows(state, &facts.live, retries, None, SystemClock.now_ms())
+        let now_ms = SystemClock.now_ms();
+        let idle = self.facts.idle_since(state, now_ms);
+        self.rows(state, &facts.live, &idle, retries, None, now_ms)
             .into_iter()
             .map(|(id, (row, _))| (id, phase_of(row.status)))
             .collect()
@@ -802,6 +1351,7 @@ impl Worker {
         &self,
         state: &RunState,
         live: &BTreeSet<String>,
+        idle: &BTreeMap<String, u64>,
         retries: &BTreeMap<String, derived::ProviderCut>,
         started: Option<&BTreeMap<String, u64>>,
         now_ms: u64,
@@ -814,9 +1364,18 @@ impl Worker {
                 signal.provider_cut = retries.get(id).cloned();
                 signal.started_ms = started.and_then(|at| at.get(id).copied());
                 let agents = if live.contains(id) {
+                    // An agent seen idle is quiet since it was first seen so: the
+                    // status rules give it their grace and then read the task as
+                    // waiting for a person, which frees its slot.
+                    let quiet = idle.get(id).copied();
                     LiveAgents::new(vec![LiveAgent {
                         address: id.clone(),
-                        activity: Some(Activity::Working),
+                        activity: Some(if quiet.is_some() {
+                            Activity::Idle
+                        } else {
+                            Activity::Working
+                        }),
+                        since_ms: quiet,
                         ..LiveAgent::default()
                     }])
                 } else {
@@ -903,7 +1462,7 @@ impl Worker {
         Ok(StepReport::ok("nudge", task, detail, Some(seq)))
     }
 
-    /// Starts the backup handover and records it, once per task.
+    /// Starts the backup handover and records it, once per line.
     #[expect(clippy::too_many_arguments, reason = "one handover's whole input")]
     fn start_backup(
         &self,
@@ -948,9 +1507,9 @@ impl Worker {
         if started {
             return Ok(StepReport::ok("backup", task, detail, Some(seq)));
         }
-        // A failed handover is still the task's one try, and the person is told
-        // why rather than the next pass trying the same thing again.
-        let body = format!("{task}: backup didn't start: {detail}");
+        // A failed handover is that line's one try: the person is told why, and
+        // the next pass moves on to the next untried line (if there is one).
+        let body = format!("{task}: {to} didn't start: {detail}");
         self.commit(EventKind::Escalated {
             task: Some(task.to_string()),
             body: body.clone(),
@@ -999,11 +1558,27 @@ impl Worker {
         step: &Step,
         quiet: &BTreeSet<(String, String)>,
     ) -> StepReport {
+        let mut cause: Option<String> = None;
         let result = match step {
             Step::Start { task } => self.start_task(task),
             Step::Review { task } => self.review_task(state, task),
+            Step::SkipReview { task } => self.skip_review(state, task),
             Step::Verdict { task } => self.verdict_task(config, state, task),
-            Step::Land { task, policy } => self.land_task(state, task, *policy),
+            Step::Land { task, policy } => match self.land_task(state, task, *policy) {
+                Ok(report) => Ok(report),
+                Err(fail) => {
+                    // A person reads one plain sentence; the command line, the
+                    // exit code and stderr go to the log and the pass's record.
+                    tracing::warn!(task = %task, cause = %fail.cause, "a landing failed");
+                    let line = fail.line.unwrap_or_else(|| {
+                        format!(
+                            "Couldn't merge {task}: it hit a problem on this machine while landing, and the details are in the shprd log"
+                        )
+                    });
+                    cause = Some(fail.cause);
+                    Err(line)
+                }
+            },
             Step::MarkLanded {
                 task,
                 outcome,
@@ -1019,8 +1594,12 @@ impl Worker {
             } => self.escalate_review(state, task, body, default_action),
         };
         match result {
-            Ok(report) => report,
+            Ok(report) => {
+                self.clear_waiting(state, step.task());
+                report
+            }
             Err(reason) => {
+                self.note_waiting(state, step.task(), &reason);
                 // Logged, not raised: a failing step is news about one task, and
                 // the pass must reach the others. A failure a person has already
                 // been given a card for is logged quietly: the card is the
@@ -1031,9 +1610,74 @@ impl Worker {
                 } else {
                     tracing::warn!(action = step.action(), task = step.task(), %reason, "tick step failed");
                 }
-                StepReport::failed(step, reason)
+                StepReport::failed(step, reason).with_cause(cause)
             }
         }
+    }
+
+    /// Clears the "Waiting: <path> is in use by <task>" line a queued task kept
+    /// from when declared paths were a lock.
+    ///
+    /// Nothing waits on a path any more, but a task held at the running cap gets
+    /// no step, so its old line would otherwise stay on its card. Once cleared
+    /// the line reads "No longer waiting", so this writes nothing on later passes.
+    fn clear_scope_waits(&self, state: &RunState) {
+        for (id, task) in &state.tasks {
+            let stale = task.status == TaskStatus::Queued
+                && task.last_status.as_ref().is_some_and(|status| {
+                    status.message.starts_with(WAITING_PREFIX)
+                        && status.message.contains(" is in use by ")
+                });
+            if stale {
+                self.clear_waiting(state, id);
+            }
+        }
+    }
+
+    /// Puts why a step is stuck on the task's card, once.
+    ///
+    /// The status line reads "Waiting: <reason>"; an identical line already on
+    /// the card is not written again, so a step that fails every pass says it
+    /// once. Best effort: a failed write is not worth failing the pass for.
+    fn note_waiting(&self, state: &RunState, task: &str, reason: &str) {
+        let message = waiting_message(reason);
+        let current = state
+            .tasks
+            .get(task)
+            .and_then(|found| found.last_status.as_ref())
+            .map(|status| status.message.as_str());
+        if current == Some(message.as_str()) {
+            return;
+        }
+        let progress = state
+            .tasks
+            .get(task)
+            .and_then(|found| found.last_status.as_ref())
+            .and_then(|status| status.progress);
+        let _ = self.commit(EventKind::TaskStatus {
+            task: task.to_string(),
+            message,
+            progress,
+        });
+    }
+
+    /// Clears a "Waiting:" line once a step for the task has succeeded.
+    fn clear_waiting(&self, state: &RunState, task: &str) {
+        let Some(status) = state
+            .tasks
+            .get(task)
+            .and_then(|found| found.last_status.as_ref())
+        else {
+            return;
+        };
+        if !status.message.starts_with(WAITING_PREFIX) {
+            return;
+        }
+        let _ = self.commit(EventKind::TaskStatus {
+            task: task.to_string(),
+            message: String::from("No longer waiting"),
+            progress: status.progress,
+        });
     }
 
     /// Starts an agent on a queued task through the caller's spawn path.
@@ -1146,11 +1790,22 @@ impl Worker {
     /// expires, because the decision is the person's to make when they get to
     /// it, and its id names the failed attempt so one failure has one card.
     fn raise_rounds_card(&self, task: &str, id: &str, text: &str) -> Result<Option<u64>, String> {
-        let now_ms = SystemClock.now_ms();
         let options: Vec<String> = shprd_core::gate::ROUNDS_SPENT_OPTIONS
             .iter()
             .map(|choice| (*choice).to_string())
             .collect();
+        self.raise_card(task, id, text, options)
+    }
+
+    /// Writes an answerable card with `options`: the queue file and the event.
+    fn raise_card(
+        &self,
+        task: &str,
+        id: &str,
+        text: &str,
+        options: Vec<String>,
+    ) -> Result<Option<u64>, String> {
+        let now_ms = SystemClock.now_ms();
         let ask = shprd_core::ask::Ask::new(
             id.to_string(),
             task.to_string(),
@@ -1249,6 +1904,9 @@ impl Worker {
     /// for ever with nothing in the ledger saying why. The escalation names the
     /// failure and the one verb that recovers it.
     fn review_task(&self, state: &RunState, task: &str) -> Result<StepReport, String> {
+        if let Some(report) = self.clash_before_review(state, task)? {
+            return Ok(report);
+        }
         let review = self
             .review
             .as_ref()
@@ -1272,6 +1930,80 @@ impl Worker {
         self.notify(seq);
         after_write(&self.after_write, &self.repo);
         Ok(StepReport::done(&step, detail, seq))
+    }
+
+    /// Sends a hand-in back before its review when its branch would clash with
+    /// the integration branch as it stands now.
+    ///
+    /// The clash is recorded exactly as a landing records one (a failed
+    /// `integrate` gate and a ledger note), so the planner redoes the task at
+    /// once without spending a review round, and the person never Accepts work
+    /// that cannot land. `None` when the branch merges cleanly or git cannot
+    /// tell, and the review goes ahead.
+    fn clash_before_review(
+        &self,
+        state: &RunState,
+        task: &str,
+    ) -> Result<Option<StepReport>, String> {
+        let (Some(run), Some(found)) = (state.run.as_ref(), state.tasks.get(task)) else {
+            return Ok(None);
+        };
+        let Some(attempt) = found.latest_attempt() else {
+            return Ok(None);
+        };
+        let Some((clashing, files)) =
+            land::clash_before_review(&self.repo, &run.integration_branch, &attempt.branch)
+        else {
+            return Ok(None);
+        };
+        // The note names the commit when git can resolve it, else the branch.
+        let head = Git::new(&self.repo)
+            .rev_parse(&attempt.branch)
+            .unwrap_or_else(|_| attempt.branch.clone());
+        let err = LandError::Conflict {
+            commit: head,
+            files,
+            pr: None,
+        };
+        // The finding names the ref the work clashed with, so the redo merges
+        // the very tip it has to land on, not a stale local ref.
+        let seq = self.record_conflict(found, &clashing, &err)?;
+        after_write(&self.after_write, &self.repo);
+        let step = Step::Review {
+            task: task.to_string(),
+        };
+        Ok(Some(StepReport::done(
+            &step,
+            conflict_message(task, &err),
+            seq,
+        )))
+    }
+
+    /// Passes a task on its own checks because review is off.
+    ///
+    /// Recorded as a `ReviewSkipped` event, so the log says the pass had no
+    /// review behind it; the rules refuse it for anything but a clean hand-in
+    /// that no review was requested for.
+    fn skip_review(&self, state: &RunState, task: &str) -> Result<StepReport, String> {
+        let step = Step::SkipReview {
+            task: task.to_string(),
+        };
+        let attempt = state
+            .tasks
+            .get(task)
+            .and_then(|found| found.latest_attempt())
+            .ok_or_else(|| format!("task {task:?} has no attempt to pass"))?
+            .n;
+        let seq = self.commit(EventKind::ReviewSkipped {
+            task: task.to_string(),
+            attempt,
+        })?;
+        self.notify(Some(seq));
+        Ok(StepReport::done(
+            &step,
+            format!("{task}: review is off, passed on its checks"),
+            Some(seq),
+        ))
     }
 
     /// Decides the review of a task whose reviewer has written its findings.
@@ -1436,6 +2168,31 @@ impl Worker {
         task: &str,
         reason: &str,
     ) -> Result<(), String> {
+        // Every reviewer is out of quota: one plain card with the choices in
+        // words, not an escalation naming commands.
+        if let Some((_, why)) =
+            reason.split_once(&format!("{}: ", shprd_core::review::NO_REVIEWER_LEFT))
+        {
+            let attempt = attempt_of(state, task);
+            let prefix = format!("{}{attempt}-", shprd_core::review::STUCK_ASK_PREFIX);
+            let open = state
+                .asks
+                .values()
+                .any(|ask| ask.task == task && ask.id.starts_with(&prefix) && ask.answer.is_none());
+            if open {
+                return Ok(());
+            }
+            let n = state
+                .asks
+                .values()
+                .filter(|ask| ask.task == task && ask.id.starts_with(&prefix))
+                .count();
+            let text = shprd_core::review::none_left_body(task, attempt, why);
+            let id = shprd_core::review::stuck_ask(attempt, n + 1);
+            return self
+                .raise_card(task, &id, &text, shprd_core::review::stuck_options())
+                .map(|_| ());
+        }
         let marker = review_failure_prefix(task);
         let already = state.escalations.iter().any(|escalation| {
             escalation.task.as_deref() == Some(task) && escalation.body.starts_with(&marker)
@@ -1497,7 +2254,7 @@ impl Worker {
         state: &RunState,
         task: &str,
         policy: MergePolicy,
-    ) -> Result<StepReport, String> {
+    ) -> Result<StepReport, LandFail> {
         let step = Step::Land {
             task: task.to_string(),
             policy,
@@ -1506,6 +2263,13 @@ impl Worker {
             .tasks
             .get(task)
             .ok_or_else(|| format!("no task {task:?} in this run"))?;
+        if matches!(
+            found.status,
+            shprd_core::state::TaskStatus::Integrated | shprd_core::state::TaskStatus::Dropped
+        ) {
+            // Already landed: record nothing and open no pull request.
+            return Ok(StepReport::done(&step, "already landed", None));
+        }
         shprd_core::rules::ready_to_land(found).map_err(|err| err.to_string())?;
         let attempt = found
             .latest_attempt()
@@ -1516,8 +2280,13 @@ impl Worker {
             .ok_or_else(|| String::from("the run has not started"))?;
         let worktree = PathBuf::from(&attempt.worktree);
         let git = Git::new(&worktree);
-        let head = git.head_sha().map_err(|err| err.to_string())?;
-        let approved = found.approved_head.as_deref() == Some(head.as_str());
+        let head = git
+            .head_sha()
+            .map_err(|err| LandFail::at(task, "reading the branch tip", err))?;
+        let approved = found
+            .approved_head
+            .as_deref()
+            .is_some_and(|a| shprd_core::tick::same_commit(a, &head));
         let has_work = attempt
             .report
             .as_ref()
@@ -1541,8 +2310,12 @@ impl Worker {
             &self.home,
             &run.run_id,
             task,
-            &pr::task_pr_body_marked(found),
-        )?;
+            &pr::task_pr_body_flagged(
+                found,
+                &shprd_git::changed::protected_for_task(&self.repo, state, found),
+            ),
+        )
+        .map_err(|err| LandFail::at(task, "writing the pull request text", err))?;
         let forge = self.forge();
         let landing = Landing {
             task,
@@ -1552,8 +2325,26 @@ impl Worker {
             body: &body,
             has_work,
         };
-        let landed = land::land(forge, &git, &landing, policy, approved)
-            .map_err(|err| describe_land_error(err, task))?;
+        let landed = match land::land(forge, &git, &landing, policy, approved) {
+            Ok(landed) => landed,
+            // A branch that clashes with what landed after it is closed out and
+            // sent back for a fresh attempt: the planner does the sending.
+            Err(err @ LandError::Conflict { .. }) => {
+                if let LandError::Conflict {
+                    pr: Some(number), ..
+                } = &err
+                {
+                    // Best effort: a pull request that cannot be closed is left
+                    // for a human, and the new attempt opens its own.
+                    let _ = forge.close(*number, &stale_pr_comment(task));
+                }
+                // Not a failure: the clash is recorded as the gate the planner
+                // sends the task back on, so this pass has done its job.
+                let seq = self.record_conflict(found, &base, &err)?;
+                return Ok(StepReport::done(&step, conflict_message(task, &err), seq));
+            }
+            Err(err) => return Err(land_fail(err, task)),
+        };
         let seq = self.record_landing(state, task, &base, &landed)?;
         Ok(StepReport::done(
             &step,
@@ -1581,7 +2372,7 @@ impl Worker {
         policy: MergePolicy,
         approved: bool,
         has_work: bool,
-    ) -> Result<StepReport, String> {
+    ) -> Result<StepReport, LandFail> {
         let repo_name = self
             .repo
             .file_name()
@@ -1592,7 +2383,7 @@ impl Worker {
                     self.repo.display()
                 )
             })?;
-        let layout = Layout::default_for_home(&self.home);
+        let layout = Layout::from_settings(&self.home, &self.repo);
         let worktree = integrate::open_integration_branch(
             &self.repo,
             &layout,
@@ -1601,26 +2392,37 @@ impl Worker {
             &run.integration_branch,
             &run.base_branch,
         )
-        .map_err(|err| err.to_string())?;
+        .map_err(|err| open_fail(&task.id, &run.integration_branch, &err))?;
+        self.record_integration_worktree(&worktree);
         let landing = LocalLanding {
             task: &task.id,
             branch,
             base: &run.integration_branch,
             has_work,
         };
-        let landed = match land::land_local(
+        let result = land::land_local(
             &worktree,
             &landing,
             policy,
             approved,
             local_checks_passed(task),
-        ) {
+        );
+        // Whatever the landing did, the worktree lets go of the branch so the
+        // person can `git switch` to it in their own checkout between lands.
+        if let Err(err) = integrate::release_integration(&worktree) {
+            tracing::warn!(%err, path = %worktree.path.display(), "could not detach the integration worktree");
+        }
+        let landed = match result {
             Ok(landed) => landed,
             Err(err @ LandError::Conflict { .. }) => {
-                self.record_conflict(task, branch, &err)?;
-                return Err(describe_land_error(err, &task.id));
+                let seq = self.record_conflict(task, &run.integration_branch, &err)?;
+                return Ok(StepReport::done(
+                    step,
+                    conflict_message(&task.id, &err),
+                    seq,
+                ));
             }
-            Err(err) => return Err(describe_land_error(err, &task.id)),
+            Err(err) => return Err(land_fail(err, &task.id)),
         };
         let seq = self.record_local_landing(&task.id, &run.integration_branch, &landed)?;
         Ok(StepReport::done(
@@ -1649,42 +2451,62 @@ impl Worker {
             .map(Some)
     }
 
-    /// Records a local merge that conflicted, and the human it needs.
+    /// Records the run's integration worktree in the resource ledger, once, so
+    /// the janitor can list it and take it away.
+    fn record_integration_worktree(&self, worktree: &integrate::IntegrationWorktree) {
+        let name = worktree.path.display().to_string();
+        let held = ledger::load(&self.repo).is_ok_and(|(state, _)| {
+            state
+                .resources
+                .get(&(ResourceKind::Worktree, name.clone()))
+                .is_some_and(|record| record.status == ResourceStatus::Live)
+        });
+        if held {
+            return;
+        }
+        let recorded = self.commit(EventKind::Resource {
+            action: ResourceAction::Created,
+            kind: ResourceKind::Worktree,
+            name,
+            task: None,
+        });
+        if let Err(err) = recorded {
+            tracing::warn!(%err, "the integration worktree could not be recorded");
+        }
+    }
+
+    /// Records a landing that clashed with the integration branch as a failed
+    /// `integrate` gate.
     ///
-    /// A failed `integrate` gate takes the task out of `Passed`, so the next
-    /// pass does not try the same conflicting merge again; the escalation is
-    /// what a person sees and acts on.
-    fn record_conflict(&self, task: &Task, commit: &str, err: &LandError) -> Result<(), String> {
+    /// The failed gate takes the task out of `Passed`, so the next pass does not
+    /// try the same merge again, and it is what the planner reads to send the
+    /// task back as a new attempt. The ledger note is not a question: nobody has
+    /// to decide anything.
+    fn record_conflict(
+        &self,
+        task: &Task,
+        base: &str,
+        err: &LandError,
+    ) -> Result<Option<u64>, String> {
         let LandError::Conflict { files, .. } = err else {
-            return Ok(());
+            return Ok(None);
         };
         let attempt = task.attempts.last().map(|attempt| attempt.n).unwrap_or(1);
-        let finding = Finding {
-            severity: Severity::Major,
-            title: "conflicts with the integration branch".to_string(),
-            location: files.first().cloned(),
-            detail: format!("merging {commit} conflicts in {}", files.join(", ")),
-        };
         let failed = self.commit(EventKind::GateFailed {
             task: task.id.clone(),
             attempt,
-            gate: "integrate".to_string(),
-            findings: vec![finding],
+            gate: shprd_core::rules::LANDING_CONFLICT_GATE.to_string(),
+            findings: vec![land::conflict_finding(base, files)],
             source: None,
         })?;
         self.notify(Some(failed));
-        let body = format!(
-            "{}: its work conflicts with the integration branch ({}), so it needs a person",
-            task.id,
-            files.join(", ")
-        );
         let escalated = self.commit(EventKind::Escalated {
             task: Some(task.id.clone()),
-            body,
-            default_action: String::from("send the task back to a worker"),
+            body: conflict_message(&task.id, err),
+            default_action: String::from("redo the task on top of the latest"),
         })?;
         self.notify(Some(escalated));
-        Ok(())
+        Ok(Some(failed))
     }
 
     /// Records what a landing touched, once per pull request and outcome.
@@ -1741,6 +2563,12 @@ impl Worker {
         })?;
         self.notify(Some(event));
         self.close_worker_task(task);
+        // A landing is what makes shprd rebuild itself, when the person asked
+        // for that: the trigger reads the setting and starts the helper, and is
+        // nothing where no service installed one.
+        if outcome.is_landed() {
+            crate::self_update::landed(&self.repo, base, self.local);
+        }
         Ok(event)
     }
 
@@ -1885,15 +2713,67 @@ fn ladder_state(state: &RunState) -> LadderState {
                         .insert(record.cut.clone());
                 }
                 FallbackAction::Backup => {
-                    entry.backup = Some(BackupDone {
+                    entry.backups.push(BackupDone {
                         from: record.agent.clone(),
                         to: record.to_agent.clone().unwrap_or_default(),
+                        started: record.started.unwrap_or(false),
                     });
                 }
             }
         }
     }
     ladder
+}
+
+/// What a realign outcome writes about the run's diverged-branch card.
+///
+/// - `Kept`: one run-wide card naming the local-only commits, per distinct set.
+///   An open card or a person's dismissal of the same words stands (a dismissal
+///   sticks); only a card the engine itself retired is raised again.
+/// - `Moved` or `Aligned`: the cause is gone, so every open card of the branch is
+///   retired by the engine on this first pass.
+/// - `Unchanged`: nothing was learned, so nothing is written.
+fn diverged_events(branch: &str, outcome: &integrate::Realign, state: &RunState) -> Vec<EventKind> {
+    let marker = diverged_marker(branch);
+    match outcome {
+        integrate::Realign::Kept(commits) => {
+            let body = format!("{marker}: {}", commits.join("; "));
+            if state.escalations.iter().any(|escalation| {
+                escalation.body == body && !state.retired_needs.contains(&escalation.seq)
+            }) {
+                return Vec::new();
+            }
+            let default_action = format!(
+                "push `{branch}` to the remote if those commits should land, or move it back \
+                 with `git branch -f {branch} origin/{branch}` if they should not; shprd leaves \
+                 the local branch as it is"
+            );
+            vec![EventKind::Escalated {
+                task: None,
+                body,
+                default_action,
+            }]
+        }
+        integrate::Realign::Moved | integrate::Realign::Aligned => state
+            .escalations
+            .iter()
+            .filter(|escalation| {
+                escalation.task.is_none()
+                    && !escalation.by_agent
+                    && escalation.body.starts_with(&marker)
+                    && !state.dismissed_needs.contains(&escalation.seq)
+            })
+            .map(|escalation| EventKind::NeedDismissed {
+                need: escalation.seq,
+            })
+            .collect(),
+        integrate::Realign::Unchanged => Vec::new(),
+    }
+}
+
+/// The words every "local branch has commits the remote lacks" card begins with.
+fn diverged_marker(branch: &str) -> String {
+    format!("The local `{branch}` has commits the remote lacks")
 }
 
 /// What every escalation body for a review the engine could not start begins
@@ -1915,8 +2795,9 @@ fn review_failure_prefix(task: &str) -> String {
 /// reads it the same way: the card is history once a newer attempt exists.
 pub fn repeated_failure_prefix(task: &str, step: &str, attempt: u32) -> String {
     format!(
-        "{task}: its `{step}` step has failed the same way {} passes in a row (attempt {attempt}): ",
-        pass::REPEATS_BEFORE_A_CARD
+        "{task}: its `{step}` step has failed the same way {} passes in a row ({}): ",
+        pass::REPEATS_BEFORE_A_CARD,
+        shprd_core::event::attempt_label(task, attempt)
     )
 }
 
@@ -2031,24 +2912,87 @@ fn local_checks_passed(task: &Task) -> bool {
         })
 }
 
-/// Why a landing failed, in the words the CLI would use.
-fn describe_land_error(err: LandError, task: &str) -> String {
-    match err {
-        LandError::ChecksFailed { number } => {
-            format!("task {task:?}: the checks on pull request {number} failed")
-        }
-        LandError::HeadMoved { expected, found } => format!(
-            "task {task:?}: the pull request is at {found:?}, but the branch is at {expected:?}"
-        ),
-        LandError::NotMerged { number } => {
-            format!("the forge did not report pull request {number} merged")
-        }
-        LandError::Forge(ForgeError::Failed { args, code, stderr }) => format!(
-            "landing task {task:?}: forge {} failed (exit {code:?}): {stderr}",
-            args.join(" ")
-        ),
-        other => format!("landing task {task:?}: {other}"),
+/// A landing error as a failure: the plain line, and the real cause for the log.
+fn land_fail(err: LandError, task: &str) -> LandFail {
+    LandFail {
+        line: Some(err.plain(task)),
+        cause: err.cause(),
     }
+}
+
+/// The words a landing that could not open the integration worktree starts its
+/// failure with. A retry of that step cannot succeed until a person acts, and
+/// [`escalate_repeated_failure`](Service::escalate_repeated_failure) reads this
+/// to say so.
+const OPEN_FAIL: &str = "git would not open shprd's integration worktree";
+
+/// What a person can do about a step that keeps failing: a land that could not
+/// open the integration worktree will not clear by itself, so it never says the
+/// next pass retries it.
+fn repeated_failure_action(step: &str, error: &str, state_dir: &Path) -> String {
+    if step == "land" && error.contains(OPEN_FAIL) {
+        format!(
+            "this will not clear by itself: free the branch (switch the checkout that holds it to another branch) or start the run on another integration branch; the pass after that lands it. Git's own words are above; the full error is in the log of `shprd serve` and the pass record under {}",
+            state_dir.display()
+        )
+    } else if step == "land" {
+        String::from("the merge is tried again on the next pass")
+    } else {
+        format!("fix what the card names, then the engine retries `{step}` on its next pass")
+    }
+}
+
+/// The failure of opening the integration worktree: git's own reason in the
+/// line a person reads, and the full error for the log.
+fn open_fail(task: &str, branch: &str, err: &integrate::IntegrateError) -> LandFail {
+    let text = err.to_string();
+    let reason = text
+        .lines()
+        .map(str::trim)
+        .rfind(|line| !line.is_empty())
+        .unwrap_or("no reason given");
+    LandFail {
+        line: Some(format!(
+            "Couldn't merge {task}: {OPEN_FAIL} for {branch:?}: {reason}"
+        )),
+        cause: land::tail_lines(&format!("opening the integration worktree: {text}")),
+    }
+}
+
+/// What a clashing landing says: the plain sentence, then the files.
+fn conflict_message(task: &str, err: &LandError) -> String {
+    match err {
+        LandError::Conflict { files, .. } if !files.is_empty() => format!(
+            "{} (files in conflict: {})",
+            err.plain(task),
+            files.join(", ")
+        ),
+        _ => err.plain(task),
+    }
+}
+
+/// What the stale pull request is closed with.
+fn stale_pr_comment(task: &str) -> String {
+    format!(
+        "{task} clashed with work that landed after it was cut. It is being redone on top \
+         of the latest, and the new attempt opens its own pull request."
+    )
+}
+
+/// The settle window `tasks.news_settle_secs` names, in ms, when some settings
+/// layer other than the built-in one sets it.
+///
+/// [`None`] leaves the window the news desk was wired with, so a caller that
+/// handed a pass its own desk (a test, say) keeps it until someone sets the key.
+pub fn settle_override_ms(home: &Path, repo: &Path) -> Option<u64> {
+    use shprd_core::settings::{Key, Source, TaskKey};
+
+    let loaded = shprd_core::settings::Loaded::read(home, Some(repo)).ok()?;
+    let resolved = loaded.resolve(None);
+    let named = resolved
+        .get(&Key::Task(TaskKey::NewsSettleSecs))
+        .is_some_and(|sourced| sourced.source != Source::BuiltIn);
+    named.then(|| resolved.tasks().news_settle_secs.saturating_mul(1_000))
 }
 
 /// The config a pass runs under, and how long the loop should wait before the
@@ -2094,6 +3038,11 @@ pub fn pass_config(home: &Path, repo: &Path, base: &Config) -> (Config, Option<u
     }
     if named(TaskKey::MaxRunning) {
         config.tick.max_running = tasks.max_running;
+    }
+    // Without worktrees every task would work in the one checkout, so the pass
+    // starts them one at a time whatever `tasks.max_running` says.
+    if !tasks.worktrees {
+        config.tick.max_running = config.tick.max_running.min(1);
     }
     // The review's policy is what the send-back and the out-of-rounds card are
     // decided by, so the person's own answer to the brief's `Review rounds` line
@@ -2183,5 +3132,143 @@ pub async fn run(
             _ = tokio::time::sleep(wait) => {}
             _ = &mut shutdown => return,
         }
+    }
+}
+
+/// What a card's status line begins with while a step is refused.
+const WAITING_PREFIX: &str = "Waiting: ";
+
+/// The status line for a step that failed with `reason`.
+fn waiting_message(reason: &str) -> String {
+    let line = format!(
+        "{WAITING_PREFIX}{}",
+        reason.split_whitespace().collect::<Vec<_>>().join(" ")
+    );
+    if line.chars().count() <= shprd_core::event::ENGINE_STATUS_MAX_CHARS {
+        return line;
+    }
+    let mut capped: String = line
+        .chars()
+        .take(shprd_core::event::ENGINE_STATUS_MAX_CHARS - 1)
+        .collect();
+    capped.push('\u{2026}');
+    capped
+}
+
+#[cfg(test)]
+mod waiting_tests {
+    use super::{OPEN_FAIL, open_fail, repeated_failure_action, waiting_message};
+
+    #[test]
+    fn another_refusal_carries_its_reason_capped() {
+        assert_eq!(waiting_message("no host"), "Waiting: no host");
+        assert!(waiting_message(&"x".repeat(500)).chars().count() <= 120);
+    }
+
+    #[test]
+    fn an_unfixable_open_failure_never_says_it_is_tried_again() {
+        let err = shprd_git::integrate::IntegrateError::Git(shprd_git::git::GitError::Failed {
+            args: vec![String::from("worktree"), String::from("add")],
+            code: Some(128),
+            stderr: String::from("fatal: 'prototype' is already checked out at '/repo'"),
+        });
+        let line = open_fail("T1", "prototype", &err).line.unwrap_or_default();
+        let dir = std::path::Path::new("/state");
+        let action = repeated_failure_action("land", &line, dir);
+        assert!(!action.contains("tried again"), "{action}");
+        assert!(action.contains("will not clear by itself"), "{action}");
+        assert!(action.contains("/state"), "{action}");
+        let other = repeated_failure_action("land", "Couldn't merge T1: boom", dir);
+        assert!(other.contains("tried again on the next pass"), "{other}");
+    }
+
+    #[test]
+    fn a_failed_open_of_the_integration_worktree_says_gits_reason_and_that_a_retry_cannot_fix_it() {
+        let err = shprd_git::integrate::IntegrateError::Git(shprd_git::git::GitError::Failed {
+            args: vec![String::from("worktree"), String::from("add")],
+            code: Some(128),
+            stderr: String::from(
+                "Preparing worktree (checking out 'prototype')\nfatal: 'prototype' is already checked out at '/repo'",
+            ),
+        });
+        let fail = open_fail("T1", "prototype", &err);
+        let line = fail.line.unwrap_or_default();
+        assert!(line.starts_with("Couldn't merge T1: "), "{line}");
+        assert!(line.contains(OPEN_FAIL), "{line}");
+        assert!(line.contains("already checked out at '/repo'"), "{line}");
+        assert!(!line.contains("in the shprd log"), "{line}");
+        assert!(fail.cause.contains("opening the integration worktree"));
+    }
+}
+
+#[cfg(test)]
+mod diverged_tests {
+    use super::diverged_events;
+    use shprd_core::event::EventKind;
+    use shprd_core::state::{Escalation, RunState};
+    use shprd_git::integrate::Realign;
+
+    const BODY: &str = "The local `main` has commits the remote lacks: abc1234 fix";
+
+    fn card(seq: u64) -> Escalation {
+        Escalation {
+            task: None,
+            body: BODY.to_string(),
+            default_action: "push".to_string(),
+            seq,
+            by_agent: false,
+        }
+    }
+
+    fn kept() -> Realign {
+        Realign::Kept(vec!["abc1234 fix".to_string()])
+    }
+
+    #[test]
+    fn a_diverged_ref_raises_one_card_and_the_same_set_is_not_told_again() {
+        let mut state = RunState::default();
+        let first = diverged_events("main", &kept(), &state);
+        assert!(
+            matches!(&first[..], [EventKind::Escalated { task: None, body, .. }] if body == BODY)
+        );
+        state.escalations.push(card(5));
+        assert!(diverged_events("main", &kept(), &state).is_empty());
+    }
+
+    #[test]
+    fn a_dismissal_sticks_for_the_same_commits_and_a_new_set_is_a_new_card() {
+        let mut state = RunState::default();
+        state.escalations.push(card(5));
+        state.dismissed_needs.insert(5);
+        assert!(diverged_events("main", &kept(), &state).is_empty());
+        let other = Realign::Kept(vec!["def5678 other".to_string()]);
+        assert_eq!(diverged_events("main", &other, &state).len(), 1);
+    }
+
+    #[test]
+    fn the_engine_retires_the_card_once_the_cause_is_gone() {
+        let mut state = RunState::default();
+        state.escalations.push(card(5));
+        for gone in [Realign::Moved, Realign::Aligned] {
+            let events = diverged_events("main", &gone, &state);
+            assert!(matches!(
+                &events[..],
+                [EventKind::NeedDismissed { need: 5 }]
+            ));
+        }
+        // Not learned anything: nothing is written.
+        assert!(diverged_events("main", &Realign::Unchanged, &state).is_empty());
+        // Already dismissed: not dismissed twice.
+        state.dismissed_needs.insert(5);
+        assert!(diverged_events("main", &Realign::Aligned, &state).is_empty());
+    }
+
+    #[test]
+    fn a_card_the_engine_retired_is_raised_again_when_the_cause_returns() {
+        let mut state = RunState::default();
+        state.escalations.push(card(5));
+        state.dismissed_needs.insert(5);
+        state.retired_needs.insert(5);
+        assert_eq!(diverged_events("main", &kept(), &state).len(), 1);
     }
 }

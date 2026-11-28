@@ -16,9 +16,18 @@ use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use shprd_core::event::{Actor, EventKind};
 use shprd_core::log::{EventLog, SystemClock};
-use shprd_server::{App, WsLimits};
+use shprd_server::{App, Engine, RunVerb, WsLimits};
+
+/// Every `(repo, verb)` a faked binary-side runner was asked for.
+type Calls = std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>;
 use tempfile::TempDir;
 use tower::ServiceExt;
+
+/// The `Host` every fixture request is addressed to.
+///
+/// The gate refuses a request with no `Host` (`421`), so a test that drove the
+/// router without one would be testing the refusal, not the route.
+const HOST: &str = "127.0.0.1:18080";
 
 /// The port the fixtures claim in their `Origin` and `service.json`.
 const PORT: u16 = 18_080;
@@ -151,7 +160,8 @@ impl Call {
     fn request(&self) -> Request<Body> {
         let mut builder = Request::builder()
             .method(self.method.clone())
-            .uri(&self.uri);
+            .uri(&self.uri)
+            .header(header::HOST, HOST);
         if let Some(token) = &self.token {
             builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
         }
@@ -216,6 +226,33 @@ fn task_add(id: &str) -> Value {
         "scope": ["crates/shprd-core"],
         "acceptance": ["it works"],
     })
+}
+
+#[tokio::test]
+async fn a_task_added_without_an_id_gets_the_next_short_one() {
+    let fixture = Fixture::new();
+    let add = |extra: Value| {
+        let mut body = json!({
+            "kind": "task.add", "title": "untitled", "acceptance": ["it works"],
+        });
+        if let (Some(body), Some(extra)) = (body.as_object_mut(), extra.as_object()) {
+            body.extend(extra.clone());
+        }
+        fixture.send(
+            Call::post("/api/action", body)
+                .with_token(&fixture.token)
+                .with_write_header(),
+        )
+    };
+    let first = add(json!({})).await;
+    assert_eq!(first.status, StatusCode::OK);
+    let prefix = shprd_core::settings::task_id_prefix(None, fixture.repo.path());
+    assert_eq!(first.json()["task"]["id"], json!(format!("{prefix}-1")));
+    // A given id is kept, and a long one never blocks the counter.
+    let given = add(json!({"task": "long-slug"})).await;
+    assert_eq!(given.json()["task"]["id"], json!("long-slug"));
+    let second = add(json!({})).await;
+    assert_eq!(second.json()["task"]["id"], json!(format!("{prefix}-2")));
 }
 
 #[tokio::test]
@@ -549,6 +586,60 @@ async fn a_progress_line_is_capped_and_reaches_the_snapshot_and_the_poll() {
 }
 
 #[tokio::test]
+async fn dismissing_a_card_removes_it_and_an_unknown_one_is_refused() {
+    let fixture = Fixture::new();
+    fixture.add_task("T1").await;
+    {
+        let path = fixture.repo.path().join(".shprd").join("events.jsonl");
+        let mut log = EventLog::open(&path).expect("the log opens");
+        log.append(
+            Actor::Engine,
+            EventKind::Escalated {
+                task: Some("T1".to_string()),
+                body: "which branch?".to_string(),
+                default_action: "use main".to_string(),
+            },
+            &SystemClock,
+        )
+        .expect("the card is raised");
+    }
+    let needs = |reply: &Reply| reply.json()["needs"].as_array().expect("needs").clone();
+    let state = fixture
+        .send(Call::get("/api/state").with_token(&fixture.token))
+        .await;
+    let seq = needs(&state)[0]["seq"].as_u64().expect("a seq");
+
+    let unknown = fixture
+        .send(
+            Call::post("/api/action", json!({"kind": "need.dismiss", "seq": 9999}))
+                .with_token(&fixture.token)
+                .with_write_header(),
+        )
+        .await;
+    assert_ne!(unknown.status, StatusCode::OK);
+    assert!(
+        unknown.json()["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("no card number 9999")),
+        "{:?}",
+        unknown.json()
+    );
+
+    let done = fixture
+        .send(
+            Call::post("/api/action", json!({"kind": "need.dismiss", "seq": seq}))
+                .with_token(&fixture.token)
+                .with_write_header(),
+        )
+        .await;
+    assert_eq!(done.status, StatusCode::OK, "{:?}", done.body);
+    let after = fixture
+        .send(Call::get("/api/state").with_token(&fixture.token))
+        .await;
+    assert!(needs(&after).is_empty(), "the card is gone");
+}
+
+#[tokio::test]
 async fn a_status_line_with_no_msg_or_a_bad_percentage_is_refused() {
     let fixture = Fixture::new();
     fixture.add_task("T1").await;
@@ -759,6 +850,105 @@ async fn a_service_write_rewrites_the_graph_document_atomically() {
     assert!(leftovers.is_empty(), "temporary files left: {leftovers:?}");
 }
 
+#[tokio::test]
+async fn the_graph_run_route_answers_the_document_the_block_draws() {
+    let repo = tempfile::tempdir().expect("repo dir");
+    start_run(repo.path());
+    let state = tempfile::tempdir().expect("state dir");
+    let app = App::prepare(
+        repo.path(),
+        PORT,
+        &Actor::Human,
+        state.path(),
+        Some(shprd_server::AfterWrite::new(|repo: &std::path::Path| {
+            project_and_write(repo);
+        })),
+    )
+    .expect("prepare");
+    let token = std::fs::read_to_string(app.info().token_path).expect("the token file");
+    let token = token.trim().to_string();
+
+    // One task, with a dependency, so the answer carries an edge as well as a
+    // node: the drawing is the page's, but the facts have to be there.
+    let mut second = task_add("T2");
+    second["deps"] = json!(["T1"]);
+    for body in [task_add("T1"), second] {
+        let response = app
+            .router()
+            .oneshot(
+                Call::post("/api/action", body)
+                    .with_token(&token)
+                    .with_write_header()
+                    .request(),
+            )
+            .await
+            .expect("answers");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    // The gate is in front of it, like every other read.
+    let refused = app
+        .router()
+        .oneshot(Call::get("/api/graph/run").request())
+        .await
+        .expect("answers");
+    assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+
+    let response = app
+        .router()
+        .oneshot(Call::get("/api/graph/run").with_token(&token).request())
+        .await
+        .expect("answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("the body reads")
+        .to_bytes();
+    let body: Value = serde_json::from_slice(&bytes).expect("the body is JSON");
+
+    let on_disk = read_json(&shprd_server::graph::run_json(repo.path()));
+    assert_eq!(body, on_disk, "the answer is the file, byte for byte");
+    assert_eq!(body["run"]["id"], json!("r1"));
+    let tasks = body["tasks"].as_array().expect("tasks");
+    assert_eq!(tasks.len(), 2);
+    assert_eq!(
+        tasks[1]["deps"],
+        json!(["T1"]),
+        "the edge is in the document"
+    );
+}
+
+#[tokio::test]
+async fn a_graph_run_with_no_document_is_a_typed_404() {
+    let fixture = Fixture::new();
+    let reply = fixture
+        .send(Call::get("/api/graph/run").with_token(&fixture.token))
+        .await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND);
+    assert_eq!(reply.code(), "not_found");
+    let message = reply.json()["message"].as_str().expect("a message");
+    assert!(message.contains("run.json"), "{message}");
+    assert!(message.contains("no run document"), "{message}");
+}
+
+#[tokio::test]
+async fn a_file_that_is_not_a_run_document_is_refused_not_drawn() {
+    let fixture = Fixture::new();
+    let graph = fixture.repo.path().join(".dagr");
+    std::fs::create_dir_all(&graph).expect("the graph folder");
+    std::fs::write(graph.join("run.json"), "{\"hello\": 1}").expect("the file");
+
+    let reply = fixture
+        .send(Call::get("/api/graph/run").with_token(&fixture.token))
+        .await;
+    assert_eq!(reply.status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(reply.code(), "internal");
+    let message = reply.json()["message"].as_str().expect("a message");
+    assert!(message.contains("not a dagr run document"), "{message}");
+}
+
 /// What `shprd dagr sync` does after a write: fold the log, project it and write
 /// the document through the one atomic writer.
 fn project_and_write(repo: &std::path::Path) {
@@ -817,6 +1007,20 @@ async fn a_malformed_action_is_a_typed_refusal() {
         assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{body}");
         assert_eq!(reply.code(), "bad_request", "{body}");
     }
+    // A drop with no reason says what is missing, not serde's own text.
+    let drop = fixture
+        .send(
+            Call::post("/api/action", json!({"kind": "task.drop", "task": "T1"}))
+                .with_token(&fixture.token)
+                .with_write_header(),
+        )
+        .await;
+    let message = drop.json()["message"]
+        .as_str()
+        .expect("a message")
+        .to_string();
+    assert!(message.contains("needs a reason"), "{message}");
+    assert!(!message.contains("missing field"), "{message}");
 }
 
 #[tokio::test]
@@ -1161,4 +1365,845 @@ where
         .expect("the frame is a message");
     let text = message.into_text().expect("a text frame");
     serde_json::from_str(text.as_str()).expect("the frame is JSON")
+}
+
+/// A repository whose task `T7` failed its review twice: the rounds are spent
+/// and the card (`review-out-2`) is open.
+fn spent_review_repo() -> TempDir {
+    use shprd_core::event::{CheckReport, Finding, ReportStatus, ReviewSource, Severity};
+    let repo = tempfile::tempdir().expect("repo dir");
+    start_run(repo.path());
+    let path = repo.path().join(".shprd").join("events.jsonl");
+    let mut log = EventLog::open(&path).expect("the log opens");
+    put(
+        &mut log,
+        Actor::Human,
+        EventKind::TaskAdded {
+            task: "T7".into(),
+            title: "t7".into(),
+            scope: vec!["tcalc".into()],
+            acceptance: vec!["it works".into()],
+            tags: Vec::new(),
+            skills: Vec::new(),
+            deps: Vec::new(),
+        },
+    );
+    for attempt in 1..=2u32 {
+        put(
+            &mut log,
+            Actor::Engine,
+            EventKind::Spawned {
+                task: "T7".into(),
+                attempt,
+                agent: "claude".into(),
+                model: None,
+                worktree: "/wt/T7".into(),
+                branch: "shprd/r1/T7".into(),
+            },
+        );
+        put(
+            &mut log,
+            Actor::Agent {
+                id: "claude".into(),
+            },
+            EventKind::Reported {
+                task: "T7".into(),
+                attempt,
+                status: ReportStatus::Completed,
+                summary: "done".into(),
+                tests: Vec::new(),
+                checks: vec![CheckReport {
+                    gate: "tests".into(),
+                    command: "cargo test".into(),
+                    exit_code: Some(0),
+                    output_tail: String::new(),
+                    pre_existing: None,
+                }],
+                changed_paths: Vec::new(),
+                commit: Some("abc123".into()),
+                skills_used: Vec::new(),
+                proofs: Vec::new(),
+            },
+        );
+        let request_seq = put_review_requested(&mut log, attempt);
+        put(
+            &mut log,
+            Actor::Engine,
+            EventKind::GateFailed {
+                task: "T7".into(),
+                attempt,
+                gate: "review".into(),
+                findings: vec![Finding {
+                    severity: Severity::Major,
+                    title: "outside scope".into(),
+                    location: None,
+                    detail: String::new(),
+                }],
+                source: Some(ReviewSource {
+                    reviewer: "codex".into(),
+                    findings_sha256:
+                        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad".into(),
+                    request_seq,
+                }),
+            },
+        );
+    }
+    let ask = shprd_core::gate::rounds_spent_ask(2);
+    let body = "T7: its review of attempt 2 failed 2 time(s) and no round is left".to_string();
+    log.append(
+        Actor::Engine,
+        EventKind::AskRaised {
+            task: "T7".into(),
+            ask: ask.clone(),
+            ask_kind: shprd_core::ask::AskKind::Question,
+            text: body.clone(),
+            options: shprd_core::gate::ROUNDS_SPENT_OPTIONS
+                .iter()
+                .map(|choice| (*choice).to_string())
+                .collect(),
+            created_at_ms: 1,
+            expires_at_ms: None,
+        },
+        &SystemClock,
+    )
+    .expect("raise");
+    shprd_core::ask::AskQueue::for_repo(repo.path())
+        .raise(
+            &shprd_core::ask::Ask::new(ask, "T7", shprd_core::ask::AskKind::Question, body, 1)
+                .with_options(
+                    shprd_core::gate::ROUNDS_SPENT_OPTIONS
+                        .iter()
+                        .map(|choice| (*choice).to_string())
+                        .collect(),
+                ),
+        )
+        .expect("the ask file");
+    repo
+}
+
+/// Appends one event to `log`.
+fn put(log: &mut EventLog, actor: Actor, kind: EventKind) {
+    log.append(actor, kind, &SystemClock).expect("append");
+}
+
+/// Records a review request for `attempt` and returns its seq.
+fn put_review_requested(log: &mut EventLog, attempt: u32) -> u64 {
+    log.append(
+        Actor::Engine,
+        EventKind::ReviewRequested {
+            task: "T7".into(),
+            attempt,
+            reviewer: "codex".into(),
+            degraded: false,
+            note: None,
+        },
+        &SystemClock,
+    )
+    .expect("request")
+    .seq
+}
+
+/// Answers the spent-review card and returns the folded run.
+async fn answer_spent_card(answer: &str) -> (Fixture, shprd_core::state::RunState) {
+    let fixture = Fixture::prepared(spent_review_repo(), tempfile::tempdir().expect("state"));
+    let reply = fixture
+        .send(
+            Call::post(
+                "/api/asks/answer",
+                json!({"task": "T7", "ask": "review-out-2", "answer": answer}),
+            )
+            .with_token(&fixture.token)
+            .with_write_header(),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+    let events = EventLog::read_all(&fixture.repo.path().join(".shprd").join("events.jsonl"))
+        .expect("read the log")
+        .events;
+    let state = shprd_core::state::RunState::fold(&events).expect("folds");
+    (fixture, state)
+}
+
+#[tokio::test]
+async fn taking_a_spent_review_as_it_is_records_the_override_that_lets_it_land() {
+    let (_fixture, state) = answer_spent_card("take it as it is").await;
+    let task = state.tasks.get("T7").expect("T7");
+    assert!(
+        task.overrides
+            .iter()
+            .any(|record| record.rule == shprd_core::rules::INTEGRATE_AFTER_FAILED_GATE),
+        "the answer is the override: {:?}",
+        task.overrides
+    );
+    assert!(
+        shprd_core::rules::ready_to_land(task).is_ok(),
+        "the task can now land: {:?}",
+        shprd_core::rules::ready_to_land(task)
+    );
+}
+
+#[tokio::test]
+async fn dropping_a_spent_review_drops_the_task() {
+    let (_fixture, state) = answer_spent_card("drop it").await;
+    assert_eq!(
+        state.tasks.get("T7").expect("T7").status,
+        shprd_core::state::TaskStatus::Dropped
+    );
+}
+
+#[tokio::test]
+async fn retrying_a_spent_review_records_no_override() {
+    let (_fixture, state) = answer_spent_card("retry with another round").await;
+    let task = state.tasks.get("T7").expect("T7");
+    assert!(task.overrides.is_empty());
+    assert_ne!(task.status, shprd_core::state::TaskStatus::Dropped);
+}
+
+/// A repository whose `T1` (scope `tcalc/ops.py`) holds the open card an older
+/// build raised for a refused hand-in: `hand-in-refused-1-1`, as its log wrote it.
+fn refused_hand_in_repo() -> TempDir {
+    let repo = tempfile::tempdir().expect("repo dir");
+    start_run(repo.path());
+    let path = repo.path().join(".shprd").join("events.jsonl");
+    let mut log = EventLog::open(&path).expect("the log opens");
+    put(
+        &mut log,
+        Actor::Human,
+        EventKind::TaskAdded {
+            task: "T1".into(),
+            title: "t1".into(),
+            scope: vec!["tcalc/ops.py".into()],
+            acceptance: vec!["add a test in tests/".into()],
+            tags: Vec::new(),
+            skills: Vec::new(),
+            deps: Vec::new(),
+        },
+    );
+    put(
+        &mut log,
+        Actor::Engine,
+        EventKind::Spawned {
+            task: "T1".into(),
+            attempt: 1,
+            agent: "claude".into(),
+            model: None,
+            worktree: "/wt/T1".into(),
+            branch: "shprd/r1/T1".into(),
+        },
+    );
+    let ask = String::from("hand-in-refused-1-1");
+    let body = String::from(
+        "T1: the engine refused attempt 1's hand-in, so nothing was recorded: path outside scope",
+    );
+    let options = vec![
+        String::from("widen the scope to tests/test_ops.py"),
+        String::from("send it back to a new attempt"),
+    ];
+    put(
+        &mut log,
+        Actor::Agent {
+            id: "claude".into(),
+        },
+        EventKind::AskRaised {
+            task: "T1".into(),
+            ask: ask.clone(),
+            ask_kind: shprd_core::ask::AskKind::Question,
+            text: body.clone(),
+            options: options.clone(),
+            created_at_ms: 1,
+            expires_at_ms: None,
+        },
+    );
+    shprd_core::ask::AskQueue::for_repo(repo.path())
+        .raise(
+            &shprd_core::ask::Ask::new(ask, "T1", shprd_core::ask::AskKind::Question, body, 1)
+                .with_options(options),
+        )
+        .expect("the ask file");
+    repo
+}
+
+#[tokio::test]
+async fn an_old_open_scope_card_is_never_listed() {
+    let fixture = Fixture::prepared(refused_hand_in_repo(), tempfile::tempdir().expect("state"));
+    for uri in ["/api/asks", "/api/state"] {
+        let reply = fixture
+            .send(Call::get(uri).with_token(&fixture.token))
+            .await;
+        assert_eq!(reply.status, StatusCode::OK, "{uri}: {:?}", reply.body);
+        let text = format!("{:?}", reply.body);
+        assert!(
+            !text.contains("hand-in-refused-1-1"),
+            "{uri} lists the moot card: {text}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn review_again_on_a_stuck_review_needs_a_host_and_consumes_nothing_without_one() {
+    let repo = refused_hand_in_repo();
+    let ask = shprd_core::review::stuck_ask(1, 1);
+    let options = shprd_core::review::stuck_options();
+    let path = repo.path().join(".shprd").join("events.jsonl");
+    let mut log = EventLog::open(&path).expect("open");
+    put(
+        &mut log,
+        Actor::Engine,
+        EventKind::AskRaised {
+            task: "T1".into(),
+            ask: ask.clone(),
+            ask_kind: shprd_core::ask::AskKind::Question,
+            text: "stuck".into(),
+            options: options.clone(),
+            created_at_ms: 2,
+            expires_at_ms: None,
+        },
+    );
+    shprd_core::ask::AskQueue::for_repo(repo.path())
+        .raise(
+            &shprd_core::ask::Ask::new(
+                ask.clone(),
+                "T1",
+                shprd_core::ask::AskKind::Question,
+                "stuck",
+                2,
+            )
+            .with_options(options),
+        )
+        .expect("the ask file");
+    let fixture = Fixture::prepared(repo, tempfile::tempdir().expect("state"));
+    let reply = fixture
+        .send(
+            Call::post(
+                "/api/asks/answer",
+                json!({"task": "T1", "ask": ask, "answer": "review again"}),
+            )
+            .with_token(&fixture.token)
+            .with_write_header(),
+        )
+        .await;
+    assert_ne!(reply.status, StatusCode::OK, "{:?}", reply.body);
+    let events = EventLog::read_all(&path).expect("read").events;
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::AskAnswered { .. })),
+        "the card is still open"
+    );
+}
+
+#[tokio::test]
+async fn review_again_on_a_stuck_review_starts_a_new_review_when_the_service_has_a_host() {
+    let repo = refused_hand_in_repo();
+    let ask = shprd_core::review::stuck_ask(1, 1);
+    let options = shprd_core::review::stuck_options();
+    let path = repo.path().join(".shprd").join("events.jsonl");
+    let mut log = EventLog::open(&path).expect("open");
+    put(
+        &mut log,
+        Actor::Engine,
+        EventKind::AskRaised {
+            task: "T1".into(),
+            ask: ask.clone(),
+            ask_kind: shprd_core::ask::AskKind::Question,
+            text: "stuck".into(),
+            options: options.clone(),
+            created_at_ms: 2,
+            expires_at_ms: None,
+        },
+    );
+    shprd_core::ask::AskQueue::for_repo(repo.path())
+        .raise(
+            &shprd_core::ask::Ask::new(
+                ask.clone(),
+                "T1",
+                shprd_core::ask::AskKind::Question,
+                "stuck",
+                2,
+            )
+            .with_options(options),
+        )
+        .expect("the ask file");
+    let mut fixture = Fixture::prepared(repo, tempfile::tempdir().expect("state"));
+    let reviewed = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let seen = reviewed.clone();
+    let engine = shprd_server::Engine::new(std::sync::Arc::new(
+        |_repo: &std::path::Path, task: &str| Ok(task.to_string()),
+    ))
+    .with_review_again(std::sync::Arc::new(
+        move |_repo: &std::path::Path, task: &str| {
+            seen.lock().expect("lock").push(task.to_string());
+            Ok("started a review".to_string())
+        },
+    ));
+    fixture.app = fixture.app.with_engine(engine);
+    let reply = fixture
+        .send(
+            Call::post(
+                "/api/asks/answer",
+                json!({"task": "T1", "ask": ask, "answer": "review again"}),
+            )
+            .with_token(&fixture.token)
+            .with_write_header(),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+    assert_eq!(*reviewed.lock().expect("lock"), vec!["T1".to_string()]);
+}
+
+/// Runs `git` in `dir`, panicking on failure (tests only).
+fn git_in(dir: &std::path::Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git")
+        .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .expect("git runs");
+    assert!(out.status.success(), "git {args:?}: {out:?}");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+#[tokio::test]
+async fn the_first_task_in_a_fresh_repo_starts_a_run() {
+    // Major 12 of SHPR-54's QA: `+` in a repo with no run was refused with
+    // "no run has started". The add now starts one on the checked-out branch.
+    let repo = tempfile::tempdir().expect("repo dir");
+    git_in(repo.path(), &["init", "-b", "trunk"]);
+    git_in(repo.path(), &["commit", "--allow-empty", "-m", "seed"]);
+    let fixture = Fixture::prepared(repo, tempfile::tempdir().expect("state dir"));
+    let reply = fixture.add_task("T1").await;
+    assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+
+    let state = fixture
+        .send(Call::get("/api/state").with_token(&fixture.token))
+        .await;
+    let snapshot = state.json();
+    assert!(snapshot["run"].is_object(), "a run started: {snapshot}");
+    assert_eq!(snapshot["run"]["base_branch"], json!("trunk"), "{snapshot}");
+    let integration = snapshot["run"]["integration_branch"]
+        .as_str()
+        .expect("an integration branch")
+        .to_string();
+    let branches = git_in(fixture.repo.path(), &["branch", "--list", &integration]);
+    assert!(!branches.is_empty(), "the integration branch was made");
+
+    // A second task adds to the same run.
+    let again = fixture.add_task("T2").await;
+    assert_eq!(again.status, StatusCode::OK, "{:?}", again.body);
+}
+
+#[tokio::test]
+async fn a_task_in_a_repo_with_no_commit_is_refused_in_plain_words() {
+    let repo = tempfile::tempdir().expect("repo dir");
+    git_in(repo.path(), &["init", "-b", "trunk"]);
+    let fixture = Fixture::prepared(repo, tempfile::tempdir().expect("state dir"));
+    let reply = fixture.add_task("T1").await;
+    assert_eq!(reply.status, StatusCode::CONFLICT, "{:?}", reply.body);
+    let message = reply.json()["message"].as_str().unwrap_or("").to_string();
+    assert!(
+        message.contains("no commit") || message.contains("commit to base"),
+        "{message}"
+    );
+    assert!(
+        !message.contains("shprd run start"),
+        "names no command: {message}"
+    );
+}
+
+/// A repository with task `T1` and an open `propose-drop-1` card on it, the
+/// shape `shprd agent propose drop T1 --reason stuck` raises.
+fn drop_proposal_repo() -> TempDir {
+    let repo = tempfile::tempdir().expect("repo dir");
+    start_run(repo.path());
+    let path = repo.path().join(".shprd").join("events.jsonl");
+    let mut log = EventLog::open(&path).expect("the log opens");
+    put(
+        &mut log,
+        Actor::Human,
+        EventKind::TaskAdded {
+            task: "T1".into(),
+            title: "t1".into(),
+            scope: vec!["src".into()],
+            acceptance: vec!["it works".into()],
+            tags: Vec::new(),
+            skills: Vec::new(),
+            deps: Vec::new(),
+        },
+    );
+    let ask = "propose-drop-1".to_string();
+    let body = "T1: run `drop`?\nreason: stuck".to_string();
+    let options = vec!["confirm drop".to_string(), "leave it".to_string()];
+    put(
+        &mut log,
+        Actor::Agent {
+            id: "claude".into(),
+        },
+        EventKind::AskRaised {
+            task: "T1".into(),
+            ask: ask.clone(),
+            ask_kind: shprd_core::ask::AskKind::Question,
+            text: body.clone(),
+            options: options.clone(),
+            created_at_ms: 1,
+            expires_at_ms: None,
+        },
+    );
+    shprd_core::ask::AskQueue::for_repo(repo.path())
+        .raise(
+            &shprd_core::ask::Ask::new(ask, "T1", shprd_core::ask::AskKind::Question, body, 1)
+                .with_options(options),
+        )
+        .expect("the ask file");
+    repo
+}
+
+/// Answers the drop proposal on `fixture` and returns the reply and the events.
+async fn answer_drop_proposal(
+    fixture: &Fixture,
+    answer: &str,
+) -> (Reply, Vec<shprd_core::event::Event>) {
+    let reply = fixture
+        .send(
+            Call::post(
+                "/api/asks/answer",
+                json!({"task": "T1", "ask": "propose-drop-1", "answer": answer}),
+            )
+            .with_token(&fixture.token)
+            .with_write_header(),
+        )
+        .await;
+    let events = EventLog::read_all(&fixture.repo.path().join(".shprd").join("events.jsonl"))
+        .expect("read the log")
+        .events;
+    (reply, events)
+}
+
+#[tokio::test]
+async fn confirming_a_proposal_card_runs_the_verb_once_as_the_person() {
+    let fixture = Fixture::prepared(drop_proposal_repo(), tempfile::tempdir().expect("state"));
+    let (reply, events) = answer_drop_proposal(&fixture, "confirm drop").await;
+    assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+    let drops: Vec<_> = events
+        .iter()
+        .filter(|event| matches!(&event.kind, EventKind::TaskDropped { .. }))
+        .collect();
+    assert_eq!(drops.len(), 1, "the verb ran once");
+    assert_eq!(drops[0].actor, Actor::Human);
+    match &drops[0].kind {
+        EventKind::TaskDropped { task, reason } => {
+            assert_eq!(task, "T1");
+            assert_eq!(reason, "stuck", "the card's reason is the drop's");
+        }
+        other => panic!("not a drop: {other:?}"),
+    }
+    // Answering the same card again is refused and runs nothing more.
+    let (again, events) = answer_drop_proposal(&fixture, "confirm drop").await;
+    assert_ne!(again.status, StatusCode::OK, "{:?}", again.body);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(&event.kind, EventKind::TaskDropped { .. }))
+            .count(),
+        1,
+        "a second confirmation runs nothing"
+    );
+}
+
+#[tokio::test]
+async fn declining_a_proposal_card_writes_no_verb_event() {
+    let fixture = Fixture::prepared(drop_proposal_repo(), tempfile::tempdir().expect("state"));
+    let (reply, events) = answer_drop_proposal(&fixture, "leave it").await;
+    assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(&event.kind, EventKind::TaskDropped { .. })),
+        "declining drops nothing"
+    );
+    let state = shprd_core::state::RunState::fold(&events).expect("folds");
+    assert_ne!(
+        state.tasks.get("T1").expect("T1").status,
+        shprd_core::state::TaskStatus::Dropped
+    );
+}
+
+#[tokio::test]
+async fn an_agent_answering_a_proposal_card_is_refused_and_runs_nothing() {
+    let repo = drop_proposal_repo();
+    let state = tempfile::tempdir().expect("state");
+    let app = App::prepare(
+        repo.path(),
+        PORT,
+        &Actor::Agent {
+            id: "claude".into(),
+        },
+        state.path(),
+        None,
+    )
+    .expect("prepare");
+    let info = app.info();
+    let token = std::fs::read_to_string(&info.token_path).expect("the token file");
+    let fixture = Fixture {
+        token: token.trim().to_string(),
+        id: info.id,
+        app,
+        state,
+        repo,
+    };
+    let (reply, events) = answer_drop_proposal(&fixture, "confirm drop").await;
+    assert_ne!(reply.status, StatusCode::OK, "{:?}", reply.body);
+    assert!(
+        !events.iter().any(|event| matches!(
+            &event.kind,
+            EventKind::TaskDropped { .. } | EventKind::AskAnswered { .. }
+        )),
+        "nothing ran and the card is still open"
+    );
+}
+
+/// A repository whose run can close: base and integration branch are one branch,
+/// so there is no pull request to wait for, and its one task has landed.
+///
+/// It carries the `propose-close-1` card `shprd agent propose close T1 --reason
+/// …` raises, the shape a board draws in T1's timeline.
+fn close_proposal_repo() -> TempDir {
+    let repo = tempfile::tempdir().expect("repo dir");
+    let path = repo.path().join(".shprd").join("events.jsonl");
+    let mut log = EventLog::open(&path).expect("the log opens");
+    put(
+        &mut log,
+        Actor::Human,
+        EventKind::RunStarted {
+            run_id: "r1".into(),
+            repo: repo.path().display().to_string(),
+            base_branch: "prototype".into(),
+            integration_branch: "prototype".into(),
+        },
+    );
+    put(
+        &mut log,
+        Actor::Human,
+        EventKind::TaskAdded {
+            task: "T1".into(),
+            title: "t1".into(),
+            scope: vec!["src".into()],
+            acceptance: vec!["it works".into()],
+            tags: Vec::new(),
+            skills: Vec::new(),
+            deps: Vec::new(),
+        },
+    );
+    let ask = "propose-close-1".to_string();
+    let body = "T1: the run's work is done: run `run close`?\nreason: all landed\nthis ends the run rather than the task, and a new run can start after it".to_string();
+    let options = vec!["confirm run close".to_string(), "leave it".to_string()];
+    put(
+        &mut log,
+        Actor::Agent {
+            id: "claude".into(),
+        },
+        EventKind::AskRaised {
+            task: "T1".into(),
+            ask: ask.clone(),
+            ask_kind: shprd_core::ask::AskKind::Question,
+            text: body.clone(),
+            options: options.clone(),
+            created_at_ms: 1,
+            expires_at_ms: None,
+        },
+    );
+    shprd_core::ask::AskQueue::for_repo(repo.path())
+        .raise(
+            &shprd_core::ask::Ask::new(ask, "T1", shprd_core::ask::AskKind::Question, body, 1)
+                .with_options(options),
+        )
+        .expect("the ask file");
+    repo
+}
+
+/// Answers the close proposal on `fixture` and returns the reply and the events.
+async fn answer_close_proposal(fixture: &Fixture) -> (Reply, Vec<shprd_core::event::Event>) {
+    let reply = fixture
+        .send(
+            Call::post(
+                "/api/asks/answer",
+                json!({"task": "T1", "ask": "propose-close-1", "answer": "confirm run close"}),
+            )
+            .with_token(&fixture.token)
+            .with_write_header(),
+        )
+        .await;
+    let events = EventLog::read_all(&fixture.repo.path().join(".shprd").join("events.jsonl"))
+        .expect("read the log")
+        .events;
+    (reply, events)
+}
+
+/// A service whose binary-side runner is a closure, the way every test drives a
+/// spawn or a stop: the run's verbs are the binary's, so a test hands it a fake
+/// rather than running `shprd` from a test process.
+fn with_run_verb(fixture: Fixture, answer: Result<(), &'static str>) -> (Fixture, Calls) {
+    let seen: Calls = std::sync::Arc::default();
+    let recorder = std::sync::Arc::clone(&seen);
+    let run: RunVerb = std::sync::Arc::new(move |repo: &std::path::Path, verb: &str| {
+        recorder
+            .lock()
+            .expect("the lock")
+            .push((repo.display().to_string(), verb.to_string()));
+        answer.map_err(str::to_string)?;
+        // The real verb records the run's end in the log; the fake does the
+        // same, so a test reads the ledger the binary would have left.
+        if verb == "run close" {
+            let mut log = EventLog::open(&repo.join(".shprd").join("events.jsonl"))
+                .map_err(|err| err.to_string())?;
+            log.append(
+                Actor::Human,
+                EventKind::RunFinished {
+                    abandoned: Vec::new(),
+                },
+                &SystemClock,
+            )
+            .map_err(|err| err.to_string())?;
+        }
+        Ok(())
+    });
+    let app = fixture
+        .app
+        .with_engine(Engine::new(std::sync::Arc::new(|_, _| Ok(String::new()))).with_run_verb(run));
+    (
+        Fixture {
+            app,
+            token: fixture.token,
+            id: fixture.id,
+            state: fixture.state,
+            repo: fixture.repo,
+        },
+        seen,
+    )
+}
+
+#[tokio::test]
+async fn the_close_card_is_on_the_board_and_its_confirmation_ends_the_run() {
+    let repo = close_proposal_repo();
+    let (fixture, ran) = with_run_verb(
+        Fixture::prepared(repo, tempfile::tempdir().expect("state")),
+        Ok(()),
+    );
+    // The card reaches the board: it is one of the asks a client draws, with the
+    // one choice that runs the run's close.
+    let listed = fixture
+        .send(Call::get("/api/asks").with_token(&fixture.token))
+        .await;
+    assert_eq!(listed.status, StatusCode::OK, "{:?}", listed.body);
+    let shown = listed.json()["asks"]
+        .as_array()
+        .expect("the asks array")
+        .iter()
+        .find(|ask| ask["id"] == "propose-close-1")
+        .expect("the close card is on the board");
+    assert!(
+        shown["options"]
+            .as_array()
+            .expect("the options")
+            .iter()
+            .any(|option| option == "confirm run close"),
+        "the board offers the button: {shown}"
+    );
+
+    // Confirming it runs the person's own verb, which the rules accept because
+    // base and integration are one branch: there is nothing to carry.
+    let (reply, events) = answer_close_proposal(&fixture).await;
+    assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+    assert_eq!(
+        ran.lock().expect("the lock").as_slice(),
+        &[(
+            fixture.repo.path().display().to_string(),
+            "run close".to_string()
+        )],
+        "the confirmation runs the person's own `run close`, once"
+    );
+    let finished: Vec<_> = events
+        .iter()
+        .filter(|event| matches!(&event.kind, EventKind::RunFinished { .. }))
+        .collect();
+    assert_eq!(finished.len(), 1, "the run closed once");
+    assert_eq!(finished[0].actor, Actor::Human, "the person's own verb");
+    assert!(
+        matches!(&finished[0].kind, EventKind::RunFinished { abandoned } if abandoned.is_empty()),
+        "a close abandons nothing: {:?}",
+        finished[0].kind
+    );
+    let state = shprd_core::state::RunState::fold(&events).expect("folds");
+    assert!(state.finished, "the run is over, so a new one can start");
+}
+
+#[tokio::test]
+async fn a_close_card_whose_work_is_unfinished_is_refused_with_the_tasks_named() {
+    let repo = close_proposal_repo();
+    // A task still in flight: `run close` refuses, and the answer says why.
+    let mut log = EventLog::open(&repo.path().join(".shprd").join("events.jsonl")).expect("log");
+    put(
+        &mut log,
+        Actor::Human,
+        EventKind::TaskAdded {
+            task: "T2".into(),
+            title: "t2".into(),
+            scope: vec!["src/other".into()],
+            acceptance: vec!["it works".into()],
+            tags: Vec::new(),
+            skills: Vec::new(),
+            deps: Vec::new(),
+        },
+    );
+    let (fixture, ran) = with_run_verb(
+        Fixture::prepared(repo, tempfile::tempdir().expect("state")),
+        Err("refusing to end run r1\n1 task(s) unfinished:\n  T2  queued"),
+    );
+    let (reply, events) = answer_close_proposal(&fixture).await;
+    assert_ne!(reply.status, StatusCode::OK, "{:?}", reply.body);
+    let message = reply.json()["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("T2"),
+        "the refusal names the unfinished task: {message}"
+    );
+    assert_eq!(
+        ran.lock().expect("the lock").len(),
+        1,
+        "the run's own verb was asked, and it is the one that refused"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(&event.kind, EventKind::RunFinished { .. })),
+        "a refused close ends nothing"
+    );
+}
+
+#[tokio::test]
+async fn an_answer_that_is_not_a_choice_is_refused_and_the_card_stays_open() {
+    let fixture = Fixture::prepared(spent_review_repo(), tempfile::tempdir().expect("state"));
+    let reply = fixture
+        .send(
+            Call::post(
+                "/api/asks/answer",
+                json!({"task": "T7", "ask": "review-out-2", "answer": "take it"}),
+            )
+            .with_token(&fixture.token)
+            .with_write_header(),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{:?}", reply.body);
+    assert!(
+        format!("{:?}", reply.body).contains("take it as it is"),
+        "the refusal lists the choices: {:?}",
+        reply.body
+    );
+    let events = EventLog::read_all(&fixture.repo.path().join(".shprd").join("events.jsonl"))
+        .expect("read the log")
+        .events;
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::AskAnswered { .. })),
+        "nothing was recorded"
+    );
 }

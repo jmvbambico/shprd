@@ -27,6 +27,7 @@ use shprd_core::ask::AskKind;
 use shprd_core::event::ReportStatus;
 use shprd_core::state::{RunState, Task, TaskStatus};
 
+use crate::cards::CardKind;
 use crate::clock;
 
 /// How long a problem or a quiet agent lasts before the task reads Needs you,
@@ -67,6 +68,10 @@ pub const MERGING: &str = "Merging";
 
 /// What a ready task in the forge's merge queue says (`agents.py:101`).
 pub const IN_QUEUE_LINE: &str = "In GitHub's merge queue";
+
+/// What a ready task that the engine lands by itself says: its merge policy is
+/// `auto` and nothing about it is the person's, so it is not "For you".
+pub const LANDING: &str = "Landing";
 
 /// What a ready task whose merge waits on a review says (`agents.py:102`).
 pub const APPROVAL_LINE: &str = "Merges once it's approved";
@@ -141,6 +146,37 @@ impl DerivedStatus {
             Self::Ready => '✓',
             Self::Merging => '↻',
             Self::Done => '✔',
+        }
+    }
+}
+
+impl Derived {
+    /// Whether the person is the one this row waits on.
+    ///
+    /// A row that reads Needs you for something the engine found (a failing
+    /// check, a review that could not start or spent its rounds, a clash, a
+    /// stopped agent, a provider that gave up) is the coordinator's to settle
+    /// with the verbs it has, and says so to the person in a line. It stays on
+    /// the row for them to see but is not counted as theirs. Only an agent's
+    /// question is theirs.
+    pub fn is_for_you(&self) -> bool {
+        match self.status {
+            DerivedStatus::NeedsYou => !matches!(
+                self.needs,
+                Some(Need::Attention | Need::Reply | Need::Stopped | Need::Provider)
+            ),
+            _ => true,
+        }
+    }
+
+    /// This row, read for a task the engine lands by itself: a Ready row is
+    /// Landing (a merge under way), never something for the person.
+    #[must_use]
+    pub fn landing_by_engine(self) -> Self {
+        if self.status == DerivedStatus::Ready {
+            Self::new(DerivedStatus::Merging, None, Some(LANDING.to_string()))
+        } else {
+            self
         }
     }
 }
@@ -408,6 +444,9 @@ pub struct TaskSignal {
     /// Agent stopped*, not a failed attempt's own words (M7a §5, `agents.py:170`):
     /// nothing the attempt said is the reason, the person's own stop is.
     pub stopped: bool,
+    /// True when a person accepted the newest failure
+    /// (`shprd_core::rules::accepted_after_failure`): the task then reads Ready.
+    pub accepted_failure: bool,
     /// Why a person dropped it, when one did.
     pub dropped_reason: Option<String>,
     /// Asks still waiting for the person, oldest first.
@@ -432,6 +471,8 @@ pub struct TaskSignal {
 pub struct CardFacts {
     /// What needs deciding, in the card's own words.
     pub body: String,
+    /// Whether the person chooses or is only told: a notice never needs them.
+    pub kind: CardKind,
 }
 
 impl Default for TaskSignal {
@@ -451,6 +492,7 @@ impl Default for TaskSignal {
             merge: MergeFacts::default(),
             failure: None,
             stopped: false,
+            accepted_failure: false,
             dropped_reason: None,
             open_asks: Vec::new(),
             cards: Vec::new(),
@@ -468,6 +510,11 @@ impl TaskSignal {
     /// escalation still sitting in the state. A caller with those facts sets
     /// the fields.
     pub fn from_state(state: &RunState, id: &str) -> Option<Self> {
+        Self::from_state_at(state, id, crate::cards::wall_ms())
+    }
+
+    /// [`Self::from_state`] read at `now_ms`: the time a clash notice is aged against.
+    pub fn from_state_at(state: &RunState, id: &str, now_ms: u64) -> Option<Self> {
         let task = state.tasks.get(id)?;
         Some(Self {
             status: task.status,
@@ -475,11 +522,15 @@ impl TaskSignal {
             wait: reported_wait(task),
             failure: failure_reason(task),
             stopped: task.latest_attempt().is_some_and(|attempt| attempt.stopped),
+            accepted_failure: shprd_core::rules::accepted_after_failure(task),
             dropped_reason: task.dropped_reason.clone(),
             open_asks: state
                 .asks
                 .values()
                 .filter(|ask| ask.task == id && ask.answer.is_none())
+                .filter(|_| !matches!(task.status, TaskStatus::Integrated | TaskStatus::Dropped))
+                .filter(|ask| !ask.is_retired_by_newer_attempt(task))
+                .filter(|ask| !shprd_core::ask::is_scope_card(&ask.id))
                 .map(|ask| AskFacts {
                     kind: ask.kind,
                     text: ask.text.clone(),
@@ -490,8 +541,11 @@ impl TaskSignal {
                 .escalations
                 .iter()
                 .filter(|escalation| escalation.task.as_deref() == Some(id))
-                .filter_map(|escalation| crate::cards::card(state, escalation))
-                .map(|card| CardFacts { body: card.body })
+                .filter_map(|escalation| crate::cards::card_at(state, escalation, now_ms))
+                .map(|card| CardFacts {
+                    body: card.body,
+                    kind: card.kind,
+                })
                 .collect(),
             ..Self::default()
         })
@@ -536,12 +590,16 @@ fn reported_wait(task: &Task) -> Option<String> {
                 .unwrap_or(0)
         })
         .unwrap_or(0);
-    let asked = task
+    let request = task
         .latest_attempt()
-        .and_then(|attempt| attempt.reviews.last())
-        .map_or(0, |request| request.seq);
+        .and_then(|attempt| attempt.reviews.last());
+    let asked = request.map_or(0, |request| request.seq);
     Some(if asked > answered {
-        "In review".to_string()
+        // A review the engine moved to the next reviewer says why, plainly.
+        match request.and_then(|request| request.note.as_deref()) {
+            Some(note) => shprd_core::review::short_note(note),
+            None => "In review".to_string(),
+        }
     } else {
         "Running its gates".to_string()
     })
@@ -601,7 +659,12 @@ pub fn derive_status(signal: &TaskSignal, live: &LiveAgents, now_ms: u64) -> Der
     // could not start — is the person's to settle, so it is read here too: a
     // row that kept saying Working while a card sat in `needs` is how a person
     // reading the board alone missed that nothing else would move.
-    if let Some(card) = signal.cards.first() {
+    // (The "ready to land" notice is the Ready row, not a card: see `derive_from_fold`.)
+    if let Some(card) = signal
+        .cards
+        .iter()
+        .find(|card| card.kind == CardKind::Decision && !is_ready_to_land(&card.body))
+    {
         return Derived::needs(Need::Attention, &card.body);
     }
     // A problem found a moment ago reads as the task would without it
@@ -736,7 +799,15 @@ pub fn derive_from_fold(signal: &TaskSignal, now_ms: u64) -> Derived {
         // settle: a row that said Working while a card sat unread beside it is
         // how a person reading `shprd status` alone missed that they were
         // needed.
-        if let Some(card) = signal.cards.first() {
+        //
+        // The engine's "ready to land: approve it" card is not one of those: it is
+        // the Ready row itself, whose Review opens the Accept card. Reading it as
+        // Needs you hid Review and Accept from the one task waiting for them.
+        if let Some(card) = signal
+            .cards
+            .iter()
+            .find(|card| card.kind == CardKind::Decision && !is_ready_to_land(&card.body))
+        {
             return Derived::needs(Need::Attention, &card.body);
         }
     }
@@ -748,6 +819,12 @@ pub fn derive_from_fold(signal: &TaskSignal, now_ms: u64) -> Derived {
         return derive_status(signal, &at_work, now_ms);
     }
     derive_status(signal, &LiveAgents::default(), now_ms)
+}
+
+/// Whether a card's body is the engine's "ready to land" notice, the one it
+/// raises when a reviewed task waits for the person's approval.
+fn is_ready_to_land(body: &str) -> bool {
+    body.contains(" is ready to land")
 }
 
 /// The first ask still open at `now_ms`, if one is.
@@ -788,6 +865,11 @@ fn parked(signal: &TaskSignal) -> Derived {
             // deliberately stopped is a lie (M7a §5, `agents.py:170`).
             if signal.stopped {
                 return Derived::needs(Need::Stopped, STOPPED);
+            }
+            // A person said "take it as it is": the failure is decided and what
+            // is left is their Accept, so it reads Ready like a passed task.
+            if signal.accepted_failure {
+                return Derived::new(DerivedStatus::Ready, None, None);
             }
             Derived::needs(Need::Attention, signal.failure.as_deref().unwrap_or(FAILED))
         }
@@ -1069,6 +1151,18 @@ mod tests {
         signal.stopped = true;
         signal.failure = Some("the agent said it gave up".to_string());
         signal
+    }
+
+    #[test]
+    fn a_failure_a_person_accepted_reads_ready() {
+        let mut signal = task(TaskStatus::Failed);
+        signal.failure = Some("a gate failed".to_string());
+        assert_eq!(
+            derive_from_fold(&signal, NOW).status,
+            DerivedStatus::NeedsYou
+        );
+        signal.accepted_failure = true;
+        assert_eq!(derive_from_fold(&signal, NOW).status, DerivedStatus::Ready);
     }
 
     /// A task in the given state with a worker that has been idle since well
@@ -1704,10 +1798,11 @@ mod tests {
             Some(signal) => derive_status(&signal, &LiveAgents::default(), fixture::NOW),
             None => panic!("the fixture has {id}"),
         };
-        // The folded fixture: landed, failed at a gate, and waiting its turn.
+        // The folded fixture: landed, failed at a gate but accepted by a person
+        // (its override), and waiting its turn.
         assert_eq!(read("M1.1").status, DerivedStatus::Done);
-        assert_eq!(read("M1.2").status, DerivedStatus::NeedsYou);
-        assert_eq!(read("M1.2").needs, Some(Need::Attention));
+        assert_eq!(read("M1.2").status, DerivedStatus::Ready);
+        assert_eq!(read("M1.2").needs, None);
         assert_eq!(read("M1.3"), Derived::new(DerivedStatus::ToDo, None, None));
         assert_eq!(TaskSignal::from_state(&state, "M9.9"), None);
     }
@@ -1742,6 +1837,7 @@ mod tests {
                 attempt: 1,
                 reviewer: "codex".to_string(),
                 degraded: false,
+                note: None,
             },
         };
         match asked.apply(&review) {
@@ -1860,6 +1956,140 @@ mod tests {
     }
 
     #[test]
+    fn a_notice_never_reads_as_needs_you() {
+        for status in [
+            TaskStatus::Working,
+            TaskStatus::Reported,
+            TaskStatus::Failed,
+        ] {
+            let mut signal = task(status);
+            signal.cards.push(CardFacts {
+                body: String::from("T1 clashed with work that landed after it."),
+                kind: CardKind::Notice,
+            });
+            let without = derive_from_fold(&task(status), NOW);
+            assert_eq!(derive_from_fold(&signal, NOW), without, "{status:?}");
+        }
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn a_clash_reads_needs_you_only_once_the_redo_is_overdue() {
+        use shprd_core::state::{Escalation, RunState};
+        let mut state = RunState::default();
+        let mut stuck = shprd_core::state::Task {
+            id: String::from("T1"),
+            title: String::from("a task"),
+            scope: Vec::new(),
+            acceptance: Vec::new(),
+            tags: Vec::new(),
+            skills: Vec::new(),
+            deps: Vec::new(),
+            status: TaskStatus::Failed,
+            attempts: Vec::new(),
+            overrides: Vec::new(),
+            dropped_reason: None,
+            pr: None,
+            approved_head: None,
+            last_status: None,
+            nothing_to_merge: None,
+            fallbacks: Vec::new(),
+            added_at_ms: 0,
+            touched_at_ms: 1_000_000,
+        };
+        stuck.status = TaskStatus::Reported;
+        state.tasks.insert(String::from("T1"), stuck);
+        state.escalations.push(Escalation {
+            task: Some(String::from("T1")),
+            body: String::from(
+                "T1 clashed with work that landed after it; it is being redone on top of the latest (files in conflict: a.rs)",
+            ),
+            default_action: String::from("redo the task on top of the latest"),
+            seq: 3,
+            by_agent: false,
+        });
+        let soon = TaskSignal::from_state_at(&state, "T1", 1_000_000 + 60_000).expect("T1");
+        assert_ne!(derive_from_fold(&soon, NOW).status, DerivedStatus::NeedsYou);
+        let late = TaskSignal::from_state_at(&state, "T1", 1_000_000 + 11 * 60_000).expect("T1");
+        assert_eq!(derive_from_fold(&late, NOW).status, DerivedStatus::NeedsYou);
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn an_open_scope_card_from_an_old_log_is_not_drawn() {
+        use shprd_core::ask::AskKind;
+        let at = |seq: u64, kind: EventKind| Event {
+            seq,
+            at_ms: NOW + seq,
+            actor: Actor::Engine,
+            kind,
+        };
+        let ask = |seq: u64, id: &str, options: Vec<String>| {
+            at(
+                seq,
+                EventKind::AskRaised {
+                    task: String::from("T1"),
+                    ask: id.to_string(),
+                    ask_kind: AskKind::Question,
+                    text: String::from("widen?"),
+                    options,
+                    expires_at_ms: None,
+                    created_at_ms: NOW,
+                },
+            )
+        };
+        // The cards an older build raised, with its old choices.
+        let options = vec![
+            String::from("widen the scope to docs/a.md"),
+            String::from("widen the scope to docs/b.md"),
+            String::from("send it back to a new attempt"),
+        ];
+        let events = vec![
+            at(
+                1,
+                EventKind::RunStarted {
+                    run_id: String::from("r"),
+                    repo: String::from("/tmp/repo"),
+                    base_branch: String::from("main"),
+                    integration_branch: String::from("integration/m1"),
+                },
+            ),
+            at(
+                2,
+                EventKind::TaskAdded {
+                    task: String::from("T1"),
+                    title: String::from("a task"),
+                    scope: vec![String::from("crates/x")],
+                    acceptance: vec![String::from("done")],
+                    tags: vec![],
+                    skills: vec![],
+                    deps: vec![],
+                },
+            ),
+            ask(3, "hand-in-refused-1-1", options),
+            ask(
+                4,
+                "scope-widen-1",
+                vec![
+                    String::from("widen the scope to docs/a.md"),
+                    String::from("keep the scope"),
+                ],
+            ),
+            ask(5, "ask-1", vec![]),
+        ];
+        let open = |events: &[Event]| {
+            let state = shprd_core::state::RunState::fold(events).expect("folds");
+            TaskSignal::from_state_at(&state, "T1", NOW)
+                .expect("T1")
+                .open_asks
+                .len()
+        };
+        // Declared paths are a hint now: every scope card a log still holds
+        // open is moot, and only the person's own question is left.
+        assert_eq!(open(&events), 1, "only the person's own question is left");
+    }
+
+    #[test]
     fn a_log_only_reader_sees_an_open_card_as_needs_you() {
         // Gate run #4, bug 4: a task whose review could not start read
         // `Working · In review` while its card sat in `/api/state`'s `needs`,
@@ -1870,6 +2100,7 @@ mod tests {
             body: String::from(
                 "C1: the engine's review did not start: no workspace \"shprd · repo\" yet",
             ),
+            kind: CardKind::Decision,
         });
         let got = derive_from_fold(&signal, NOW);
         assert_eq!(got.status, DerivedStatus::NeedsYou);
@@ -1886,10 +2117,24 @@ mod tests {
         let mut reported = task(TaskStatus::Reported);
         reported.cards.push(CardFacts {
             body: String::from("C1: its `start` step has failed the same way 3 passes in a row"),
+            kind: CardKind::Decision,
         });
         assert_eq!(
             derive_from_fold(&reported, NOW).status,
             DerivedStatus::NeedsYou
+        );
+
+        // The engine's "ready to land" notice is the Ready row, not a card to settle:
+        // the task keeps its Review and Accept.
+        let mut waiting = task(TaskStatus::Reported);
+        waiting.cards.push(CardFacts {
+            body: String::from("T1 is ready to land: run `shprd approve T1`"),
+            kind: CardKind::Decision,
+        });
+        assert_eq!(
+            derive_from_fold(&waiting, NOW),
+            derive_from_fold(&task(TaskStatus::Reported), NOW),
+            "a reviewed task waiting for approval reads as it does without the notice"
         );
 
         // And a task that is already done says nothing it still needs.
@@ -1901,6 +2146,7 @@ mod tests {
             let mut done = task(status);
             done.cards.push(CardFacts {
                 body: String::from("a stale card"),
+                kind: CardKind::Decision,
             });
             let got = derive_from_fold(&done, NOW);
             if status == TaskStatus::Failed {
@@ -1984,5 +2230,25 @@ mod tests {
             expires_at_ms: None,
         });
         assert_eq!(derive_from_fold(&landed, NOW).status, DerivedStatus::Done);
+    }
+
+    #[test]
+    fn only_an_agents_question_is_for_the_person() {
+        let row = |needs| Derived::new(DerivedStatus::NeedsYou, Some(needs), None);
+        assert!(row(Need::Asks).is_for_you());
+        for operational in [Need::Attention, Need::Reply, Need::Stopped, Need::Provider] {
+            assert!(!row(operational).is_for_you(), "{operational:?}");
+        }
+        assert!(Derived::new(DerivedStatus::Ready, None, None).is_for_you());
+    }
+
+    #[test]
+    fn a_ready_row_the_engine_lands_reads_landing() {
+        let landing = Derived::new(DerivedStatus::Ready, None, None).landing_by_engine();
+        assert_eq!(landing.status, DerivedStatus::Merging);
+        assert_eq!(landing.reason.as_deref(), Some(LANDING));
+        // Anything but Ready is left as it reads.
+        let asks = Derived::needs(Need::Asks, QUESTION).landing_by_engine();
+        assert_eq!(asks.status, DerivedStatus::NeedsYou);
     }
 }

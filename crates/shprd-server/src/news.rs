@@ -225,9 +225,31 @@ pub fn readings(
         if live.contains(id) {
             last = last.max(now_ms);
         }
-        snapshot.insert(id.clone(), reading(&space, task, row, signal, last));
+        let mut one = reading(&space, task, row, signal, last);
+        one.stop_confirmed = signal.stopped || exit_recorded(events, id);
+        snapshot.insert(id.clone(), one);
     }
     snapshot
+}
+
+use shprd_watch::machine::EXIT_REASON;
+
+/// Whether the newest thing the log says about `task` is its worker's process
+/// exit: a stop the watch saw, not one the news only inferred from a terminal
+/// the host did not list. Anything the task did after (a status line, a
+/// hand-in, a new spawn) means it was not the end.
+fn exit_recorded(events: &[Event], task: &str) -> bool {
+    events
+        .iter()
+        .rev()
+        .find(|event| event.kind.task() == Some(task))
+        .is_some_and(|event| {
+            matches!(
+                &event.kind,
+                shprd_core::event::EventKind::HandedOff { reason, .. }
+                    if reason.as_deref() == Some(EXIT_REASON)
+            )
+        })
 }
 
 /// One task as news reads it.
@@ -250,6 +272,8 @@ fn reading(
         review_failed: review_failed(task),
         backup: backup(task),
         last_activity_ms,
+        attempt: task.latest_attempt().map(|attempt| attempt.n),
+        stop_confirmed: false,
     }
 }
 
@@ -502,6 +526,7 @@ mod tests {
                 command: String::from("cargo test"),
                 exit_code: Some(0),
                 output_tail: String::new(),
+                pre_existing: None,
             }],
             changed_paths: Vec::new(),
             commit: Some(String::from("abc123")),
@@ -517,6 +542,7 @@ mod tests {
             attempt: 1,
             reviewer: String::from("codex"),
             degraded: false,
+            note: None,
         }
     }
 
@@ -657,6 +683,22 @@ mod tests {
         let state = folded(events);
         let task = state.tasks.get("A").expect("task A folded");
         assert_eq!(outcome(task).as_deref(), Some("dropped"));
+    }
+
+    #[test]
+    fn a_task_that_landed_with_nothing_to_merge_is_done() {
+        let mut kinds = landed(7);
+        if let Some(EventKind::TaskLanded {
+            number, outcome, ..
+        }) = kinds.last_mut()
+        {
+            *number = None;
+            *outcome = LandOutcome::NothingToMerge;
+        }
+        let state = folded(kinds);
+        let task = state.tasks.get("A").expect("task A folded");
+        assert_eq!(task.status, shprd_core::state::TaskStatus::Integrated);
+        assert_eq!(outcome(task).as_deref(), Some("nothing to merge"));
     }
 
     #[test]
@@ -819,5 +861,38 @@ mod tests {
         fn tell(&self, _pane: &str, _text: &str) -> Result<(), String> {
             Ok(())
         }
+    }
+
+    /// The reason the news recognises is the one constant the watch records, so
+    /// the two cannot drift apart.
+    #[test]
+    fn the_news_and_the_watch_share_one_exit_reason() {
+        assert_eq!(EXIT_REASON, shprd_watch::machine::EXIT_REASON);
+    }
+
+    /// A recorded process exit is a confirmed stop; a later status line from
+    /// the same task is proof of life that takes the confirmation back.
+    #[test]
+    fn only_a_recorded_exit_confirms_a_stop() {
+        let exit = EventKind::HandedOff {
+            task: String::from("A"),
+            from_agent: String::from("claude"),
+            to_agent: String::from("claude"),
+            checkpoint: String::new(),
+            reason: Some(String::from(EXIT_REASON)),
+        };
+        let line = EventKind::TaskStatus {
+            task: String::from("A"),
+            message: String::from("still here"),
+            progress: None,
+        };
+        let mut kinds = run();
+        kinds.push(added());
+        kinds.push(spawned(1));
+        assert!(!exit_recorded(&kinds_events(kinds.clone()), "A"));
+        kinds.push(exit);
+        assert!(exit_recorded(&kinds_events(kinds.clone()), "A"));
+        kinds.push(line);
+        assert!(!exit_recorded(&kinds_events(kinds), "A"));
     }
 }

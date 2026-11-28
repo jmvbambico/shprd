@@ -64,6 +64,15 @@ pub const KEEP_MS: u64 = 6 * 3_600_000;
 /// (Shepherdr's `QUIET_MS`).
 pub const QUIET_MS: u64 = 20 * 60_000;
 
+/// How long a task whose agent the host does not list must have been quiet
+/// before its stop is raised as a question, ms.
+///
+/// A worker thinking for several minutes, or one whose terminal the host lists
+/// late, is ordinary: sweatbrain's C batch had workers silent 150 to 540 s that
+/// all went on to hand in. A status line or hand-in inside this window is proof
+/// of life, so the window is longer than any ordinary silence.
+pub const STOP_QUIET_MS: u64 = 10 * 60_000;
+
 /// The kinds of news, in Shepherdr's vocabulary where it has a word for it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -170,6 +179,16 @@ pub struct Reading {
     /// (`news.py:41-53`). An agent at work must count: a worker running a long
     /// quiet build is ordinary, and not news.
     pub last_activity_ms: u64,
+    /// The number of the attempt this reading is about: its newest.
+    ///
+    /// A stop is told about one attempt only: once a newer attempt exists, the
+    /// older one's end is nobody's news. `None` when the caller does not know.
+    pub attempt: Option<u32>,
+    /// Whether the stop is a fact: a person stopped the agent, or the watch
+    /// recorded its process exiting. Without that, "no agent is listed" is only
+    /// a sighting, and is told as a question once the task has been quiet for
+    /// [`STOP_QUIET_MS`].
+    pub stop_confirmed: bool,
 }
 
 impl Reading {
@@ -187,8 +206,16 @@ impl Reading {
             review_failed: None,
             backup: None,
             last_activity_ms: 0,
+            attempt: None,
+            stop_confirmed: false,
         }
     }
+}
+
+/// Whether a reading says its agent stopped: a task that needs the person
+/// because nobody is on it any more.
+fn says_stopped(reading: &Reading) -> bool {
+    reading.status == DerivedStatus::NeedsYou && reading.need == Some(Need::Stopped)
 }
 
 /// The tasks of one pass, by id: every space's tasks together, so a pass that
@@ -234,6 +261,19 @@ struct Seen {
     review_failed: Option<String>,
     /// The last backup mark it carried.
     backup: Option<String>,
+    /// The attempt whose agent was read as stopped on the pass before, when it
+    /// was: a stop is told only when a second pass reads it the same way, so a
+    /// worker missing for a single pass (a send-back or a retry starting its
+    /// new terminal) is never reported as one that stopped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stop_seen: Option<u32>,
+    /// When that stop was first seen, ms.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stop_since_ms: Option<u64>,
+    /// The task's last activity when that stop was first seen: anything newer
+    /// is proof of life.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stop_activity_ms: Option<u64>,
 }
 
 impl Seen {
@@ -259,6 +299,9 @@ impl Seen {
                 .as_ref()
                 .map(|mark| mark.id.clone())
                 .or_else(|| prev.and_then(|seen| seen.backup.clone())),
+            stop_seen: None,
+            stop_since_ms: None,
+            stop_activity_ms: None,
         }
     }
 }
@@ -273,6 +316,16 @@ enum Holds {
     Stalled(String),
     /// The newest failed review is still this one.
     ReviewFailed(String),
+    /// The task still reads as stopped, and this is still its newest attempt.
+    Stopped(u32),
+    /// The task still reads as stopped on this attempt and nothing has happened
+    /// to it since `activity_ms`: a status line or hand-in withdraws the line.
+    StopQuestion {
+        /// The attempt the question is about.
+        attempt: u32,
+        /// The task's last activity when the question was raised.
+        activity_ms: u64,
+    },
     /// A backup's line is news either way (Shepherdr's `holds()`).
     Always,
 }
@@ -311,6 +364,17 @@ impl Item {
                 .get(&self.task)
                 .and_then(|reading| stall_of(reading, now_ms))
                 .is_some_and(|stall| stall.id == *mark),
+            Holds::Stopped(attempt) => current
+                .get(&self.task)
+                .is_some_and(|reading| says_stopped(reading) && stop_key(reading) == *attempt),
+            Holds::StopQuestion {
+                attempt,
+                activity_ms,
+            } => current.get(&self.task).is_some_and(|reading| {
+                says_stopped(reading)
+                    && stop_key(reading) == *attempt
+                    && reading.last_activity_ms <= *activity_ms
+            }),
             Holds::ReviewFailed(mark) => current
                 .get(&self.task)
                 .and_then(|reading| reading.review_failed.as_ref())
@@ -373,6 +437,14 @@ pub struct News {
     /// The id the next queued line gets.
     #[serde(default)]
     next: u64,
+    /// How many stop alarms were later contradicted: raised or about to be, and
+    /// then the task showed it was alive (a status line, a hand-in, or working
+    /// again). `shprd doctor` reads it to say whether the detector is trusted.
+    #[serde(default)]
+    stops_contradicted: u32,
+    /// How many stops were told as a fact or a question.
+    #[serde(default)]
+    stops_told: u32,
 }
 
 impl News {
@@ -441,14 +513,77 @@ impl News {
                     Holds::ReviewFailed(failed.id.clone()),
                 ));
             }
+            // A stop is told only when it is really one. "No agent is listed"
+            // is a sighting: a worker thinking, or missing for a pass or two,
+            // looks the same. So the sighting is noted and the task looked at
+            // again; any status line or hand-in since is proof of life and
+            // starts the look over. Unless the stop is confirmed (a person
+            // stopped the agent, or its exit was recorded) it is told only
+            // after the task has been quiet for [`STOP_QUIET_MS`], and as a
+            // question rather than a fact.
+            let mut deferred = false;
+            let mut stop_track: Option<(u64, u64)> = None;
             if prev.status != reading.status
                 && let Some(event) = event_of(prev, reading)
             {
-                lines.push((
-                    event,
-                    line(task, reading, event, None),
-                    Holds::Status(reading.status),
-                ));
+                if says_stopped(reading) && event == NewsEvent::Failed {
+                    let key = stop_key(reading);
+                    let continuing = prev.stop_seen == Some(key);
+                    let alive =
+                        continuing && reading.last_activity_ms > prev.stop_activity_ms.unwrap_or(0);
+                    let (since, activity) = if continuing && !alive {
+                        (
+                            prev.stop_since_ms.unwrap_or(now_ms),
+                            prev.stop_activity_ms.unwrap_or(reading.last_activity_ms),
+                        )
+                    } else {
+                        (now_ms, reading.last_activity_ms)
+                    };
+                    stop_track = Some((since, activity));
+                    let quiet_from = if reading.last_activity_ms > 0 {
+                        reading.last_activity_ms
+                    } else {
+                        since
+                    };
+                    let quiet_ms = now_ms.saturating_sub(quiet_from);
+                    let ripe = continuing
+                        && !alive
+                        && (reading.stop_confirmed || quiet_ms >= STOP_QUIET_MS);
+                    if ripe && reading.stop_confirmed {
+                        lines.push((event, line(task, reading, event, None), Holds::Stopped(key)));
+                    } else if ripe {
+                        let words = format!(
+                            "has been quiet for {} min: its agent may have stopped",
+                            quiet_ms / 60_000
+                        );
+                        lines.push((
+                            NewsEvent::Stalled,
+                            line(task, reading, NewsEvent::Stalled, Some(&words)),
+                            Holds::StopQuestion {
+                                attempt: key,
+                                activity_ms: reading.last_activity_ms,
+                            },
+                        ));
+                    } else {
+                        deferred = true;
+                    }
+                    if alive {
+                        self.withdraw_stops(task);
+                    }
+                } else {
+                    lines.push((
+                        event,
+                        line(task, reading, event, None),
+                        Holds::Status(reading.status),
+                    ));
+                }
+            } else if prev.status == DerivedStatus::NeedsYou
+                && prev.need == Some(Need::Stopped)
+                && prev.stop_seen.is_none_or(|n| Some(n) == reading.attempt)
+                && reading.status == DerivedStatus::Working
+            {
+                // A stop that was told and then the task went on working.
+                self.stops_contradicted = self.stops_contradicted.saturating_add(1);
             }
             if let Some(stall) = &stall
                 && prev.stall.as_deref() != Some(stall.id.as_str())
@@ -462,10 +597,17 @@ impl News {
             for (event, text, holds) in lines {
                 self.queue(now_ms, task, reading, event, text, holds);
             }
-            self.seen.insert(
-                task.clone(),
-                Seen::after(Some(prev), reading, stall.as_ref()),
-            );
+            let mut now = Seen::after(Some(prev), reading, stall.as_ref());
+            if deferred {
+                now.status = prev.status;
+                now.need = prev.need;
+                now.stop_seen = Some(stop_key(reading));
+                if let Some((since, activity)) = stop_track {
+                    now.stop_since_ms = Some(since);
+                    now.stop_activity_ms = Some(activity);
+                }
+            }
+            self.seen.insert(task.clone(), now);
         }
         // A task the pass no longer has is forgotten: the run dropped it, or it
         // is in another space that nobody looked at.
@@ -494,6 +636,9 @@ impl News {
                 && !stands_apart(event)
                 && (queued.event == event || event != NewsEvent::Stalled))
         });
+        if matches!(holds, Holds::Stopped(_) | Holds::StopQuestion { .. }) {
+            self.stops_told = self.stops_told.saturating_add(1);
+        }
         let id = self.next;
         self.next = self.next.saturating_add(1);
         self.outbox.push(Item {
@@ -514,9 +659,28 @@ impl News {
     /// for [`KEEP_MS`] is forgotten. A space's batch waits for its oldest line,
     /// so the lines of one moment go together (Shepherdr's `news_pass()`).
     pub fn settled(&mut self, now_ms: u64, settle_ms: u64, current: &Snapshot) -> Vec<Batch> {
+        let mut contradicted: Vec<String> = Vec::new();
         self.outbox.retain(|item| {
-            item.holds_against(current, now_ms) && now_ms.saturating_sub(item.at_ms) < KEEP_MS
+            let holds = item.holds_against(current, now_ms);
+            if !holds && matches!(item.holds, Holds::Stopped(_) | Holds::StopQuestion { .. }) {
+                contradicted.push(item.task.clone());
+            }
+            holds && now_ms.saturating_sub(item.at_ms) < KEEP_MS
         });
+        for task in contradicted {
+            // The stop line is gone, so the task must be looked at afresh: a
+            // later real stop is news again.
+            if let Some(seen) = self.seen.get_mut(&task) {
+                // `observe` counts a recovery it saw itself; only a stop still
+                // standing here is counted now, so one recovery counts once.
+                if seen.need == Some(Need::Stopped) {
+                    self.stops_contradicted = self.stops_contradicted.saturating_add(1);
+                }
+                seen.status = DerivedStatus::Working;
+                seen.need = None;
+                seen.stop_seen = None;
+            }
+        }
         let mut batches: Vec<Batch> = Vec::new();
         for item in &self.outbox {
             if batches.iter().any(|batch| batch.space == item.space) {
@@ -540,6 +704,19 @@ impl News {
         batches
     }
 
+    /// Drops the stop lines of `task` still waiting: it showed it was alive.
+    fn withdraw_stops(&mut self, task: &str) {
+        let before = self.outbox.len();
+        self.outbox.retain(|item| {
+            !(item.task == task
+                && matches!(item.holds, Holds::Stopped(_) | Holds::StopQuestion { .. }))
+        });
+        let dropped = before - self.outbox.len();
+        self.stops_contradicted = self
+            .stops_contradicted
+            .saturating_add(u32::try_from(dropped).unwrap_or(u32::MAX));
+    }
+
     /// Records a batch as told: its lines leave the outbox, so none of them is
     /// sent twice.
     pub fn told(&mut self, batch: &Batch) {
@@ -547,10 +724,25 @@ impl News {
         self.outbox.retain(|item| !told.contains(&item.id));
     }
 
+    /// How many stop alarms were later contradicted by the task itself.
+    pub fn stops_contradicted(&self) -> u32 {
+        self.stops_contradicted
+    }
+
+    /// How many stop lines were told.
+    pub fn stops_told(&self) -> u32 {
+        self.stops_told
+    }
+
     /// The lines nobody has been told yet, oldest first.
     pub fn waiting(&self) -> &[Item] {
         &self.outbox
     }
+}
+
+/// Which attempt a stop is about, for telling it once.
+fn stop_key(reading: &Reading) -> u32 {
+    reading.attempt.unwrap_or(0)
 }
 
 /// Whether a line is told for its own sake, whatever else the task says.
@@ -646,12 +838,85 @@ fn line(task: &str, reading: &Reading, event: NewsEvent, words: Option<&str>) ->
         NewsEvent::WorkingAgain => format!("{task} is working again: {} ({title})", why()),
         NewsEvent::Backup => format!("{task} backup: {} ({title})", why()),
     };
+    let body = match settle_choices(task, reading, event) {
+        Some(choices) => format!(
+            "{body} · yours to settle, then tell the person in one line what you chose. {choices}"
+        ),
+        None => body,
+    };
     let body = body.replace('<', "\u{2039}").replace('>', "\u{203a}");
     format!(
         "<shprd-news task=\"{}\" event=\"{}\">{body}</shprd-news>",
         attribute(task),
         event.name()
     )
+}
+
+/// The line the coordinator is told when the engine raises an operational card
+/// about the run itself (no task): the card's words and what the engine does if
+/// nobody acts, tagged so it reads as news and never as the person's words.
+///
+/// The person is not asked: the coordinator settles it and says in one line what
+/// it did.
+pub fn run_wide_line(body: &str, default_action: &str) -> String {
+    let text = format!(
+        "{} · yours to settle, then tell the person in one line what you chose. {}",
+        one_line(body),
+        one_line(default_action)
+    )
+    .replace('<', "\u{2039}")
+    .replace('>', "\u{203a}");
+    format!(
+        "<shprd-news task=\"\" event=\"{}\">{text}</shprd-news>",
+        NewsEvent::NeedsYou.name()
+    )
+}
+
+/// The choices a card offers the coordinator, when the line is an operational
+/// card it settles itself (a stuck review, a lost brief, a clash, a stopped
+/// agent): the person does not see it under "For you", so the line says what to
+/// run. `None` for anything that is the person's.
+fn settle_choices(task: &str, reading: &Reading, event: NewsEvent) -> Option<String> {
+    if !matches!(event, NewsEvent::NeedsYou | NewsEvent::Failed) {
+        return None;
+    }
+    if reading.status != DerivedStatus::NeedsYou
+        || !matches!(
+            reading.need,
+            Some(Need::Attention | Need::Reply | Need::Stopped | Need::Provider)
+        )
+    {
+        return None;
+    }
+    let reason = reading.reason.as_deref().unwrap_or_default().to_lowercase();
+    let first = if reason.contains("brief not delivered") {
+        format!(
+            "Retry review (the `task.resend_brief` action on {task}) to send the brief again; do not start a new review"
+        )
+    } else if reason.contains("no round is left") {
+        // The review has spent its rounds: `agent review` is not available. The
+        // card carries its own choices (`ROUNDS_SPENT_OPTIONS`), answered by
+        // its ask id (`rounds_spent_ask`), so the first choice is one of those.
+        let original = reading.reason.as_deref().unwrap_or_default();
+        match shprd_core::gate::card_attempt(task, original) {
+            Some(attempt) => format!(
+                "Answer the card `{}` on {task} (`POST /api/asks/answer`) with `{}` to spend one more round",
+                shprd_core::gate::rounds_spent_ask(attempt),
+                shprd_core::gate::RETRY_CHOICE
+            ),
+            None => format!(
+                "Answer the review card on {task} (`POST /api/asks/answer`) with `{}`",
+                shprd_core::gate::RETRY_CHOICE
+            ),
+        }
+    } else if reason.contains("review") || reason.contains("findings") {
+        format!("Start its review again with `shprd agent review --task {task}`")
+    } else {
+        format!("Send it back with `shprd agent spawn --task {task}`")
+    };
+    Some(format!(
+        "Choices: {first}; hand it to another program with `shprd agent handoff --task {task} --reason \"<why>\"`; or propose dropping it with `shprd agent propose drop {task} --reason \"<why>\"`."
+    ))
 }
 
 /// Words on one line, with runs of whitespace collapsed.
@@ -727,7 +992,7 @@ mod tests {
         let mut landed = reading("repo", DerivedStatus::Done);
         landed.outcome = Some(String::from("merged"));
         let mut failed = reading("repo", DerivedStatus::NeedsYou);
-        failed.need = Some(Need::Stopped);
+        failed.failed = Some(String::from("its attempt failed"));
         let mut needs_you = reading("repo", DerivedStatus::NeedsYou);
         needs_you.need = Some(Need::Asks);
         needs_you.reason = Some(String::from("Question for you"));
@@ -1211,5 +1476,250 @@ mod tests {
         let batches = settled_at(&mut back, NOW + 20_000, &current);
         assert_eq!(batches.len(), 1, "a restarted news still tells it");
         assert_eq!(batches[0].items[0].event, NewsEvent::Started);
+    }
+
+    /// A task read as at work on attempt `n`.
+    fn working_on(n: u32) -> Reading {
+        let mut reading = reading("repo", DerivedStatus::Working);
+        reading.attempt = Some(n);
+        reading
+    }
+
+    /// A task whose agent is read as gone, on attempt `n`.
+    fn gone_on(n: u32) -> Reading {
+        let mut reading = reading("repo", DerivedStatus::NeedsYou);
+        reading.need = Some(Need::Stopped);
+        reading.reason = Some(String::from("Agent stopped"));
+        reading.attempt = Some(n);
+        reading.stop_confirmed = true;
+        reading
+    }
+
+    /// A task whose agent the host merely does not list, on attempt `n`, with
+    /// its last activity at `last`.
+    fn unlisted_on(n: u32, last: u64) -> Reading {
+        let mut reading = gone_on(n);
+        reading.stop_confirmed = false;
+        reading.last_activity_ms = last;
+        reading
+    }
+
+    /// Sweatbrain's C2: a worker silent for 308 s while the host did not list
+    /// it, then a status line and a hand-in. No stop news may be told, queued
+    /// or kept.
+    #[test]
+    fn a_quiet_worker_that_then_speaks_is_never_called_stopped() {
+        let start = NOW;
+        let mut news = after_first_look(snapshot(vec![("C2", {
+            let mut r = working_on(1);
+            r.last_activity_ms = start;
+            r
+        })]));
+        let mut told = Vec::new();
+        // Every 4 s for 308 s the agent reads as not listed.
+        let mut at = start + 4_000;
+        while at <= start + 308_000 {
+            let current = snapshot(vec![("C2", unlisted_on(1, start))]);
+            news.observe(at, &current);
+            told.extend(settled_at(&mut news, at, &current));
+            at += 4_000;
+        }
+        // A status line arrives, still unlisted, then the hand-in.
+        let spoke = start + 310_000;
+        let current = snapshot(vec![("C2", unlisted_on(1, spoke))]);
+        news.observe(spoke + 1_000, &current);
+        told.extend(settled_at(&mut news, spoke + 6_000, &current));
+        let mut ready = reading("repo", DerivedStatus::Ready);
+        ready.attempt = Some(1);
+        ready.last_activity_ms = spoke + 20_000;
+        let current = snapshot(vec![("C2", ready)]);
+        news.observe(spoke + 30_000, &current);
+        for batch in told
+            .iter()
+            .chain(&settled_at(&mut news, spoke + 40_000, &current))
+        {
+            for item in &batch.items {
+                assert!(
+                    !item.text.contains("stopped") && item.event != NewsEvent::Failed,
+                    "no stop news for a live worker: {}",
+                    item.text
+                );
+            }
+        }
+        assert_eq!(news.stops_told(), 0);
+    }
+
+    /// Past the quiet threshold the stop is only ever a question, and a later
+    /// status line withdraws it and counts it as contradicted.
+    #[test]
+    fn a_stop_question_past_the_threshold_is_withdrawn_when_the_task_speaks() {
+        let start = NOW;
+        let mut news = after_first_look(snapshot(vec![("C2", {
+            let mut r = working_on(1);
+            r.last_activity_ms = start;
+            r
+        })]));
+        let mut told = Vec::new();
+        let mut at = start + 5_000;
+        while at <= start + STOP_QUIET_MS + 30_000 {
+            let current = snapshot(vec![("C2", unlisted_on(1, start))]);
+            news.observe(at, &current);
+            told.extend(settled_at(&mut news, at, &current));
+            at += 5_000;
+        }
+        for batch in &told {
+            for item in &batch.items {
+                assert!(
+                    item.text.contains("quiet"),
+                    "a question, not a fact: {}",
+                    item.text
+                );
+            }
+        }
+        let spoke = start + STOP_QUIET_MS + 40_000;
+        let current = snapshot(vec![("C2", unlisted_on(1, spoke))]);
+        news.observe(spoke, &current);
+        let _ = settled_at(&mut news, spoke + 1_000, &current);
+        assert_eq!(news.stops_contradicted(), 1);
+    }
+
+    /// An unlisted agent that stays silent for a long time is raised, as a
+    /// question and never as a fact.
+    #[test]
+    fn a_long_silence_is_a_question_not_a_fact() {
+        let mut news = after_first_look(snapshot(vec![("T1", working_on(1))]));
+        let mut told = Vec::new();
+        let mut at = NOW + 10_000;
+        while at <= NOW + STOP_QUIET_MS + 60_000 {
+            let current = snapshot(vec![("T1", unlisted_on(1, NOW))]);
+            news.observe(at, &current);
+            for batch in settled_at(&mut news, at, &current) {
+                news.told(&batch);
+                told.push(batch);
+            }
+            at += 10_000;
+        }
+        assert_eq!(told.len(), 1, "told once: {told:?}");
+        let text = told[0].text();
+        assert!(text.contains("has been quiet for"), "{text}");
+        assert!(text.contains("may have stopped"), "{text}");
+        assert!(!text.contains("failed"), "{text}");
+    }
+
+    /// A status line after a stop was queued withdraws it, and it is counted as
+    /// contradicted.
+    #[test]
+    fn a_status_line_withdraws_a_queued_stop() {
+        let mut news = after_first_look(snapshot(vec![("T1", working_on(1))]));
+        let silent = snapshot(vec![("T1", unlisted_on(1, NOW))]);
+        let mut at = NOW + 10_000;
+        while at <= NOW + STOP_QUIET_MS + 20_000 {
+            news.observe(at, &silent);
+            at += 10_000;
+        }
+        assert_eq!(news.waiting().len(), 1, "the question is queued");
+        let spoke = snapshot(vec![("T1", unlisted_on(1, at))]);
+        assert!(settled_at(&mut news, at + 6_000, &spoke).is_empty());
+        assert!(news.waiting().is_empty());
+        assert_eq!(news.stops_contradicted(), 1);
+    }
+
+    /// A send-back: the old terminal exits and the new one is seen one pass
+    /// later. The pass in between reads the worker as gone, and says nothing.
+    #[test]
+    fn a_worker_missing_for_one_pass_is_not_a_stop() {
+        let mut news = after_first_look(snapshot(vec![("T1", working_on(1))]));
+        let gap = snapshot(vec![("T1", gone_on(1))]);
+        news.observe(NOW + 10_000, &gap);
+        assert!(settled_at(&mut news, NOW + 20_000, &gap).is_empty());
+        let back = snapshot(vec![("T1", working_on(2))]);
+        news.observe(NOW + 30_000, &back);
+        assert!(settled_at(&mut news, NOW + 60_000, &back).is_empty());
+        assert!(news.waiting().is_empty(), "nothing was queued at all");
+        // A later real stop of the new attempt is still told, once confirmed.
+        let gone = snapshot(vec![("T1", gone_on(2))]);
+        news.observe(NOW + 70_000, &gone);
+        assert!(settled_at(&mut news, NOW + 80_000, &gone).is_empty());
+        news.observe(NOW + 90_000, &gone);
+        assert_eq!(settled_at(&mut news, NOW + 100_000, &gone).len(), 1);
+    }
+
+    /// A current worker that really exits is told once.
+    #[test]
+    fn a_worker_that_really_exits_is_told_once() {
+        let mut news = after_first_look(snapshot(vec![("T1", working_on(1))]));
+        let gone = snapshot(vec![("T1", gone_on(1))]);
+        news.observe(NOW + 10_000, &gone);
+        news.observe(NOW + 20_000, &gone);
+        let batches = settled_at(&mut news, NOW + 30_000, &gone);
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].items.len(), 1);
+        assert_eq!(batches[0].items[0].event, NewsEvent::Failed);
+        assert!(batches[0].text().contains("Agent stopped"));
+        news.told(&batches[0]);
+        news.observe(NOW + 40_000, &gone);
+        news.observe(NOW + 50_000, &gone);
+        assert!(settled_at(&mut news, NOW + 60_000, &gone).is_empty());
+    }
+
+    /// A stop that was queued is dropped when a newer attempt now exists, or
+    /// when the worker is back.
+    #[test]
+    fn a_queued_stop_is_dropped_when_a_newer_attempt_exists() {
+        let mut news = after_first_look(snapshot(vec![("T1", working_on(1))]));
+        let gone = snapshot(vec![("T1", gone_on(1))]);
+        news.observe(NOW + 10_000, &gone);
+        news.observe(NOW + 20_000, &gone);
+        assert_eq!(news.waiting().len(), 1);
+        let newer = snapshot(vec![("T1", gone_on(2))]);
+        assert!(settled_at(&mut news, NOW + 30_000, &newer).is_empty());
+    }
+
+    #[test]
+    fn an_operational_line_carries_its_choices_and_a_question_does_not() {
+        let mut stuck = reading("repo", DerivedStatus::NeedsYou);
+        stuck.need = Some(Need::Attention);
+        stuck.reason = Some(String::from("review brief not delivered"));
+        let told = line("T1", &stuck, NewsEvent::NeedsYou, None);
+        assert!(told.contains("task.resend_brief"), "{told}");
+        assert!(!told.contains("shprd agent review --task T1"), "{told}");
+        assert!(told.contains("tell the person in one line"), "{told}");
+        let mut review = reading("repo", DerivedStatus::NeedsYou);
+        review.need = Some(Need::Attention);
+        review.reason = Some(String::from("review is stuck"));
+        let told = line("T4", &review, NewsEvent::NeedsYou, None);
+        assert!(told.contains("shprd agent review --task T4"), "{told}");
+        let mut spent = reading("repo", DerivedStatus::NeedsYou);
+        spent.need = Some(Need::Attention);
+        spent.reason = Some(String::from(
+            "T5: its review of T5·a2 failed 2 time(s) and no round is left",
+        ));
+        let told = line("T5", &spent, NewsEvent::NeedsYou, None);
+        assert!(
+            told.contains("Choices: Answer the card `review-out-2` on T5"),
+            "{told}"
+        );
+        assert!(!told.contains("shprd agent review --task T5"), "{told}");
+        assert!(!told.contains("agent spawn --task T5"), "{told}");
+        let mut stopped = reading("repo", DerivedStatus::NeedsYou);
+        stopped.need = Some(Need::Stopped);
+        let told = line("T2", &stopped, NewsEvent::Failed, None);
+        assert!(told.contains("shprd agent spawn --task T2"), "{told}");
+        let mut asks = reading("repo", DerivedStatus::NeedsYou);
+        asks.need = Some(Need::Asks);
+        let told = line("T3", &asks, NewsEvent::NeedsYou, None);
+        assert!(!told.contains("Choices"), "{told}");
+    }
+
+    #[test]
+    fn a_run_wide_card_is_told_as_news_the_coordinator_settles() {
+        let line = run_wide_line("The local `main` has commits <x>", "push it");
+        assert!(
+            line.starts_with("<shprd-news task=\"\" event=\"needs-you\">"),
+            "{line}"
+        );
+        assert!(line.contains("yours to settle"), "{line}");
+        assert!(line.ends_with("</shprd-news>"));
+        assert_eq!(line.matches('<').count(), 2, "{line}");
     }
 }

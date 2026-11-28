@@ -8,10 +8,10 @@
 //! version = 1
 //!
 //! [roles]
-//! order = ["coordinator", "worker", "reviewer", "backup", "docs"]
+//! order = ["coordinator", "worker", "reviewer", "docs"]
 //!
 //! [roles.coordinator]
-//! title = "Assistant"                     # the word the person sees
+//! title = "Orchestrator"                  # the word the person sees
 //! about = "Plans the work and starts a task for each part."
 //! kind = "coordinator"                    # coordinator | worker | reviewer | helper
 //! prompt = "prompt:assistant"             # "prompt:<id>" or a path
@@ -41,8 +41,8 @@
 //! merge = "auto"
 //! ```
 //!
-//! Roles are keyed by id and the four built-ins (`coordinator`, `worker`,
-//! `reviewer`, `backup`) are only the first four rows: any id is a role, with
+//! Roles are keyed by id and the three built-ins (`coordinator`, `worker`,
+//! `reviewer`) are only the first three rows: any id is a role, with
 //! whatever fields it names. `roles.order` is the order a settings UI shows
 //! them in.
 //!
@@ -114,7 +114,7 @@ pub const VERSION: u32 = 1;
 /// The role fields, in the order a settings UI and `settings show` list them.
 ///
 /// Order matters only for display: every field resolves on its own.
-pub const ROLE_FIELDS: [RoleField; 11] = [
+pub const ROLE_FIELDS: [RoleField; 12] = [
     RoleField::Title,
     RoleField::About,
     RoleField::Kind,
@@ -124,12 +124,19 @@ pub const ROLE_FIELDS: [RoleField; 11] = [
     RoleField::Effort,
     RoleField::Fast,
     RoleField::Perm,
+    RoleField::Agents,
     RoleField::Fallback,
     RoleField::Readonly,
 ];
 
 /// The role ids this build ships, in their default order.
-pub const BUILTIN_ROLES: [&str; 4] = ["coordinator", "worker", "reviewer", "backup"];
+pub const BUILTIN_ROLES: [&str; 3] = ["coordinator", "worker", "reviewer"];
+
+/// Role ids an earlier build shipped and this one does not: a file may still
+/// name them (`roles.backup.agent`), and they are read as nothing — never a
+/// custom row, never an error. The Backup agent went when the worker's program
+/// lines became a fallback chain.
+pub const RETIRED_ROLES: [&str; 1] = ["backup"];
 
 /// The keys a repository's committed `.shprd/settings.toml` may set.
 ///
@@ -151,7 +158,7 @@ const REPO_LIMIT: &str = "a repository's committed settings file may only set `t
 
 /// The hint an unknown key's error carries.
 const KEY_HINT: &str = "keys are `roles.order`, `roles.<id>.<field>`, `tasks.<key>`, `graph.dagr`, \
-     `review.cross_vendor` and `host`";
+     `review.cross_vendor`, `host` and `web.<key>`";
 
 /// Where one layer of settings sits in the resolution chain, nearest first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -412,7 +419,13 @@ pub enum RoleField {
     Fast,
     /// The access mode, as one of the program's `[permissions]` ids.
     Perm,
-    /// The programs to fall back through, in order.
+    /// The worker lines after the first, in order: one `agent|model|effort|fast|perm`
+    /// string each (see [`WorkerLine`]).
+    Agents,
+    /// The programs to fall back through, in order. For a worker this is the
+    /// pre-SHPR-44 spelling of "more lines": it still reads, as lines with the
+    /// program's own defaults, when `agents` names none. A reviewer's fallback
+    /// is one `program` or `program/model` entry.
     Fallback,
     /// Whether the role only reads.
     Readonly,
@@ -431,6 +444,7 @@ impl RoleField {
             Self::Effort => "effort",
             Self::Fast => "fast",
             Self::Perm => "perm",
+            Self::Agents => "agents",
             Self::Fallback => "fallback",
             Self::Readonly => "readonly",
         }
@@ -505,14 +519,24 @@ pub enum TaskKey {
     StartNotes,
     /// Words put into a task's brief before it reports.
     FinishNotes,
+    /// Files copied or linked from the main checkout into every worktree.
+    WorktreeFiles,
     /// Seconds between two passes of the service's tick.
     TickSecs,
     /// Seconds a change must hold before the coordinator is told about it.
     NewsSettleSecs,
+    /// Whether shprd rebuilds and restarts itself after a landed task changes it.
+    SelfUpdate,
+    /// Whether the engine removes a landed or dropped task's worktree and branch itself.
+    AutoClean,
+    /// The `gh` account every forge call uses; empty uses whichever is active.
+    GhUser,
+    /// The three-letter prefix of auto-assigned task ids; empty derives it from the repository's name.
+    IdPrefix,
 }
 
 /// Every `tasks.*` key, in the order a settings UI lists them.
-pub const TASK_KEYS: [TaskKey; 14] = [
+pub const TASK_KEYS: [TaskKey; 19] = [
     TaskKey::Merge,
     TaskKey::ReviewRounds,
     TaskKey::MustFix,
@@ -525,8 +549,13 @@ pub const TASK_KEYS: [TaskKey; 14] = [
     TaskKey::Branch,
     TaskKey::StartNotes,
     TaskKey::FinishNotes,
+    TaskKey::WorktreeFiles,
     TaskKey::TickSecs,
     TaskKey::NewsSettleSecs,
+    TaskKey::SelfUpdate,
+    TaskKey::AutoClean,
+    TaskKey::GhUser,
+    TaskKey::IdPrefix,
 ];
 
 impl TaskKey {
@@ -545,8 +574,13 @@ impl TaskKey {
             Self::Branch => "branch",
             Self::StartNotes => "start_notes",
             Self::FinishNotes => "finish_notes",
+            Self::WorktreeFiles => "worktree_files",
             Self::TickSecs => "tick_secs",
             Self::NewsSettleSecs => "news_settle_secs",
+            Self::SelfUpdate => "self_update",
+            Self::AutoClean => "auto_clean",
+            Self::GhUser => "gh_user",
+            Self::IdPrefix => "id_prefix",
         }
     }
 
@@ -567,7 +601,7 @@ impl TaskKey {
     /// The range a number must lie in, when the key takes one.
     fn range(self) -> Option<(i64, i64)> {
         match self {
-            Self::ReviewRounds => Some((1, 10)),
+            Self::ReviewRounds => Some((0, 10)),
             Self::MaxRunning => Some((1, 10)),
             Self::ArchiveAfter => Some((0, 3650)),
             Self::TickSecs => Some((1, 3600)),
@@ -579,6 +613,60 @@ impl TaskKey {
     /// Whether a repository's committed file may set this key.
     pub fn is_repo_allowed(self) -> bool {
         REPO_KEYS.contains(&self)
+    }
+}
+
+/// The tunnel providers `web.tunnel` may name, in the words `shprd web up
+/// --tunnel` takes.
+///
+/// `shprd-remote` owns the providers; this list is the words only, because the
+/// settings model sits below it. A test there keeps the two the same.
+pub const WEB_TUNNEL_WORDS: [&str; 5] = [
+    "tailscale",
+    "cloudflared",
+    "cloudflared-named",
+    "ngrok",
+    "tunnl",
+];
+
+/// A `web.*` key: how remote access is reached.
+///
+/// None of these may be set by a repository's committed file: where a shell is
+/// exposed is the person's decision, and a cloned repository must not make it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum WebKey {
+    /// The provider `shprd web up` uses when `--tunnel` is not given.
+    Tunnel,
+    /// tunnl.gg only: ask for the stable address.
+    Stable,
+    /// cloudflared-named: the tunnel's name.
+    CloudflaredName,
+    /// cloudflared-named: the hostname routed to it.
+    CloudflaredHost,
+}
+
+/// Every `web.*` key, in the order a settings UI lists them.
+pub const WEB_KEYS: [WebKey; 4] = [
+    WebKey::Tunnel,
+    WebKey::Stable,
+    WebKey::CloudflaredName,
+    WebKey::CloudflaredHost,
+];
+
+impl WebKey {
+    /// The key's name under `[web]`, e.g. `cloudflared_name`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Tunnel => "tunnel",
+            Self::Stable => "stable",
+            Self::CloudflaredName => "cloudflared_name",
+            Self::CloudflaredHost => "cloudflared_host",
+        }
+    }
+
+    /// The key a `[web]` name is, or [`None`].
+    pub fn parse(name: &str) -> Option<WebKey> {
+        WEB_KEYS.into_iter().find(|key| key.name() == name)
     }
 }
 
@@ -603,6 +691,8 @@ pub enum Key {
     CrossVendor,
     /// `host`: which terminal host shprd drives (`auto` picks one).
     Host,
+    /// A `web.<key>`: how remote access is reached.
+    Web(WebKey),
 }
 
 impl Key {
@@ -641,7 +731,9 @@ impl Key {
             ["graph", "dagr"] => Ok(Self::GraphDagr),
             ["review", "cross_vendor"] => Ok(Self::CrossVendor),
             ["host"] => Ok(Self::Host),
+            ["web", name] => WebKey::parse(name).map(Self::Web).ok_or_else(unknown),
             ["land", "merge"] => Ok(Self::Task(TaskKey::Merge)),
+            ["land", "gh_user"] => Ok(Self::Task(TaskKey::GhUser)),
             ["tick", "max_running"] => Ok(Self::Task(TaskKey::MaxRunning)),
             ["tick", "interval_secs"] => Ok(Self::Task(TaskKey::TickSecs)),
             ["janitor", "archive_days"] => Ok(Self::Task(TaskKey::ArchiveAfter)),
@@ -661,6 +753,7 @@ impl Key {
             Self::GraphDagr => "graph.dagr".to_owned(),
             Self::CrossVendor => "review.cross_vendor".to_owned(),
             Self::Host => "host".to_owned(),
+            Self::Web(key) => format!("web.{}", key.name()),
         }
     }
 
@@ -670,12 +763,14 @@ impl Key {
             Self::RolesOrder => Kind::List,
             Self::Role { field, .. } => match field {
                 RoleField::Fast | RoleField::Readonly => Kind::Switch,
-                RoleField::Fallback => Kind::List,
+                RoleField::Fallback | RoleField::Agents => Kind::List,
                 RoleField::Kind => Kind::OneOf(&ROLE_KINDS),
                 _ => Kind::Text,
             },
             Self::Task(key) => match key {
-                TaskKey::Proof | TaskKey::Worktrees => Kind::Switch,
+                TaskKey::Proof | TaskKey::Worktrees | TaskKey::SelfUpdate | TaskKey::AutoClean => {
+                    Kind::Switch
+                }
                 TaskKey::Merge | TaskKey::MustFix => match key.words() {
                     Some(words) => Kind::OneOf(words),
                     None => Kind::Text,
@@ -690,6 +785,9 @@ impl Key {
             Self::GraphDagr => Kind::Text,
             Self::CrossVendor => Kind::Switch,
             Self::Host => Kind::OneOf(&HOST_WORDS),
+            Self::Web(WebKey::Tunnel) => Kind::OneOf(&WEB_TUNNEL_WORDS),
+            Self::Web(WebKey::Stable) => Kind::Switch,
+            Self::Web(_) => Kind::Text,
         }
     }
 
@@ -759,6 +857,21 @@ impl Key {
             crate::prompts::PromptRef::parse(text).map_err(|err| err.to_string())?;
         }
         Ok(())
+    }
+
+    /// The value as it is stored: a role's name is trimmed and cut to
+    /// [`TITLE_MAX`] characters, and a name with nothing in it is no value at all
+    /// (the role goes back to its built-in title). Every other value is kept.
+    pub fn normalized(&self, value: Option<Value>) -> Option<Value> {
+        let Self::Role {
+            field: RoleField::Title,
+            ..
+        } = self
+        else {
+            return value;
+        };
+        let text = normalize_title(value?.text()?);
+        (!text.is_empty()).then_some(Value::Text(text))
     }
 
     /// The numeric range of a `tasks.*` key, when it has one.
@@ -1116,6 +1229,26 @@ pub fn read_repo_file(root: &Path) -> Result<Layer, SettingsError> {
     })
 }
 
+/// The prefix this repository's auto-assigned task ids carry, e.g. `SHP`.
+///
+/// `tasks.id_prefix` when it is set (and has a letter or digit in it), else
+/// derived from the repository directory's name, so it is stable for a
+/// repository. A settings file that cannot be read derives it.
+pub fn task_id_prefix(home: Option<&Path>, repo: &Path) -> String {
+    let set = home
+        .and_then(|home| Loaded::read(home, Some(repo)).ok())
+        .map(|loaded| crate::event::clean_id_prefix(&loaded.resolve(None).tasks().id_prefix))
+        .unwrap_or_default();
+    if !set.is_empty() {
+        return set;
+    }
+    let name = repo
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    crate::event::derive_id_prefix(&name)
+}
+
 /// Read a file, or [`None`] when it does not exist.
 fn read_optional(path: &Path) -> Result<Option<String>, SettingsError> {
     match std::fs::read_to_string(path) {
@@ -1272,6 +1405,17 @@ fn parse_sections(table: &toml::Table, origin: &str, limit: Limit) -> Result<Lay
                 }
             }
             "host" => store(&mut layer, Key::Host, item, origin, limit)?,
+            "web" => {
+                let section = item.as_table().ok_or_else(|| SettingsError::BadValue {
+                    key: named(origin, "web"),
+                    reason: "must be a table".to_owned(),
+                })?;
+                for (field, value) in section {
+                    let key =
+                        WebKey::parse(field).ok_or_else(|| unknown_key(origin, "web", field))?;
+                    store(&mut layer, Key::Web(key), value, origin, limit)?;
+                }
+            }
             other => {
                 return Err(SettingsError::UnknownKey {
                     key: named(origin, other),
@@ -1424,13 +1568,21 @@ pub fn builtin() -> Layer {
         Value::Text(config.janitor.namespace),
     );
     layer.set(Key::Task(TaskKey::Worktrees), Value::Switch(true));
+    layer.set(Key::Task(TaskKey::SelfUpdate), Value::Switch(false));
+    layer.set(Key::Task(TaskKey::AutoClean), Value::Switch(true));
     layer.set(Key::Task(TaskKey::Base), Value::Text(String::new()));
+    layer.set(Key::Task(TaskKey::GhUser), Value::Text(String::new()));
+    layer.set(Key::Task(TaskKey::IdPrefix), Value::Text(String::new()));
     layer.set(
         Key::Task(TaskKey::Branch),
         Value::Text(DEFAULT_BRANCH.to_owned()),
     );
     layer.set(Key::Task(TaskKey::StartNotes), Value::Text(String::new()));
     layer.set(Key::Task(TaskKey::FinishNotes), Value::Text(String::new()));
+    layer.set(
+        Key::Task(TaskKey::WorktreeFiles),
+        Value::Text(String::new()),
+    );
     layer.set(
         Key::Task(TaskKey::TickSecs),
         Value::Number(i64::try_from(config.tick.interval_secs).unwrap_or(15)),
@@ -1442,6 +1594,19 @@ pub fn builtin() -> Layer {
     layer.set(Key::GraphDagr, Value::Text(String::new()));
     layer.set(Key::CrossVendor, Value::Switch(true));
     layer.set(Key::Host, Value::Text(HostChoice::Auto.name().to_owned()));
+    layer.set(
+        Key::Web(WebKey::Tunnel),
+        Value::Text(WEB_TUNNEL_WORDS[0].to_owned()),
+    );
+    layer.set(Key::Web(WebKey::Stable), Value::Switch(false));
+    layer.set(
+        Key::Web(WebKey::CloudflaredName),
+        Value::Text(String::new()),
+    );
+    layer.set(
+        Key::Web(WebKey::CloudflaredHost),
+        Value::Text(String::new()),
+    );
     layer.set(
         Key::RolesOrder,
         Value::List(BUILTIN_ROLES.iter().map(|id| (*id).to_owned()).collect()),
@@ -1462,8 +1627,10 @@ pub fn builtin() -> Layer {
     layer
 }
 
-/// The branch pattern new tasks are named after, when nobody set one.
-pub const DEFAULT_BRANCH: &str = "task/{n}-{slug}";
+/// The branch pattern new tasks are named after, when nobody set one: what
+/// follows the archive namespace. `{run}`, `{task}`, `{n}` and `{slug}` stand
+/// for the run id, the task id, its number and its lowercased id.
+pub const DEFAULT_BRANCH: &str = "{run}/{task}";
 
 /// How long a change must hold before a space's coordinator is told about it,
 /// in seconds: Shepherdr's settle window (`news.py`'s `NEWS_SETTLE_MS`), used
@@ -1478,7 +1645,7 @@ fn builtin_roles() -> Vec<(String, RoleDefaults)> {
         (
             "coordinator".to_owned(),
             RoleDefaults {
-                title: "Assistant".to_owned(),
+                title: "Orchestrator".to_owned(),
                 about: "Plans the work and starts a task for each part.".to_owned(),
                 kind: RoleKind::Coordinator,
                 prompt: "prompt:assistant".to_owned(),
@@ -1503,16 +1670,6 @@ fn builtin_roles() -> Vec<(String, RoleDefaults)> {
                 kind: RoleKind::Reviewer,
                 prompt: "prompt:reviewer".to_owned(),
                 readonly: true,
-            },
-        ),
-        (
-            "backup".to_owned(),
-            RoleDefaults {
-                title: "Backup agent".to_owned(),
-                about: "Takes a task over once, when the worker's CLI cannot go on.".to_owned(),
-                kind: RoleKind::Worker,
-                prompt: "prompt:backup".to_owned(),
-                readonly: false,
             },
         ),
     ]
@@ -1541,7 +1698,7 @@ impl RoleDefaults {
             RoleField::Kind => Some(Value::Text(self.kind.name().to_owned())),
             RoleField::Readonly => Some(Value::Switch(self.readonly)),
             RoleField::Fast => Some(Value::Switch(false)),
-            RoleField::Fallback => Some(Value::List(Vec::new())),
+            RoleField::Fallback | RoleField::Agents => Some(Value::List(Vec::new())),
             RoleField::Prompt => Some(Value::Text(self.prompt.clone())),
             _ => None,
         }
@@ -1642,11 +1799,19 @@ pub fn resolve(file: &File, request: &Request<'_>) -> Resolved {
             ids.extend(layer.role_ids());
         }
     }
+    ids.retain(|id| !RETIRED_ROLES.contains(&id.as_str()));
+    values.retain(|name, _| {
+        !RETIRED_ROLES
+            .iter()
+            .any(|id| name.starts_with(&format!("roles.{id}.")))
+    });
     if let Some(Sourced { value, .. }) = values.get("roles.order")
         && let Some(order) = value.list()
     {
         for id in order {
-            ids.insert(id.clone());
+            if !RETIRED_ROLES.contains(&id.as_str()) {
+                ids.insert(id.clone());
+            }
         }
     }
     for id in &ids {
@@ -1730,13 +1895,148 @@ pub struct ResolvedRole {
     pub fast: Sourced<bool>,
     /// The access mode, as one of the program's ids.
     pub perm: Option<Sourced<String>>,
+    /// The worker lines after the first, as stored (see [`WorkerLine`]).
+    pub agents: Sourced<Vec<String>>,
     /// The programs to fall back through, in order.
     pub fallback: Sourced<Vec<String>>,
     /// Whether the role only reads.
     pub readonly: Sourced<bool>,
 }
 
+/// One program line of a role that may run several: a worker's.
+///
+/// The first line is the role's own `agent`, `model`, `effort`, `fast` and `perm`;
+/// the rest are stored in `agents` as `agent|model|effort|fast|perm` strings (an
+/// empty part is unset, `fast` is `1` when on). A model id may hold any character
+/// but `|`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerLine {
+    /// The program, as a harness id.
+    pub agent: String,
+    /// The model, in the program's own words.
+    pub model: Option<String>,
+    /// The effort level.
+    pub effort: Option<String>,
+    /// Whether the program's fast mode is on.
+    pub fast: bool,
+    /// The access mode.
+    pub perm: Option<String>,
+}
+
+impl WorkerLine {
+    /// A line that names only its program.
+    pub fn program(agent: &str) -> WorkerLine {
+        WorkerLine {
+            agent: agent.to_owned(),
+            model: None,
+            effort: None,
+            fast: false,
+            perm: None,
+        }
+    }
+
+    /// The line a stored string names, or [`None`] when it names no program.
+    ///
+    /// A bare `program` and `program/model` (the old fallback spelling) read too.
+    pub fn parse(text: &str) -> Option<WorkerLine> {
+        let mut parts = text.split('|');
+        let head = parts.next()?.trim();
+        let rest: Vec<&str> = parts.collect();
+        let some = |part: Option<&&str>| {
+            part.map(|part| part.trim())
+                .filter(|part| !part.is_empty())
+                .map(str::to_owned)
+        };
+        if rest.is_empty() {
+            let (agent, model) = match head.split_once('/') {
+                Some((agent, model)) => (agent.trim(), Some(model.trim().to_owned())),
+                None => (head, None),
+            };
+            if agent.is_empty() {
+                return None;
+            }
+            return Some(WorkerLine {
+                model: model.filter(|model| !model.is_empty()),
+                ..WorkerLine::program(agent)
+            });
+        }
+        if head.is_empty() {
+            return None;
+        }
+        Some(WorkerLine {
+            agent: head.to_owned(),
+            model: some(rest.first()),
+            effort: some(rest.get(1)),
+            fast: rest
+                .get(2)
+                .is_some_and(|part| matches!(part.trim(), "1" | "true")),
+            perm: some(rest.get(3)),
+        })
+    }
+
+    /// The string this line is stored as.
+    pub fn encode(&self) -> String {
+        format!(
+            "{}|{}|{}|{}|{}",
+            self.agent,
+            self.model.as_deref().unwrap_or(""),
+            self.effort.as_deref().unwrap_or(""),
+            if self.fast { "1" } else { "" },
+            self.perm.as_deref().unwrap_or("")
+        )
+    }
+
+    /// The `program` or `program/model` string a worker list names this line by.
+    pub fn agent_ref(&self) -> String {
+        match &self.model {
+            Some(model) => format!("{}/{model}", self.agent),
+            None => self.agent.clone(),
+        }
+    }
+}
+
 impl ResolvedRole {
+    /// The role's program lines, first (the default) first.
+    ///
+    /// The first line is the role's own `agent` (none when no program is named);
+    /// the rest are `agents`, or — for a settings file written before a role could
+    /// hold several — the `fallback` programs, each as a line with the program's
+    /// own defaults. A program is listed once: a later line naming it again is
+    /// ignored, because a task picks a line by its program.
+    pub fn lines(&self) -> Vec<WorkerLine> {
+        let mut lines: Vec<WorkerLine> = Vec::new();
+        // The role's own `agent` is always the first line, whatever layer set it:
+        // `agents` only lists what follows when it cannot run.
+        if let Some(agent) = self.agent.as_ref() {
+            let some = |field: &Option<Sourced<String>>| {
+                field
+                    .as_ref()
+                    .map(|sourced| sourced.value.trim().to_owned())
+                    .filter(|text| !text.is_empty())
+            };
+            lines.push(WorkerLine {
+                agent: agent.value.clone(),
+                model: some(&self.model),
+                effort: some(&self.effort),
+                fast: self.fast.value,
+                perm: some(&self.perm),
+            });
+        }
+        let more = if self.agents.value.is_empty() {
+            &self.fallback.value
+        } else {
+            &self.agents.value
+        };
+        for text in more {
+            if let Some(line) = WorkerLine::parse(text)
+                && !lines.iter().any(|kept| kept.agent == line.agent)
+            {
+                lines.push(line);
+            }
+        }
+        lines
+    }
+
     /// Whether this role may review: it is a reviewer, or it only reads.
     pub fn may_review(&self) -> bool {
         self.kind.value == RoleKind::Reviewer || self.readonly.value
@@ -1746,6 +2046,45 @@ impl ResolvedRole {
     pub fn label(&self) -> &str {
         &self.title.value
     }
+
+    /// The name the person sees for this role: its title, trimmed and cut to
+    /// [`TITLE_MAX`] characters, or the role's built-in title when the stored one
+    /// is empty. See [`display_title`].
+    pub fn display_title(&self) -> String {
+        display_title(&self.title.value, &self.id)
+    }
+}
+
+/// The longest name a role may have, in characters.
+///
+/// A tab, a toast and a sidebar line all carry it, so it has to fit them.
+pub const TITLE_MAX: usize = 24;
+
+/// The name a role is shown under: `raw` trimmed and cut to [`TITLE_MAX`]
+/// characters, or — when nothing is left — the built-in title of the role `id`
+/// (a shipped role's own word, else the id itself).
+pub fn display_title(raw: &str, id: &str) -> String {
+    let named = normalize_title(raw);
+    if !named.is_empty() {
+        return named;
+    }
+    builtin_roles()
+        .into_iter()
+        .find(|(known, _)| known == id)
+        .map_or_else(|| id.to_owned(), |(_, defaults)| defaults.title)
+}
+
+/// A typed role name as it is stored: trimmed, whitespace runs inside it kept
+/// as one space, and cut to [`TITLE_MAX`] characters. Empty means "no name".
+pub fn normalize_title(raw: &str) -> String {
+    let words: Vec<&str> = raw.split_whitespace().collect();
+    words
+        .join(" ")
+        .chars()
+        .take(TITLE_MAX)
+        .collect::<String>()
+        .trim_end()
+        .to_owned()
 }
 
 /// The resolved workflow values, typed.
@@ -1767,14 +2106,25 @@ pub struct Tasks {
     pub archive_namespace: String,
     /// Whether every task gets its own worktree.
     pub worktrees: bool,
+    /// Whether shprd rebuilds and restarts itself after a landed task changes it.
+    pub self_update: bool,
+    /// Whether the engine removes a landed or dropped task's worktree and branch itself.
+    pub auto_clean: bool,
     /// The branch new tasks start from and merge into.
     pub base: String,
+    /// The `gh` account pinned for forge calls; empty means the active one.
+    pub gh_user: String,
+    /// The prefix of auto-assigned task ids (e.g. `SHP`); empty derives it from the repository's name.
+    pub id_prefix: String,
     /// The pattern new tasks' branches are named after.
     pub branch: String,
     /// Words put into a task's brief when it starts.
     pub start_notes: String,
     /// Words put into a task's brief before it reports.
     pub finish_notes: String,
+    /// The files to copy or link from the main checkout into every worktree:
+    /// one per line or comma-separated, `link:` before a path links it.
+    pub worktree_files: String,
     /// Seconds between two passes of the service's tick.
     pub tick_secs: u64,
     /// Seconds a change must hold before a space's coordinator is told about
@@ -1809,6 +2159,18 @@ impl Resolved {
     /// The role ids, in the order a settings UI shows them.
     pub fn order(&self) -> &[String] {
         &self.roles
+    }
+
+    /// What each role is called, by role id, in the order a settings UI shows
+    /// them: every name is [`ResolvedRole::display_title`].
+    pub fn role_titles(&self) -> Vec<(String, String)> {
+        self.roles()
+            .into_iter()
+            .map(|role| {
+                let title = role.display_title();
+                (role.id, title)
+            })
+            .collect()
     }
 
     /// Every role, in the order a settings UI shows them.
@@ -1862,6 +2224,7 @@ impl Resolved {
             effort: optional(RoleField::Effort),
             fast: self.switch_of(id, RoleField::Fast),
             perm: optional(RoleField::Perm),
+            agents: self.list_of(id, RoleField::Agents),
             fallback: self.list_of(id, RoleField::Fallback),
             readonly: self.switch_of(id, RoleField::Readonly),
         })
@@ -1917,7 +2280,19 @@ impl Resolved {
                 .unwrap_or(&defaults.janitor.namespace)
                 .to_owned(),
             worktrees: self.on(TaskKey::Worktrees, true),
+            self_update: self.on(TaskKey::SelfUpdate, false),
+            auto_clean: self.on(TaskKey::AutoClean, true),
             base: self.text(TaskKey::Base).unwrap_or_default().to_owned(),
+            gh_user: self
+                .text(TaskKey::GhUser)
+                .unwrap_or_default()
+                .trim()
+                .to_owned(),
+            id_prefix: self
+                .text(TaskKey::IdPrefix)
+                .unwrap_or_default()
+                .trim()
+                .to_owned(),
             branch: self
                 .text(TaskKey::Branch)
                 .unwrap_or(DEFAULT_BRANCH)
@@ -1928,6 +2303,10 @@ impl Resolved {
                 .to_owned(),
             finish_notes: self
                 .text(TaskKey::FinishNotes)
+                .unwrap_or_default()
+                .to_owned(),
+            worktree_files: self
+                .text(TaskKey::WorktreeFiles)
                 .unwrap_or_default()
                 .to_owned(),
             tick_secs: u64::from(self.count(
@@ -1963,6 +2342,42 @@ impl Resolved {
             .and_then(|sourced| sourced.value.text())
             .and_then(HostChoice::parse)
             .unwrap_or_default()
+    }
+
+    /// A `web.*` value's text, trimmed.
+    fn web_text(&self, key: WebKey) -> &str {
+        self.get(&Key::Web(key))
+            .and_then(|sourced| sourced.value.text())
+            .map(str::trim)
+            .unwrap_or_default()
+    }
+
+    /// The tunnel provider `web up` uses when none is named: one of
+    /// [`WEB_TUNNEL_WORDS`], `tailscale` when the value is not one.
+    pub fn web_tunnel(&self) -> &str {
+        let word = self.web_text(WebKey::Tunnel);
+        WEB_TUNNEL_WORDS
+            .into_iter()
+            .find(|candidate| *candidate == word)
+            .unwrap_or(WEB_TUNNEL_WORDS[0])
+    }
+
+    /// Whether tunnl.gg's stable address is asked for.
+    pub fn web_stable(&self) -> bool {
+        self.get(&Key::Web(WebKey::Stable))
+            .and_then(|sourced| sourced.value.switch())
+            .unwrap_or(false)
+    }
+
+    /// The named cloudflared tunnel's name; empty when none is set.
+    pub fn web_cloudflared_name(&self) -> &str {
+        self.web_text(WebKey::CloudflaredName)
+    }
+
+    /// The hostname routed to the named cloudflared tunnel; empty when none is
+    /// set.
+    pub fn web_cloudflared_host(&self) -> &str {
+        self.web_text(WebKey::CloudflaredHost)
     }
 
     /// Whether a reviewer must be another vendor than the worker.
@@ -2017,6 +2432,9 @@ impl Resolved {
         self.push_row(&mut rows, Key::GraphDagr);
         self.push_row(&mut rows, Key::CrossVendor);
         self.push_row(&mut rows, Key::Host);
+        for key in WEB_KEYS {
+            self.push_row(&mut rows, Key::Web(key));
+        }
         rows
     }
 
@@ -2148,7 +2566,11 @@ impl Loaded {
             },
             Some(value) => {
                 let inherited = self.preview(scope, key, None, task);
-                let same = inherited.get(key).map(|sourced| &sourced.value) == Some(&value);
+                // A value the old `config.toml` still supplies is not a settings
+                // layer: setting it to the same word must write the new layer, or
+                // the person's choice is never stored.
+                let same = inherited.get(key).map(|sourced| &sourced.value) == Some(&value)
+                    && inherited.source_of(key) != Some(Source::Legacy);
                 if same {
                     (WriteOutcome::EqualToInherited, None)
                 } else {
@@ -2218,7 +2640,7 @@ impl WriteOutcome {
         match self {
             Self::Stored => format!("ok {} stored", key.name()),
             Self::EqualToInherited => format!(
-                "ok {} not stored: it equals what this scope inherits",
+                "ok {} is back to what this scope inherits: it is no longer overridden here, and any earlier override was removed",
                 key.name()
             ),
             Self::Removed => format!("ok {} unset", key.name()),

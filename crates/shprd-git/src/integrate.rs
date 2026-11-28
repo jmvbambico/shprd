@@ -5,11 +5,11 @@
 //! stops on a conflict rewrites the working tree, and shprd is not allowed to
 //! do that anywhere a human might be working.
 
+use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
-use crate::changed::{changed_paths, outside_scope};
 use crate::git::{Git, GitError};
 use crate::worktree::{Layout, WorktreeError};
 
@@ -44,7 +44,7 @@ pub struct TaskCommits {
     /// The commits the task claims, oldest first. Abbreviated ids are accepted
     /// and resolved.
     pub claimed: Vec<String>,
-    /// The paths the task was allowed to change.
+    /// The paths the task declared: a hint for its worker, never a limit.
     pub scope: Vec<String>,
 }
 
@@ -100,12 +100,6 @@ pub enum IntegrateError {
         branch: String,
         /// The base it was cut from.
         base: String,
-    },
-    /// The branch changed paths the task was not allowed to change.
-    #[error("task changed {} path(s) outside its scope", outside.len())]
-    OutsideScope {
-        /// The offending paths.
-        outside: Vec<String>,
     },
     /// A cherry-pick failed. The integration worktree is back on the head it
     /// had before the attempt.
@@ -231,13 +225,22 @@ pub fn open_integration_branch(
     let path_exists = path.exists();
     match (branch_exists, path_exists) {
         (true, true) => {
-            let checked_out = Git::new(&path).current_branch()?;
-            if checked_out.as_deref() != Some(branch) {
-                return Err(IntegrateError::BadState {
-                    path,
-                    branch: branch.to_string(),
-                    detail: format!("it is on {checked_out:?}"),
-                });
+            let at = Git::new(&path);
+            match at.current_branch()? {
+                Some(on) if on == branch => {}
+                // Between lands the worktree is detached so the person's own
+                // checkout may hold the branch; a landing takes it back, and git
+                // refuses (with its own reason) when the person holds it now.
+                None => {
+                    at.run(&["switch", branch])?;
+                }
+                Some(on) => {
+                    return Err(IntegrateError::BadState {
+                        path,
+                        branch: branch.to_string(),
+                        detail: format!("it is on {:?}", Some(on)),
+                    });
+                }
             }
             repair_state_excluded(&path)?;
             Ok(IntegrationWorktree {
@@ -277,6 +280,218 @@ pub fn open_integration_branch(
     }
 }
 
+/// Lets go of the integration branch: detaches the worktree's `HEAD` at the
+/// branch's tip.
+///
+/// Git lets one worktree hold a branch, so a worktree left on the integration
+/// branch keeps the person from `git switch`ing to it in their own checkout. A
+/// landing calls this when it is done, and [`open_integration_branch`] takes the
+/// branch back for the next one.
+///
+/// # Errors
+///
+/// Fails when git cannot detach the worktree.
+pub fn release_integration(int: &IntegrationWorktree) -> Result<(), IntegrateError> {
+    Git::new(&int.path).run(&["switch", "--detach"])?;
+    Ok(())
+}
+
+/// One run's exclusive integration lock, released when it is dropped.
+///
+/// Every verb that writes the integration worktree takes it — `integrate`
+/// cherry-picks onto the branch, `sync` merges the base into it, `gate` runs
+/// commands in it, `land` reads the head it pushes, `approve` reads the head it
+/// stamps — and so does the tick's idle sweep, because detaching `HEAD` under a
+/// landing is the same race as merging under one. The lock is an advisory lock
+/// on a file under `<home>/.shprd/locks`, so it is held by the process and not by
+/// a stale file: the OS drops it however the process ends.
+pub struct RunLock {
+    /// The open file the lock sits on. Closing it releases the lock.
+    _file: File,
+}
+
+impl RunLock {
+    /// A lock on a file this caller has already locked itself.
+    ///
+    /// For a lock whose name the binary owns rather than the library — the
+    /// start lock is the CLI's alone — so both still release by dropping the
+    /// file, rather than by two implementations of the same advisory lock.
+    #[must_use]
+    pub fn from_locked(file: File) -> Self {
+        Self { _file: file }
+    }
+}
+
+/// The file the lock of `run` in `repo_name` sits on.
+///
+/// The repository name and the run id are in the name, so two repositories, or
+/// two runs of one repository, never wait on each other.
+#[must_use]
+pub fn lock_path(home: &Path, repo_name: &str, run: &str) -> PathBuf {
+    home.join(".shprd")
+        .join("locks")
+        .join(format!("{repo_name}-{run}-int.lock"))
+}
+
+/// Takes the run's integration lock, blocking until it is free.
+///
+/// # Errors
+///
+/// Fails when the lock file cannot be opened or locked.
+pub fn lock_run(home: &Path, repo_name: &str, run: &str) -> std::io::Result<RunLock> {
+    let file = open_lock(lock_path(home, repo_name, run))?;
+    file.lock()?;
+    Ok(RunLock { _file: file })
+}
+
+/// Takes the run's integration lock, or answers `None` when something holds it.
+///
+/// For a caller that must not wait — the tick's idle sweep runs inside a pass,
+/// and a landing may hold the lock for as long as a gate takes. `None` means "a
+/// verb is working on this worktree right now", which is the one thing the
+/// sweep has to stay out of the way of.
+///
+/// # Errors
+///
+/// Fails when the lock file cannot be opened, or for any locking error other
+/// than the lock being held.
+pub fn try_lock_run(home: &Path, repo_name: &str, run: &str) -> std::io::Result<Option<RunLock>> {
+    let file = open_lock(lock_path(home, repo_name, run))?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(RunLock { _file: file })),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(err)) => Err(err),
+    }
+}
+
+/// Opens (making its folder and the file itself) the lock `path` names.
+fn open_lock(path: PathBuf) -> std::io::Result<File> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+}
+
+/// Detaches the integration worktree at `path` when it still sits on a branch.
+///
+/// For the tick's idle sweep: a base sync (or any other command) re-takes the
+/// branch, and nothing else lets it go until the next landing. Does nothing
+/// when the path is not a worktree, is already detached, or has uncommitted
+/// work (a command may be mid-merge there). Returns true when it detached.
+///
+/// The caller must hold the run's integration lock ([`try_lock_run`]) across
+/// this call: a clean worktree on the branch is also what a landing that has not
+/// merged yet looks like, and detaching `HEAD` under it would land the merge on
+/// a detached head while the branch never moves.
+pub fn release_if_held(path: &Path) -> bool {
+    if !path.join(".git").exists() {
+        return false;
+    }
+    let git = Git::new(path);
+    match (git.current_branch(), git.is_clean()) {
+        (Ok(Some(_)), Ok(true)) => git.run(&["switch", "--detach"]).is_ok(),
+        _ => false,
+    }
+}
+
+/// Brings the local `branch` back to the remote's copy of it, when the two differ.
+///
+/// With a forge, the remote is where a branch lands, so a local ref that is
+/// ahead of it or apart from it is a landing that never reached the forge. The
+/// remote is fetched first (best effort; offline leaves what is known), and the
+/// ref is then moved with `git branch -f`. The commits stay reachable on the task
+/// branches and in the reflog. A branch that is checked out in a worktree is left
+/// alone, because moving it would change that worktree's files; so is a
+/// repository with no forge or a branch the remote does not have. Returns
+/// whether the ref moved.
+pub fn realign_with_remote(repo: &Path, branch: &str) -> bool {
+    matches!(
+        realign_outcome(repo, branch, |host| crate::land::gh_authed(repo, host)),
+        Realign::Moved
+    )
+}
+
+/// What [`realign_outcome`] did to the local integration ref.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Realign {
+    /// Nothing to do: no forge, no remote copy, already equal, or the branch is
+    /// checked out in a worktree.
+    Unchanged,
+    /// The local ref moved to the remote's copy.
+    Moved,
+    /// The local ref holds nothing the remote lacks (equal to it, or only
+    /// commits it has by content), so no diverged-ref condition holds.
+    Aligned,
+    /// The local ref holds commits the remote does not have, even by content.
+    /// It is left as it is; these are the local-only commits (`sha subject`).
+    Kept(Vec<String>),
+}
+
+/// [`realign_with_remote`] with the forge-client check given (see
+/// [`crate::land::forge_expected_with`]), reporting what happened.
+///
+/// A local ref is moved back only when every commit it has that the remote
+/// lacks is already on the remote by content (`git cherry` shows only `-`
+/// lines: a squash or rebase landing carried them over as new commits). Any
+/// other local-only commit is work that exists nowhere else, so the ref is kept
+/// and the commits are named in [`Realign::Kept`].
+pub fn realign_outcome(repo: &Path, branch: &str, authed: impl Fn(&str) -> bool) -> Realign {
+    let git = Git::new(repo);
+    // Only a remote with a forge behind it (GitHub, or a host a forge client
+    // can drive) is one a landing goes through; any other remote's local
+    // branch may hold work that is not on it yet.
+    if !crate::land::forge_expected_with(&git, authed) {
+        return Realign::Unchanged;
+    }
+    let Some(remote) = crate::worktree::remote_of(&git) else {
+        return Realign::Unchanged;
+    };
+    let _ = git.run(&["fetch", "--quiet", &remote, branch]);
+    let tracking = format!("refs/remotes/{remote}/{branch}");
+    let local = format!("refs/heads/{branch}");
+    let (Ok(theirs), Ok(ours)) = (git.rev_parse(&tracking), git.rev_parse(&local)) else {
+        return Realign::Unchanged;
+    };
+    if theirs == ours {
+        return Realign::Aligned;
+    }
+    // `git cherry <upstream> <head>`: `+` is a commit of head whose change the
+    // upstream lacks, `-` one it already has by content.
+    let Ok(cherry) = git.run(&["cherry", &tracking, &local]) else {
+        return Realign::Unchanged;
+    };
+    let only_here: Vec<String> = cherry
+        .lines()
+        .filter_map(|line| line.strip_prefix("+ "))
+        .map(|sha| {
+            let sha = sha.trim();
+            let subject = git
+                .run(&["log", "-1", "--format=%s", sha])
+                .unwrap_or_default();
+            format!("{} {}", &sha[..sha.len().min(7)], subject.trim())
+        })
+        .collect();
+    if !only_here.is_empty() {
+        return Realign::Kept(only_here);
+    }
+    let held = git
+        .run(&["worktree", "list", "--porcelain"])
+        .is_ok_and(|list| list.lines().any(|line| line == format!("branch {local}")));
+    if held {
+        return Realign::Unchanged;
+    }
+    if git.run(&["branch", "-f", branch, &theirs]).is_ok() {
+        Realign::Moved
+    } else {
+        Realign::Unchanged
+    }
+}
+
 /// Creates the directory a worktree will sit in.
 fn create_parent(path: &Path) -> Result<(), IntegrateError> {
     let Some(parent) = path.parent() else {
@@ -306,9 +521,8 @@ fn path_text(path: &Path) -> Result<String, WorktreeError> {
 /// Lands a task's commits on the integration branch.
 ///
 /// Everything is checked before anything is picked: the worktree must be
-/// clean, the branch must contain exactly the commits the task claimed, and
-/// every path those commits touch must be inside the task's scope. Only then
-/// are the commits cherry-picked, oldest first, with `-x` so each one records
+/// clean and the branch must contain exactly the commits the task claimed.
+/// Only then are the commits cherry-picked, oldest first, with `-x` so each one records
 /// where it came from.
 ///
 /// A pick that fails leaves the integration worktree on the head it started
@@ -340,12 +554,8 @@ pub fn integrate(
             branch: task.branch.clone(),
         });
     }
-    let changed = changed_paths(&int.path, &task.base_sha, &tip)?;
-    let outside = outside_scope(&changed, &task.scope);
-    if !outside.is_empty() {
-        return Err(IntegrateError::OutsideScope { outside });
-    }
-
+    // The task's declared scope is a hint, not a limit: what the branch changes
+    // was judged by its review, so nothing here refuses a path.
     let head = git.head_sha()?;
     let mut picked = Vec::with_capacity(expected.len());
     for commit in &expected {

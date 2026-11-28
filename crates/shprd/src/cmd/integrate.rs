@@ -52,7 +52,7 @@ pub fn verb(
         .ok_or_else(|| CliError::other(anyhow!("unknown task {:?}", args.task)))?;
     let branch = latest_branch(&task)?;
     let home = resolve_home(home)?;
-    let layout = Layout::default_for_home(&home);
+    let layout = Layout::from_settings(&home, &ctx.root);
     let repo_name = repo_name(ctx)?;
     let _lock = lock_run(&home, &repo_name, &run.run_id)?;
     let worktree = integrate::open_integration(
@@ -130,11 +130,8 @@ fn close_worker_tab(mux: &dyn Host, ctx: &Ctx, home: Option<&Path>, task: &str) 
     let Some(run) = state.run.as_ref().map(|run| run.run_id.clone()) else {
         return;
     };
-    let Ok(repo_name) = spawn::repo_name(&ctx.root) else {
-        return;
-    };
     let briefs = home.join(".shprd").join("briefs");
-    if let Err(err) = spawn::close_task_space(mux, &briefs, &run, &repo_name, task) {
+    if let Err(err) = spawn::stop_task_agents(mux, &briefs, &run, task) {
         eprintln!("warning: {err}");
     }
 }
@@ -368,6 +365,7 @@ mod tests {
                 attempt: 1,
                 reviewer: "codex/m1".to_string(),
                 degraded: false,
+                note: None,
             })
             .unwrap_or_else(|err| panic!("{err}"));
             let request_seq = ctx
@@ -396,41 +394,45 @@ mod tests {
                 .unwrap_or_else(|err| panic!("{err}"));
         }
 
-        /// A host with the task's own space, and the worker tab the attempt
-        /// recorded beside its brief, and a second task's space beside it.
+        /// A host with the repository's one space, the worker the attempt
+        /// recorded beside its brief (headless: no tab, no space of its own),
+        /// and a second task's worker beside it.
         ///
-        /// The second space is what a landing must not touch: one task, one
-        /// space, so a close that reached another task's agent would take work
-        /// the run still wants.
+        /// The second worker is what a landing must not touch: a close that
+        /// reached another task's agent would take work the run still wants.
         fn mux_with_worker(&self) -> (FakeMux, String) {
             let mux = FakeMux::default();
             let space = mux
-                .create_space(
-                    &spawn::task_space_name(&self.repo_name(), "t1", "T1"),
-                    self.root(),
-                )
+                .create_space(&spawn::repo_space_name(&self.repo_name()), self.root())
                 .unwrap_or_else(|err| panic!("{err}"));
-            mux.create_space(
-                &spawn::task_space_name(&self.repo_name(), "t1", "T2"),
-                self.root(),
-            )
-            .unwrap_or_else(|err| panic!("{err}"));
-            let tab = mux
-                .spawn(&space.id, "worker", &[], &[], self.root())
-                .unwrap_or_else(|err| panic!("{err}"));
+            let start = |task: &str| {
+                mux.spawn_agent(&shprd_mux::AgentLaunch {
+                    space: &space.id,
+                    title: "worker",
+                    argv: &[],
+                    env: &[],
+                    cwd: self.root(),
+                    role: shprd_mux::AgentRole::Worker,
+                    task: Some(task),
+                    program: "claude",
+                    parent: None,
+                })
+                .unwrap_or_else(|err| panic!("{err}"))
+            };
+            let tab = start("T1");
+            start("T2");
             let record = spawn::tab_path(&self.briefs(), "t1", "T1", 1);
             std::fs::create_dir_all(self.briefs().join("t1")).unwrap_or_else(|err| panic!("{err}"));
             std::fs::write(record, tab.id.as_str()).unwrap_or_else(|err| panic!("{err}"));
             (mux, tab.id.to_string())
         }
 
-        /// Whether `tab` is still open on `mux`, in whatever space holds it.
+        /// Whether `tab` is still open on `mux`: a tab of a space or a headless
+        /// agent's handle.
         fn still_open(&self, mux: &FakeMux, tab: &str) -> bool {
             let _ = self;
-            mux.list_spaces()
-                .unwrap_or_else(|err| panic!("{err}"))
+            spawn::all_handles(mux)
                 .iter()
-                .flat_map(|space| mux.list_tabs(&space.id).unwrap_or_default())
                 .any(|open| open.id == TabId::new(tab))
         }
 
@@ -491,78 +493,33 @@ mod tests {
         );
     }
 
-    /// A landing closes the task's own space, and nothing else.
+    /// A landing stops the task's own agent, and nothing else.
     ///
-    /// This is the space-per-task change: the space labelled from the task goes
-    /// whole, so its worker and its reviewer go with it in one call, and a
-    /// neighbour task's space — whose agent may still be working — is untouched.
+    /// Workers have no space or tab of their own, so what a landing may touch is
+    /// the handle the attempt recorded: the neighbour's worker keeps running and
+    /// the repository's space stays.
     #[test]
-    fn a_landing_closes_the_tasks_space_and_no_other() {
+    fn a_landing_stops_the_tasks_agent_and_no_other() {
         let scratch = Scratch::new();
         let ctx = scratch.ctx();
         scratch.passed(&ctx);
-        let (mux, _tab) = scratch.mux_with_worker();
-        let mine = spawn::task_space_name(&scratch.repo_name(), "t1", "T1");
-        let neighbour = spawn::task_space_name(&scratch.repo_name(), "t1", "T2");
-        assert_eq!(scratch.spaces(&mux), vec![mine.clone(), neighbour.clone()]);
+        let (mux, tab) = scratch.mux_with_worker();
+        let repo = spawn::repo_space_name(&scratch.repo_name());
+        assert_eq!(scratch.spaces(&mux), vec![repo.clone()]);
+        assert_eq!(mux.list_agents().unwrap_or_default().len(), 2);
 
         verb(&mux, &ctx, &args(), Some(scratch.home.path())).unwrap_or_else(|err| panic!("{err}"));
 
-        assert_eq!(
-            scratch.spaces(&mux),
-            vec![neighbour.clone()],
-            "only the landed task's space is gone"
-        );
-        assert!(
-            mux.calls()
-                .iter()
-                .any(|call| matches!(call, Call::CloseSpace(_))),
-            "the space is closed as one call: {:?}",
-            mux.calls()
-        );
-        let kept = mux
-            .find_space(&neighbour)
-            .unwrap_or_else(|err| panic!("{err}"))
-            .unwrap_or_else(|| panic!("the neighbour's space was closed"));
-        assert!(mux.list_tabs(&kept.id).is_ok());
-    }
-
-    /// A host that cannot close a whole space still loses the task's tabs.
-    ///
-    /// The degradation is the capability flag: the space stays on the host's
-    /// bar, but no agent is left running in it, because the records shprd wrote
-    /// name every tab it opened.
-    #[test]
-    fn a_landing_without_space_close_empties_the_tasks_tabs() {
-        let scratch = Scratch::new();
-        let ctx = scratch.ctx();
-        scratch.passed(&ctx);
-        let mux = FakeMux::default().without_close_space();
-        let space = mux
-            .create_space(
-                &spawn::task_space_name(&scratch.repo_name(), "t1", "T1"),
-                scratch.root(),
-            )
-            .unwrap_or_else(|err| panic!("{err}"));
-        let tab = mux
-            .spawn(&space.id, "worker", &[], &[], scratch.root())
-            .unwrap_or_else(|err| panic!("{err}"));
-        let record = spawn::tab_path(&scratch.briefs(), "t1", "T1", 1);
-        std::fs::create_dir_all(scratch.briefs().join("t1")).unwrap_or_else(|err| panic!("{err}"));
-        std::fs::write(record, tab.id.as_str()).unwrap_or_else(|err| panic!("{err}"));
-
-        verb(&mux, &ctx, &args(), Some(scratch.home.path())).unwrap_or_else(|err| panic!("{err}"));
-
-        assert!(
-            mux.calls().contains(&Call::CloseTab(tab.id.clone())),
-            "the tab is closed one by one: {:?}",
-            mux.calls()
-        );
+        assert!(!scratch.still_open(&mux, &tab), "T1's agent was stopped");
+        let left = mux.list_agents().unwrap_or_default();
+        assert_eq!(left.len(), 1, "only the landed task's agent is gone");
+        assert_eq!(left[0].task.as_deref(), Some("T2"));
+        assert_eq!(scratch.spaces(&mux), vec![repo], "the space stays");
         assert!(
             !mux.calls()
                 .iter()
                 .any(|call| matches!(call, Call::CloseSpace(_))),
-            "a host without the capability is never asked: {:?}",
+            "no space is ever closed for a task: {:?}",
             mux.calls()
         );
     }

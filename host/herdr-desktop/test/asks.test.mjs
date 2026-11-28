@@ -17,6 +17,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import {
+  HEADING,
   KIND,
   SECTION,
   actionFor,
@@ -26,6 +27,8 @@ import {
   expiry,
   footer,
   freeText,
+  ifNothing,
+  choiceLabel,
   namesOpenAsk,
   quoted,
   section,
@@ -58,7 +61,9 @@ test("an open ask is one card: its question, its choices and its task", () => {
   const shown = card(ask.task, "ask");
   assert.equal(shown.id, `ask:${ask.task}:${ask.id}`);
   assert.equal(shown.kind, "question");
-  assert.equal(shown.title, KIND.question);
+  assert.equal(shown.title, HEADING.decision);
+  assert.equal(shown.notice, false);
+  assert.deepEqual(shown.buttons.map((button) => button.label), ["CLI only", "Both", "Leave it to me"]);
   assert.equal(shown.task, ask.task);
   assert.equal(shown.ask, ask.id);
   assert.match(shown.text, /quickstart/);
@@ -72,12 +77,13 @@ test("an open ask is one card: its question, its choices and its task", () => {
   assert.equal(shown.action, null);
 });
 
-test("a card's footer says what happens if nobody answers", () => {
+test("a card has no grey default or countdown: only a plain default shows, as \"If you do nothing\"", () => {
   const ask = ASKS.asks[0];
   const shown = card(ask.task, "ask");
-  // A hook times out, so the card says how long is left rather than what happens.
-  assert.match(footer(shown, ask.created_at_ms), /left$/);
-  assert.equal(footer(shown, ask.expires_at_ms + 1), "expired");
+  assert.equal(footer(shown), "", "an ask says nothing under its words");
+  assert.equal(ifNothing("the task stays where it is"), "If you do nothing: the task stays where it is");
+  assert.equal(ifNothing("fix it, then the engine retries `start`"), "", "a default with a command in it is the button's job");
+  assert.equal(ifNothing(""), "");
   assert.equal(expiry(undefined), "");
   assert.equal(expiry(ask.created_at_ms + 30_000, ask.created_at_ms), "under a minute left");
   assert.equal(expiry(ask.created_at_ms + 90_000, ask.created_at_ms), "1m left");
@@ -113,22 +119,25 @@ test("an escalation is a card with its words and its default action", () => {
   const shown = cards(STATE, { asks: [] }).find((entry) => entry.id === `need:${need.seq}`);
   assert.equal(shown.from, "escalation");
   assert.equal(shown.task, "T1");
-  assert.equal(shown.title, KIND.escalation);
+  assert.equal(shown.title, HEADING.decision);
   assert.equal(shown.options.length, 0);
   assert.equal(shown.freeText, false);
   assert.equal(shown.ask, null);
   assert.match(shown.text, /`start` step has failed/);
-  assert.equal(footer(shown), need.default_action);
+  assert.equal(footer(shown), "", "its default names a command, so it is not printed");
+  assert.deepEqual(shown.buttons.map((button) => button.label), ["Ask the assistant", "Drop task\u2026"]);
+  assert.equal(shown.key, "need:8");
 });
 
 test("a spent review's card shows the verb a person still has to run", () => {
   const spent = STATE.needs.find((entry) => entry.task === "T2");
   const shown = card("T2", "escalation");
-  assert.equal(shown.verb, "shprd override --task T2 --rule integrate_after_failed_gate --reason …");
+  // The service sent buttons, so the card is drawn with them and without the raw command.
+  assert.equal(shown.verb, null);
+  assert.deepEqual(shown.buttons.map((button) => button.label), ["Send back", "Review", "Drop task\u2026"]);
   assert.match(shown.text, /you answered `take it as it is`/);
-  // The service has no action for `override`, so the card shows the words and
-  // offers no button: a button that did nothing would be worse than the verb.
-  assert.equal(shown.action, null);
+  assert.equal(shown.footer, undefined);
+  assert.equal(footer(shown), "If you do nothing: the task stays where it is");
   assert.deepEqual(commands(spent.body), [
     "shprd override --task T2 --rule integrate_after_failed_gate --reason …",
     "shprd land T2",
@@ -235,5 +244,139 @@ test("a card about no task names the run instead of a blank reference", () => {
     { asks: [] },
   )[0];
   assert.equal(shown.task, null, "a card about no task names the run instead");
-  assert.equal(shown.title, KIND.escalation);
+  assert.equal(shown.title, HEADING.decision);
+  assert.equal(shown.buttons.length, 0, "a service that sends no buttons gets the card as it was");
+});
+
+test("a lost brief's card has a Resend button that posts task.resend_brief", () => {
+  const state = { needs: [{ task: "T1", body: "brief not delivered", default_action: "resend the brief", seq: 3 }] };
+  const [card] = cards(state, { asks: [] });
+  assert.deepEqual(card.action, { kind: "task.resend_brief", task: "T1" });
+  assert.equal(card.actionLabel, "Resend");
+  assert.equal(footer(card), "If you do nothing: resend the brief");
+  assert.equal(card.buttons[0].label, "Resend");
+  assert.deepEqual(card.buttons[0].payload, { kind: "task.resend_brief", task: "T1" });
+  // A review's lost kickoff is a different card with its own fix: no button.
+  const other = cards({ needs: [{ task: "T1", body: "review brief not delivered", default_action: "x", seq: 4 }] }, { asks: [] })[0];
+  assert.equal(other.action, null);
+});
+
+// -- every card has a button, a notice dismisses, scope cards are one ------
+
+test("a notice is a Notice with Dismiss and no decision, and a decision with no kind reads as a decision", () => {
+  const state = {
+    needs: [
+      { seq: 5, task: "T1", body: "T1 is back in the queue", default_action: "nothing", kind: "notice", actions: ["dismiss"], key: "need:5" },
+      { seq: 6, task: "T1", body: "pick one", default_action: "wait", kind: "decision", actions: ["ask_assistant", "dismiss"], key: "need:6" },
+      { seq: 7, task: null, body: "an old service's card", default_action: "wait" },
+    ],
+  };
+  const [notice, decision, old] = cards(state, { asks: [] });
+  assert.equal(notice.title, HEADING.notice);
+  assert.equal(notice.notice, true);
+  assert.deepEqual(notice.buttons.map((button) => button.label), ["Dismiss"]);
+  assert.deepEqual(notice.buttons[0].payload, { kind: "need.dismiss", seq: 5 });
+  assert.equal(footer(notice), "", "a notice has no default");
+  assert.equal(decision.title, HEADING.decision);
+  assert.equal(footer(decision), "If you do nothing: wait");
+  assert.equal(old.title, HEADING.decision);
+  assert.equal(old.notice, false);
+});
+
+test("asks the service gives one key are one card, and a choice reads as written", () => {
+  const asks = {
+    asks: [
+      { id: "q-1", task: "T1", kind: "question", text: "which format?", options: ["json", "toml"], created_at_ms: 1, key: "k:1" },
+      { id: "q-2", task: "T1", kind: "question", text: "which format, again?", options: ["yaml"], created_at_ms: 2, key: "k:1" },
+    ],
+  };
+  const list = cards({ needs: [] }, asks);
+  assert.equal(list.length, 1);
+  assert.equal(list[0].key, "k:1");
+  assert.deepEqual(list[0].buttons.map((button) => button.label), ["json", "toml", "yaml"]);
+  assert.deepEqual(list[0].buttons.map((button) => button.ask), ["q-1", "q-1", "q-2"]);
+  assert.equal(choiceLabel(" widen the scope to x "), "widen the scope to x");
+  // Without a key, every ask is its own card.
+  const apart = cards({ needs: [] }, { asks: asks.asks.map(({ key, ...rest }) => rest) });
+  assert.equal(apart.length, 2);
+});
+
+import { oldestCard } from "../mods/lib/asks.js";
+
+const ASK = (id, task, options = ["yes", "no"]) => ({ id, task, text: `q ${id}`, options, kind: "question", created_at_ms: 1 });
+
+test("oldestCard is the first waiting item, a notice only when nothing else waits", () => {
+  assert.equal(oldestCard({ asks: [], needs: [] }), null);
+  const state = { asks: [ASK("a1", "T1"), ASK("a2", null)], needs: [] };
+  assert.equal(oldestCard(state).task, "T1");
+  assert.equal(oldestCard({ asks: [], needs: [{ seq: 1, task: null, body: "plain decision", kind: "decision" }] }).task, null);
+});
+
+test("oldestCard reads the open asks list it is given, not only the board's", () => {
+  const board = { asks: [], needs: [{ seq: 2, task: "T9", body: "later", kind: "decision" }] };
+  assert.equal(oldestCard(board, { asks: [ASK("a1", "T1")] }).task, "T1");
+});
+
+import { proposalLabel } from "../mods/lib/asks.js";
+import { extraActions, actionBody } from "../mods/lib/board.js";
+
+test("a coordinator proposal's choices read Confirm and Decline, and answer as written", () => {
+  const ask = { id: "propose-drop-1", task: "T1", options: ["confirm drop", "leave it"], kind: "question", text: "x\nreason: y" };
+  assert.equal(proposalLabel(ask, "confirm drop"), "Confirm");
+  assert.equal(proposalLabel(ask, "leave it"), "Decline");
+  const card = cards({ asks: [ask], needs: [] }, { asks: [ask] }).find((c) => c.ask === "propose-drop-1");
+  assert.deepEqual(card?.buttons.map((b) => [b.label, b.answer]), [["Confirm", "confirm drop"], ["Decline", "leave it"]]);
+  // Any other ask keeps its words.
+  assert.equal(proposalLabel({ id: "q1" }, "leave it"), "leave it");
+});
+
+test("the board offers Reopen, Override and Sync only where they apply", () => {
+  const handedIn = { id: "T1", status: "reported", derived: { status: "ready" } };
+  assert.ok(extraActions(handedIn).some((a) => a.id === "reopen" && a.action === "task.reopen"));
+  const gated = { id: "T2", status: "failed", accept_blocked: "gate lint failed", derived: { status: "needs_you" } };
+  assert.ok(extraActions(gated).some((a) => a.id === "override" && a.action === "task.override"));
+  assert.ok(!extraActions({ ...gated, accepted_failure: true }).some((a) => a.id === "override"));
+  assert.deepEqual(extraActions({ id: "T3", status: "working", derived: { status: "working" } }), []);
+  assert.ok(extraActions({ id: "T4", status: "queued", derived: { reason: "behind main: sync" } }).some((a) => a.action === "run.sync"));
+});
+
+test("every applicable extra act shows together, and Readmit names a dry agent", () => {
+  const task = {
+    id: "T1",
+    status: "reported",
+    derived: { status: "ready", reason: "behind main: sync" },
+    attempts: [{ agent: "codex" }, { agent: "pi" }, { agent: "codex" }],
+  };
+  const state = { agents: [{ id: "codex", dry: true }, { id: "pi", dry: false }] };
+  const acts = extraActions(task, state);
+  assert.deepEqual(acts.map((a) => a.id), ["reopen", "sync", "readmit-codex"]);
+  assert.deepEqual(actionBody(acts[2], task), { kind: "agent.readmit", agent: "codex", reason: "readmitted from the board" });
+  assert.deepEqual(actionBody(acts[1], task), { kind: "run.sync" });
+  assert.deepEqual(actionBody(acts[0], task), { kind: "task.reopen", task: "T1" });
+  assert.ok(!extraActions(task, { agents: [] }).some((a) => a.action === "agent.readmit"));
+});
+
+test("a task's decision card offers Readmit for each dry agent, sending its agent and a reason", () => {
+  const state = {
+    agents: [{ id: "codex", dry: true }, { id: "pi", dry: false }],
+    tasks: [{ id: "T1", attempts: [{ agent: "codex" }, { agent: "pi" }] }],
+    needs: [{ seq: 5, task: "T1", kind: "escalation", body: "stuck", actions: ["drop"] }],
+  };
+  const card = cards(state, { asks: [] }).find((c) => c.task === "T1");
+  const read = card.buttons.filter((b) => b.action === "readmit");
+  assert.equal(read.length, 1);
+  assert.equal(read[0].label, "Readmit codex");
+  assert.deepEqual(read[0].payload, { kind: "agent.readmit", agent: "codex", reason: "readmitted from its card" });
+});
+
+test("an operational run-wide card the coordinator settles is drawn nowhere a person decides", () => {
+  const state = {
+    needs: [
+      { seq: 1, body: "The local `main` has commits the remote lacks: abc fix", default_action: "push", for_you: false, kind: "decision", actions: ["ask_assistant", "dismiss"] },
+      { seq: 2, body: "Which database?", default_action: "sqlite", for_you: true, kind: "decision", actions: ["reply", "dismiss"] },
+      { seq: 3, body: "an old service's card", default_action: "x", kind: "decision", actions: ["dismiss"] },
+    ],
+  };
+  const drawn = cards(state, { asks: [] });
+  assert.deepEqual(drawn.map((card) => card.text), ["Which database?", "an old service's card"]);
 });

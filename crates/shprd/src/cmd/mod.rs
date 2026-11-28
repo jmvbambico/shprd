@@ -1,5 +1,6 @@
 //! Verb implementations, one module per verb family.
 
+pub mod adopt;
 pub mod agent;
 pub mod approve;
 pub mod ask;
@@ -8,36 +9,43 @@ pub mod dagr;
 pub mod deliver;
 pub mod doctor;
 pub mod drop;
+pub mod folder_trust;
 pub mod fullgate;
-pub mod graph;
 pub mod handoff;
 pub mod install;
 pub mod integrate;
 pub mod janitor;
 pub mod land;
+pub mod live_agents;
 pub mod live_fallback;
 pub mod live_news;
 pub mod override_rule;
 pub mod prompts;
+pub mod propose;
 pub mod readmit;
 pub mod review;
 pub mod roster;
 pub mod run;
 pub mod run_lock;
+pub mod self_update;
 pub mod serve;
+pub mod serve_migrate;
 pub mod set;
 pub mod settings;
 pub mod spawn;
 pub mod sync;
+pub mod task;
 pub mod tick;
 pub mod verdict;
 pub mod view;
 pub mod watch;
+pub mod web;
+mod web_tunnel;
 
 use anyhow::anyhow;
 use shprd_core::event::{Event, EventKind};
 
-use crate::cli::{AskCommand, Cli, Command, DagrCommand, RunCommand, TaskVerb};
+use crate::cli::{AskCommand, Cli, Command, DagrCommand, RunCommand, SelfUpdateCommand, TaskVerb};
 use crate::ctx::{CliError, Ctx, resolve_actor, resolve_home, resolve_root};
 
 /// Runs whichever verb the command line asked for.
@@ -71,11 +79,33 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
     if let Some(Command::Install(args)) = &cli.command {
         return install::run(args, cli.global.home.as_deref(), cli.global.json);
     }
+    // `self-update` is the helper the service starts; it names every path it
+    // touches and reads no run log.
+    if let Some(Command::SelfUpdate { cmd }) = &cli.command {
+        return match cmd {
+            SelfUpdateCommand::Run(args) => self_update::run(args),
+        };
+    }
+    // `web` reads and writes the state directory of the one service (every
+    // repository is served by it), not a log, so it answers before any run
+    // exists — a password is set before one does — and outside a repository.
+    if let Some(Command::Web { cmd }) = &cli.command {
+        return web::run(cmd, cli.global.home.as_deref(), cli.global.json);
+    }
     // `doctor` diagnoses the machine, so it answers outside a repository too.
     if let Some(Command::Doctor(args)) = &cli.command {
         return doctor::run(args, cli.global.json, cli.global.home.as_deref());
     }
-    let root = resolve_root(cli.global.repo.as_deref())?;
+    // `serve` is the one verb that may start in a folder that is not a repository
+    // yet: the window shows a space the person just added, and the repository is
+    // made when they first chat (`adopt`), not when the folder is shown.
+    let named = matches!(cli.command, Some(Command::Serve(_)))
+        && crate::ctx::serve_names_a_repo(cli.global.repo.as_deref());
+    let root = if matches!(cli.command, Some(Command::Serve(_))) {
+        crate::ctx::resolve_serve_root(cli.global.repo.as_deref())?
+    } else {
+        resolve_root(cli.global.repo.as_deref())?
+    };
     let actor = resolve_actor(cli.global.actor.as_deref())?;
     // The home is resolved once, here, and carried down: the dagr projection
     // that follows every write reads `graph.dagr` from it and looks in the
@@ -88,17 +118,29 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
     match cli.command {
         None => view::status(&ctx, cli.global.home.as_deref()),
         Some(Command::Run { cmd }) => match cmd {
-            RunCommand::Start(args) => run::start(&ctx, &args),
+            RunCommand::Start(args) => {
+                run::start(&ctx, &args)?;
+                if !cli.global.json {
+                    for warning in doctor::start_warnings(cli.global.home.as_deref()) {
+                        eprintln!("warning: {warning}");
+                    }
+                }
+                Ok(())
+            }
             RunCommand::Finish(args) => run::finish_verb(&ctx, &args, cli.global.home.as_deref()),
+            RunCommand::Close => run::close_verb(&ctx, cli.global.home.as_deref()),
         },
         Some(Command::Agent { cmd }) => agent::dispatch(&ctx, cmd, cli.global.home.as_deref()),
         Some(Command::Task { cmd }) => match cmd {
             TaskVerb::Status(args) => agent::task_status(&ctx, &args),
+            TaskVerb::Reopen(args) => task::reopen(&ctx, &args),
         },
         Some(Command::Ask { cmd }) => match cmd {
             AskCommand::Hook(args) => ask::hook(&args, cli.global.repo.as_deref()),
             AskCommand::Raise(args) => ask::raise(&args, &ctx),
             AskCommand::Install(args) => ask::install(&args, cli.global.repo.as_deref()),
+            AskCommand::List(args) => ask::list(&args, &ctx),
+            AskCommand::Show(args) => ask::show(&args, &ctx),
         },
         Some(Command::State) => dump(&ctx),
         Some(Command::Brief) => view::brief(&ctx),
@@ -112,6 +154,8 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
             janitor::restore_verb(&ctx, &args, cli.global.home.as_deref())
         }
         Some(Command::Roster(args)) => roster::run(&args, ctx.json),
+        // Unreachable in practice: `web` returns above, before any log is read.
+        Some(Command::Web { cmd }) => web::run(&cmd, cli.global.home.as_deref(), ctx.json),
         // Unreachable in practice: `set` returns above, before any log is read.
         Some(Command::Set(args)) => set::run(
             &args,
@@ -125,6 +169,10 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
         }
         // Unreachable in practice: `install` returns above.
         Some(Command::Install(args)) => install::run(&args, None, ctx.json),
+        // Unreachable in practice: `self-update` returns above.
+        Some(Command::SelfUpdate { cmd }) => match cmd {
+            SelfUpdateCommand::Run(args) => self_update::run(&args),
+        },
         // Unreachable in practice: `prompts` returns above.
         Some(Command::Prompts { cmd }) => prompts::run(&cmd, ctx.json, None),
         Some(Command::Doctor(args)) => doctor::run(&args, ctx.json, None),
@@ -138,7 +186,7 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
         Some(Command::Readmit(args)) => readmit::readmit_verb(&ctx, &args),
         Some(Command::Override(args)) => override_rule::override_verb(&ctx, &args),
         Some(Command::Drop(args)) => drop::drop_verb(&ctx, &args, cli.global.home.as_deref()),
-        Some(Command::Serve(args)) => serve::run(&ctx, &args, cli.global.home.as_deref()),
+        Some(Command::Serve(args)) => serve::run(&ctx, &args, cli.global.home.as_deref(), named),
         Some(Command::Tick(args)) => tick::tick_verb(&ctx, &args, cli.global.home.as_deref()),
     }
 }
@@ -205,12 +253,16 @@ pub fn kind_name(kind: &EventKind) -> &'static str {
         EventKind::GateFailed { .. } => "gate_failed",
         EventKind::Integrated { .. } => "integrated",
         EventKind::TaskDropped { .. } => "task_dropped",
+        EventKind::ScopeWidened { .. } => "scope_widened",
         EventKind::TaskStopped { .. } => "task_stopped",
+        EventKind::TaskReopened { .. } => "task_reopened",
         EventKind::ReviewRequested { .. } => "review_requested",
+        EventKind::ReviewSkipped { .. } => "review_skipped",
         EventKind::Dry { .. } => "dry",
         EventKind::Available { .. } => "available",
         EventKind::HandedOff { .. } => "handed_off",
         EventKind::Escalated { .. } => "escalated",
+        EventKind::NeedDismissed { .. } => "need_dismissed",
         EventKind::Override { .. } => "override",
         EventKind::Resource { .. } => "resource",
         EventKind::FullGate { .. } => "full_gate",
@@ -224,6 +276,7 @@ pub fn kind_name(kind: &EventKind) -> &'static str {
         EventKind::WatchLaunched { .. } => "watch_launched",
         EventKind::OrchestratorNotified { .. } => "orchestrator_notified",
         EventKind::BaseSynced { .. } => "base_synced",
+        EventKind::GateBaselined { .. } => "gate_baselined",
         EventKind::Nudged { .. } => "nudged",
         EventKind::Backup { .. } => "backup",
         EventKind::ProviderGaveUp { .. } => "provider_gave_up",

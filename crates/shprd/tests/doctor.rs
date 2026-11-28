@@ -10,7 +10,7 @@ use tempfile::TempDir;
 
 mod support;
 
-use support::herdr::isolate;
+use support::isolate;
 
 /// The binary under test, built by cargo for this integration test.
 const BIN: &str = env!("CARGO_BIN_EXE_shprd");
@@ -210,6 +210,13 @@ impl Setup {
             )
             .env_remove("SHPRD_HOME")
             .env_remove("SHPRD_PI_MODEL")
+            // A doctor run from inside a shprd session inherits the session's
+            // repo, actor and binary; unset, they would point doctor at the
+            // person's real repository instead of the fixture.
+            .env_remove("SHPRD_REPO")
+            .env_remove("SHPRD_ACTOR")
+            .env_remove("SHPRD_BIN")
+            .env_remove("SHPRD_TASK")
             // `TUIOS_ENV`, `HERDR_ENV` and every other host variable are
             // removed by `isolate` above, so a doctor run from a herdr pane
             // diagnoses the fixture and not the pane it started in.
@@ -515,8 +522,8 @@ fn names_the_host_a_run_would_drive_and_why() {
         "the chosen host is named: {line}"
     );
     assert!(
-        line.contains("auto picked herdr"),
-        "and that auto chose it: {line}"
+        line.contains("auto found no running host") && line.contains("no herdr server"),
+        "and that auto found nothing running rather than guessing: {line}"
     );
     assert!(
         line.contains("no Herdr window is attached"),

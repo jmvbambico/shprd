@@ -10,9 +10,18 @@
 # ~/.claude/projects/*/*.jsonl, read 2026-11-14); a name typed by id is passed
 # through as written, so a missing entry only costs a menu row.
 #
-# unverified: the aliases this build accepts beyond the three its help names
-# (`haiku` and the other full names are not claimed). To check: start one role
-# with `--model haiku` and see whether Claude Code accepts it.
+# SHPR-44: the list is Claude Code 2.1.328's own, read from the strings in its
+# binary (`claude --model` takes an alias, `<alias>[1m]` for the one-million-token
+# context, or a full name): the aliases `fable`, `opus`, `sonnet` and `haiku` are
+# all there, with `fable[1m]`, `opus[1m]` and `sonnet[1m]`, and the full names
+# `claude-fable-5-2`, `claude-fable-5-1`, `claude-opus-5-5`, `claude-sonnet-5-5`
+# and `claude-haiku-5-5`. The display names are Shepherdr's (its chat-models mod,
+# core/agents.js CLAUDE_MODELS: "Opus 5.5", "Opus 5.5 · 1M", "Haiku 5.5"); fast
+# mode is offered on Opus only, as there. An alias keeps the id the CLI accepts, so
+# a model saved before this list grew (`fable`, `opus`, `sonnet`) still matches.
+#
+# unverified: whether Haiku accepts every effort level; it is given the same list
+# as the others, as Shepherdr does.
 #
 # Efforts: one list for every model, from `claude --help`:
 # `--effort <level> ... (low, medium, high, xhigh, max)`.
@@ -24,18 +33,50 @@ schema = 1
 
 [[model]]
 id = "fable"
-name = "Fable"
+name = "Fable 5.2"
+efforts = ["low", "medium", "high", "xhigh", "max"]
+default_effort = "medium"
+
+[[model]]
+id = "fable[1m]"
+name = "Fable 5.2 · 1M"
+efforts = ["low", "medium", "high", "xhigh", "max"]
+default_effort = "medium"
+
+[[model]]
+id = "claude-fable-5-1"
+name = "Fable 5.1"
 efforts = ["low", "medium", "high", "xhigh", "max"]
 default_effort = "medium"
 
 [[model]]
 id = "opus"
-name = "Opus"
+name = "Opus 5.5"
+efforts = ["low", "medium", "high", "xhigh", "max"]
+default_effort = "medium"
+fast = true
+
+[[model]]
+id = "opus[1m]"
+name = "Opus 5.5 · 1M"
+efforts = ["low", "medium", "high", "xhigh", "max"]
+default_effort = "medium"
+fast = true
+
+[[model]]
+id = "sonnet"
+name = "Sonnet 5.5"
 efforts = ["low", "medium", "high", "xhigh", "max"]
 default_effort = "medium"
 
 [[model]]
-id = "sonnet"
-name = "Sonnet"
+id = "sonnet[1m]"
+name = "Sonnet 5.5 · 1M"
+efforts = ["low", "medium", "high", "xhigh", "max"]
+default_effort = "medium"
+
+[[model]]
+id = "haiku"
+name = "Haiku 5.5"
 efforts = ["low", "medium", "high", "xhigh", "max"]
 default_effort = "medium"

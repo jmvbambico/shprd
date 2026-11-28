@@ -2,7 +2,8 @@
 
 Status: M0–M6 done (gate passed 2026-10-29). Re-planned from M7 on 2026-11-14:
 see "M7 onward · the pivot". M7 and M8 done 2026-11-14; M9 gate passed 2026-11-15;
-M10 gate passed 2026-11-16 (gates below). Language: Rust (service) and TypeScript (web app).
+M10 gate passed 2026-11-16 (gates below). M11 finished on `integration/m11`
+(2026-11-22); its gate result and known gaps are under M11. Language: Rust (service) and TypeScript (web app).
 
 The plan is cut into milestones. Each one ends at a **gate**: a demo you can run
 and a check that has to pass before the next milestone starts. Inside a
@@ -34,6 +35,8 @@ crates/
   shprd-watch/      watchdog signals, provider-error classes, the fallback ladder
   shprd-mux/        host adapter trait + capability flags
   shprd-mux-herdr/  herdr adapter
+  shprd-mux-hc/     Herdr desktop through herdr-core (`hc`)
+  shprd-remote/     the web login, sessions, gate and tunnels (M11)
   shprd-server/     the service: HTTP + WebSocket API, auth, event hub, tick loop
   shprd/            the binary: clap CLI, wiring
 data/
@@ -119,6 +122,8 @@ Lanes: M2.1 first (the runner and ledger everything else uses), then M2.3 ∥ M2
 **Gate:** integration tests in temp repos: overlapping scopes refused, a commit
 outside scope refused, conflict recorded and work retained, janitor never
 touches a non-`shprd/*` branch, restore round-trips.
+
+> Later change (M11): scope refusals were removed. A task's declared paths are a hint, no hand-in, review or landing is refused for paths, and a task touching an undeclared protected path waits for Accept. See [workflow](workflow.md).
 
 ---
 
@@ -251,10 +256,10 @@ M7 study + spikes ─► M8 clean-up + service ─► M9 agents ─► M10 Herdr
 | `web/` | **new**: Vite + React 19 + TypeScript, types generated from Rust with ts-rs |
 | `host/` | **new**: the Herdr desktop layout and mods, `plugin/herdr-plugin.toml`, `plugin/tuios-plugin.toml` |
 
-Stack: tokio, axum, tower-http, ts-rs, rust-embed, argon2, tower_governor,
-notify, portable-pty, tracing on the Rust side; Vite, React 19, Tailwind 4,
-TanStack Query and Router, xterm.js, React Flow + elkjs, Radix, Vitest,
-Playwright, Biome on the web side; ratatui + crossterm for `shprd-tui`.
+Stack as built through M11: tokio, axum, tower-http, ts-rs, rust-embed, argon2,
+qrcode, tracing on the Rust side (the rate limits are shprd's own, in
+`shprd-remote`); Vite, React 19, xterm.js, marked + DOMPurify and Vitest on the
+web side. ratatui + crossterm for `shprd-tui` is still the M12 plan.
 
 ---
 
@@ -379,8 +384,145 @@ the tunnels (Cloudflare quick and named, ngrok, tunnl.gg, Tailscale serve) with
 a password login (argon2, session cookie, rate limiting, origin checks), QR
 code in the UI.
 
+Spec: `_research/m7/M7d-web-remote.md` §4 (routes, tunnels, the login and its
+threat table). The web app is served by `shprd serve` from the same origin; the
+login and the tunnels live in one new crate, `shprd-remote`, and the router stays
+in `shprd-server`.
+
+| ID | Task | Scope | Size |
+|---|---|---|---|
+| M11.1 | The login: `shprd web password set` (argon2id, local only, length and common-password checks), server-side sessions with a `__Host-` cookie, `POST /api/login`, `/api/logout`, `GET /api/session`, rate limits (M7d §4.4 table), a `Host` allowlist (unknown host → 421), `Origin` + `x-shprd` on writes and socket upgrades, a fresh password for destructive actions, `shprd web sessions` to list and revoke. The loopback token door stays for the mods | new crate `shprd-remote`, `shprd-server`, `shprd/src/cmd/` | L |
+| M11.2 | Tunnels: a provider trait with Tailscale serve, cloudflared quick and named, ngrok and tunnl.gg; `shprd web up --tunnel <p>`, `down`, `status`; `<state>/web.json`; a public tunnel refuses to start without a password; the active tunnel's host joins the allowlist; the QR code (terminal half-blocks and SVG); the tunnel stops with the service | `shprd-remote`, `shprd/src/cmd/` | L |
+| M11.3 | Web app scaffold: Vite + React + TypeScript in `web/`, one `client.ts` (`x-shprd`, same-origin credentials), the generated `ts-rs` types, the login screen, phone (< 800 px) and desktop layouts, built assets embedded in the binary and served with an SPA fallback; CI runs `tsc --noEmit`, the web build and a diff check of the generated types | `web/`, `shprd-server`, `.github/` | M |
+| M11.4 | Web screens A: tasks board, accept card (changes, checks, review), needs-you cards, toasts | `web/` | L |
+| M11.5 | Web screens B: the graph, drawn from the run document the dagr block shows | `web/`, `shprd-server` | M |
+| M11.6 | Web screens C: terminal (xterm.js over a socket; watch by default, type on demand, OSC 52 stripped) and the coordinator chat | `web/`, `shprd-server` | L |
+| M11.7 | Web screens D: settings (agents, roles, prompts) and Settings › Remote (tunnel, sessions, QR) | `web/` | M |
+
+Lanes: M11.1 ∥ M11.3; then M11.2 (after M11.1) ∥ M11.4 ∥ M11.5 ∥ M11.6 ∥ M11.7
+(after M11.3). Every screen is screenshotted at 390 px and 1440 px before review.
+
+**Desktop parity fixes (added 2026-11-16).** An audit of the M10 window against
+Shepherdr's source (report kept outside the repo)
+found the desktop departing from Shepherdr's shapes: settings in a panel tab
+instead of a dialog, no "+" menu, the accept card inline, no search or filters in
+Tasks, no chat thread per task. Shepherdr's window is the reference, so these land
+in M11 before the web screens copy them:
+
+| ID | Task |
+|---|---|
+| fix S | Settings as Shepherdr's frameless dialog with a page list |
+| U1 | Tab bar: "+" menu (Terminal, New task, Start an agent), tab menu, pills |
+| U2 | Tasks panel: search, filter row, folding groups |
+| U3 | Accept card as a 640×640 dialog; thread head with Review and the view switch |
+| U4 | The per-task chat thread (question cards in the timeline; the Asks tab goes) and Chat │ Terminal on agent panes; the sidebar coordinator block goes |
+| U5 | Sidebar: one-line rows, right-click menu |
+| U6 | Keys, Jump (Ctrl+K), Keybinds |
+| U7 | The graph gets its own panel |
+| U8 | Look: icons, status glyphs, pane header, foot, status bar, toasts |
+
+The per-task thread, deferred at M10, is built here. M11.4 waits for U2–U4 and
+M11.6 for U4.
+
+**Audit and its fixes (SHPR-17 on).** An audit of the desktop layout
+(SHPR-17) found more departures from Shepherdr, and a second round of tasks fixed
+them. Pull request numbers are on `integration/m11`.
+
+| Group | Tasks |
+|---|---|
+| Live checks stay private | SHPR-1 (#76): live tests never reach the real herdr; SHPR-20 (#91): `shprd` keys work on the installed layout |
+| Prototype and tidy | SHPR-18 (#90): spaces tree, Agents pane, Tasks and Graph; SHPR-19 (#94): mods stop leaking timers; SHPR-21 (#92): web app tidy and a release build that embeds it |
+| Agents and spaces | SHPR-23 (#96): agents run headless, one space per repo; SHPR-25 (#97): New space, New task, spaces tree, Agents pane; #104: sidebar spaces carry Herdr's real space id, name and branch |
+| Settings | SHPR-22 (#95): the settings dialog completed; SHPR-24 (#98): settings that saved but did nothing now take effect |
+| Tabs, Tasks, thread | SHPR-26 (#99): tab bar, menus and Jump polish; SHPR-27 (#100): Tasks panel deps, resend, filter, group by; SHPR-28 (#101): task thread and Accept, end to end; SHPR-29 (#102): Tasks and Graph in one panel (#103 regenerated the `Action` binding) |
+| Coordinator | SHPR-33 (#105): the coordinator as the space's Assistant chat |
+
+The audit's decisions are in [decisions.md](decisions.md#2026-11-18). In short:
+agents follow Shepherdr v3.1.34 (no tab or space per task; labelled `hc` children
+with a real terminal; a task's thread switches between Chat and Terminal); Tasks
+and the graph are one panel; the Spaces sidebar is a tree of live tasks with an
+Agents pane below; the coordinator is the space's Assistant chat tab.
+
+**Desktop work, SHPR-49 to SHPR-88.** After the gate, the work moved to making the
+shprd layout work with zero commands. Pull request numbers are on `integration/m11`.
+
+| ID | Task | Scope | Size |
+|---|---|---|---|
+| SHPR-49 | Install takes the layout from the binary's own tree (#120) | `shprd/src/cmd/`, `host/herdr-desktop` | S |
+| SHPR-50, 51, 52 | Accept with a short SHA and refused actions say why (#121); review diffs from the attempt's own base (#122); install refuses the real herdr-app under an agent (#123) | `shprd-server`, `shprd-core`, `shprd/src/cmd/` | M |
+| SHPR-57, 59 | Worker questions and permissions become cards (#126); cards that act: take as is, refused hand-in, stale asks, dead reviewer (#130) | `shprd-core`, `host/herdr-desktop` | M |
+| SHPR-58 | Second attempts keep their commits; Retry without raw git (#134) | `shprd-core`, `shprd-git` | M |
+| SHPR-62, 63 | Proof on the Accept card and in the review packet (#127); Tasks pane minors and the question-card focus bug (#129) | `shprd-core`, `host/herdr-desktop` | M |
+| SHPR-61 | A fresh repo can add tasks; a serve restart keeps the space and chat (#131) | `shprd-server`, `host/herdr-desktop` | M |
+| SHPR-65, 66, 69 | Reused repo space (real name, one live coordinator, own agents only, #135); the layout's Assistant is shprd's coordinator (#136); chat never talks to Shepherdr's Assistant (#138) | `shprd-server`, `host/herdr-desktop` | M |
+| SHPR-67 | Old tasks never block a fresh start: fold Done, clear stale in one action (#137) | `shprd-core`, `host/herdr-desktop` | S |
+| SHPR-68, 70 | Click a repo space and it works with no manual `shprd serve`, several repos at once (#139); add a folder in the layout and chat with zero commands (#140) | `shprd-server`, `host/herdr-desktop` | L |
+| SHPR-71, 72 | The coordinator makes tasks and never does the work, no Claude trust prompt (#141); adding a folder starts nothing (#142) | `shprd-server`, `host/herdr-desktop` | M |
+| SHPR-73 | Chat renders like Shepherdr: folded tool calls, no raw `hc` tags, line breaks kept (#145) | `host/herdr-desktop` | S |
+| SHPR-75 | Sidebar spaces stable, toggle reliable; a new space opens on the Assistant (#143) | `host/herdr-desktop` | S |
+| SHPR-76 | Accept merges locally when the repo has no GitHub remote; plain land errors (#146) | `shprd-git`, `shprd-server` | M |
+| SHPR-77 | One shprd service for every repo; switching spaces is instant (#147) | `shprd-server`, `shprd/src/cmd/`, `host/herdr-desktop` | L |
+| SHPR-79, 80 | Chat is always shprd's coordinator and tasks always reach the panes, proven end to end (#149); a re-added folder never hangs on Loading (#150) | `shprd-server`, `host/herdr-desktop` | M |
+| SHPR-81 | Task actions update the panes at once, rolled back on error; Graph states right-aligned (#152) | `host/herdr-desktop` | S |
+| SHPR-83 | Accept works with a real click; coordinator escalations true and command-free; held tasks say why (#155) | `shprd-core`, `host/herdr-desktop` | L |
+| SHPR-84 | Chat composer like Shepherdr's: Enter sends, model picker, voice, attachments the coordinator can read (#153) | `shprd-server`, `host/herdr-desktop` | L |
+| SHPR-85 | Toasts draw one card with a divider between messages (#154) | `host/herdr-desktop` | S |
+| SHPR-86 | Agents never stop on a trust prompt; closing a space stops its agents (#156) | `shprd-agent`, `shprd-server`, `host/herdr-desktop` | M |
+| SHPR-87 | A reviewer out of quota hands the review to the next reviewer; the reviewer comes from Settings (#157) | `shprd-core`, `shprd-server` | M |
+| SHPR-88 | Switching an existing space to the shprd layout starts shprd's coordinator and shows it in the chat (#158) | `shprd-server`, `host/herdr-desktop` | M |
+
+SHPR-36 to SHPR-48 (gate fixes and Settings rounds) are in the gate result below.
+
 **Gate:** the M10 flow runs from a desktop browser and from a phone over each
 tunnel, and every request without a session is refused.
+
+**Gate result (2026-11-19): passed with gaps.** The live gate over ngrok came back
+*pass with gaps*. Fixes A–E landed from it: A (#110) the login limit per client,
+reauth on accept and the health id; B (#107) the web app at 390 px, the QR following
+the mask and dropped tasks in the graph; C (#108) typing in the web terminal on
+Herdr desktop; D (#109) agents run the service's own `shprd`; E (#111) the
+coordinator record per repo and space. Settings rounds 1–7 (#112–#118) then
+reworked Settings to match Shepherdr: program tabs from the detected harnesses,
+renamable roles, and a redesigned Remote page. Tail fixes landed after the gate:
+`serve` finds its Herdr space by shprd's own label (#119), `install` takes the
+binary's own layout (#120), Accept works with a short SHA and a refused action says
+why on the card (#121), review diffs from the attempt's own base (#122), and
+`install` refuses the real herdr-app when an agent starts it (#123). #107, #109
+and #110 merged without a passing cross-vendor review.
+
+Parked gaps:
+
+- G1: a forged `X-Forwarded-For` header gets past the per-client login limit over
+  ngrok (the account limit of 30/h and the global limit of 60/h still hold).
+- G2: an idle coordinator web terminal returns 409.
+- G3: the desktop graph omits dropped tasks.
+- G4: a landed task's accept card says no changes.
+- G5: the coordinator can stay stuck at "blocked (permission)".
+
+**Gate result (2026-11-22).** The integration gate passed on `integration/m11`
+head 2bd4cd4: `cargo fmt --all --check`, clippy, and the tests (2384 passed, 21
+ignored). CI is green.
+
+Known gaps:
+
+- #107, #109 and #110 merged without a passing cross-vendor review.
+- G1 to G5 above are still open.
+- SHPR-61, 71, 72, 75 and 76 have gaps noted in their pull requests.
+- SHPR-81: the live check had no real agents.
+- SHPR-83: all five tasks never reached Done in one run, the `ops.py` conflict case
+  never came up live, and Retry review is covered by tests only.
+- SHPR-84: real OS key presses are not proven, and the mic is unproven (it needs
+  the person's ElevenLabs key).
+- SHPR-85: the only independent review was GLM, after codex returned nothing; there
+  is no light-theme screenshot.
+- SHPR-86: round 2 was recorded before its last fixes, and the bypass warning is
+  not a known blocking prompt.
+- SHPR-87: the "no reviewer left" card is tested, not seen live. Reviewers ignore a
+  program line's read-only mode, because pi's read-only tools cannot write the
+  findings file.
+- Several reviews ran on GLM only because codex was out of quota.
+- The doctor tests read `SHPRD_REPO` from the environment (fixed by task
+  `m11-doctor-env`).
 
 ---
 

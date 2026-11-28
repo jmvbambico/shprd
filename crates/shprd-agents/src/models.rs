@@ -369,7 +369,7 @@ impl Catalog {
                     model.efforts.clone()
                 },
                 default_effort: model.default_effort.clone(),
-                fast: false,
+                fast: model.fast,
             })
             .collect();
         Catalog {
@@ -632,6 +632,9 @@ pub struct StaticModel {
     /// The level this model starts at when a role names none, if it is known.
     #[serde(default)]
     pub default_effort: Option<String>,
+    /// Whether the program's fast mode applies to this model.
+    #[serde(default)]
+    pub fast: bool,
 }
 
 impl StaticCatalog {
@@ -1196,8 +1199,36 @@ parser = "codex_catalog""#,
             Some(model) => model,
             None => panic!("the catalog should name opus"),
         };
-        assert_eq!(opus.name.as_deref(), Some("Opus"));
+        assert_eq!(opus.name.as_deref(), Some("Opus 5.5"));
         assert!(opus.efforts.contains(&"xhigh".to_owned()));
+        assert!(opus.fast, "fast mode is offered on Opus");
+        // Haiku and the one-million-token variants are listed, in the ids the CLI takes.
+        for id in [
+            "haiku",
+            "opus[1m]",
+            "sonnet[1m]",
+            "fable[1m]",
+            "fable",
+            "sonnet",
+        ] {
+            assert!(
+                catalog.names().contains(&id),
+                "{id} is missing: {:?}",
+                catalog.names()
+            );
+        }
+        assert_eq!(
+            catalog
+                .model("haiku")
+                .and_then(|model| model.name.as_deref()),
+            Some("Haiku 5.5")
+        );
+        assert_eq!(
+            catalog
+                .model("opus[1m]")
+                .and_then(|model| model.name.as_deref()),
+            Some("Opus 5.5 · 1M")
+        );
     }
 
     #[test]
@@ -1231,7 +1262,8 @@ parser = "codex_catalog""#,
         assert!(catalog.names().contains(&"opus"), "{:?}", catalog.names());
         assert_eq!(catalog.efforts, ["low", "medium", "high", "xhigh", "max"]);
         let opus = named(&catalog, "opus");
-        assert_eq!(opus.name, "Opus");
+        assert_eq!(opus.name, "Opus 5.5");
+        assert!(opus.fast);
         assert_eq!(opus.efforts, ["low", "medium", "high", "xhigh", "max"]);
     }
 

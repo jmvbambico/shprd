@@ -1,8 +1,9 @@
-//! Path scopes: normalized repo-relative paths, and when two sets of them clash.
+//! Path scopes: normalized repo-relative paths, and when two sets of them meet.
 //!
-//! A task declares the paths it may change. Scopes are repo-relative and
-//! `/`-separated, so `src` and `src/x.rs` overlap (one contains the other)
-//! while `src` and `srcx` do not.
+//! A task may declare the paths it expects to change. They are a hint for its
+//! worker, never a limit: the one hard list is [`forbidden`]. Scopes are
+//! repo-relative and `/`-separated, so `src` and `src/x.rs` overlap (one
+//! contains the other) while `src` and `srcx` do not.
 
 use thiserror::Error;
 
@@ -79,6 +80,36 @@ pub fn normalize(path: &str) -> Result<String, ScopeError> {
     Ok(text.to_string())
 }
 
+/// Why `path` may never be committed by any task, or `None` when it may.
+///
+/// This is the one hard list left from task scopes: shprd's own state
+/// (`.shprd/`, except the tracked `.shprd/config.toml`, and `.dagr/`) and real
+/// environment files (`.env`, `.env.<name>`, at any depth; `.env.example` and
+/// other templates are fine). Everything else a task changes is judged by its
+/// review and, for protected paths, by the person at the gate.
+///
+/// `path` is expected to be normalized.
+pub fn forbidden(path: &str) -> Option<&'static str> {
+    if path == ".shprd" || (is_child(path, ".shprd") && path != ".shprd/config.toml") {
+        return Some("it is shprd's own state");
+    }
+    if path == ".dagr" || is_child(path, ".dagr") {
+        return Some("it is shprd's own state");
+    }
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let env = name == ".env"
+        || name.strip_prefix(".env.").is_some_and(|suffix| {
+            !matches!(
+                suffix,
+                "example" | "sample" | "template" | "dist" | "defaults" | "schema"
+            )
+        });
+    if env {
+        return Some("it is an environment file, which may hold secrets");
+    }
+    None
+}
+
 /// True when the first component of `text` looks like a Windows drive (`C:`
 /// or `c:src`), which no repo-relative scope may.
 fn starts_with_drive(text: &str) -> bool {
@@ -89,13 +120,55 @@ fn starts_with_drive(text: &str) -> bool {
     }
 }
 
-/// True when `path` is one of `scope` or sits underneath one of its entries.
+/// True when `path` is one of `scope` or sits underneath one of its entries:
+/// what the protected-path flag reads as "the task named it".
 ///
 /// `path` and the entries of `scope` are expected to be normalized.
 pub fn within(path: &str, scope: &[String]) -> bool {
     scope
         .iter()
         .any(|entry| path == entry || is_child(path, entry))
+}
+
+/// The nearest real path for a scope `entry` that matches nothing under `root`.
+///
+/// Returns `None` when the entry exists (as a path, or as a folder or file),
+/// otherwise the first sibling of its last component that shares its stem
+/// (`client/src/components/icons` -> `client/src/components/icons.tsx`), or
+/// else the deepest existing ancestor folder.
+pub fn nearest_existing(root: &std::path::Path, entry: &str) -> Option<String> {
+    if root.join(entry).exists() {
+        return None;
+    }
+    let (dir, name) = entry.rsplit_once('/').unwrap_or(("", entry));
+    if let Ok(read) = std::fs::read_dir(root.join(dir)) {
+        let mut hits: Vec<String> = read
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|f| {
+                f.strip_prefix(name)
+                    .is_some_and(|rest| rest.starts_with('.') || rest.starts_with('/'))
+            })
+            .collect();
+        hits.sort();
+        if let Some(hit) = hits.first() {
+            return Some(if dir.is_empty() {
+                hit.clone()
+            } else {
+                format!("{dir}/{hit}")
+            });
+        }
+    }
+    let mut parent = dir;
+    loop {
+        if parent.is_empty() {
+            return Some(String::new());
+        }
+        if root.join(parent).is_dir() {
+            return Some(parent.to_string());
+        }
+        parent = parent.rsplit_once('/').map_or("", |(up, _)| up);
+    }
 }
 
 /// True when any entry of `a` and any entry of `b` are equal or one contains
@@ -200,5 +273,50 @@ mod tests {
         assert!(!within("docs/plan.md.bak", &scope));
         assert!(!within("srcx", &scope));
         assert!(!within("src", &[]));
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn nearest_existing_suggests_the_real_path() {
+        let dir = std::env::temp_dir().join(format!("shprd-scope-near-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("client/src/components")).unwrap();
+        std::fs::write(dir.join("client/src/components/icons.tsx"), "").unwrap();
+        assert_eq!(nearest_existing(&dir, "client/src/components"), None);
+        assert_eq!(
+            nearest_existing(&dir, "client/src/components/icons").as_deref(),
+            Some("client/src/components/icons.tsx")
+        );
+        assert_eq!(
+            nearest_existing(&dir, "client/src/components/zzz/a.rs").as_deref(),
+            Some("client/src/components")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_shprd_state_and_real_env_files_are_forbidden() {
+        for no in [
+            ".shprd/events.jsonl",
+            ".shprd",
+            ".dagr/run.json",
+            ".env",
+            ".env.local",
+            "web/.env.production",
+        ] {
+            assert!(forbidden(no).is_some(), "{no}");
+        }
+        for ok in [
+            ".shprd/config.toml",
+            ".env.example",
+            "web/.env.sample",
+            "src/env.rs",
+            "Cargo.lock",
+            "docs/plan.md",
+            ".github/workflows/ci.yml",
+            "secrets.md",
+        ] {
+            assert!(forbidden(ok).is_none(), "{ok}");
+        }
     }
 }

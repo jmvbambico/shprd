@@ -64,6 +64,46 @@ pub(crate) fn read(state: &AppState) -> Result<SettingsDto, ApiReject> {
     Ok(document(state, &loaded, loaded.resolve(None)))
 }
 
+/// What every role is called, by role id: the person's names, else the built-in
+/// ones. A service that cannot read the settings answers the built-in names, so
+/// a screen never has to guess a word.
+pub(crate) fn role_titles(state: &AppState) -> std::collections::BTreeMap<String, String> {
+    use shprd_core::settings::{File, Request, resolve};
+    let resolved = match Place::of(state).and_then(|place| place.load()) {
+        Ok(loaded) => loaded.resolve(None),
+        Err(_) => resolve(&File::default(), &Request::default()),
+    };
+    resolved.role_titles().into_iter().collect()
+}
+
+/// The provider and options `web up` uses when the request names none: the
+/// `web.*` settings, or their built-in values when this service cannot read
+/// them (no home directory, an unreadable file).
+///
+/// Unreadable settings are not an error here: the answer is the safe default —
+/// Tailscale, the one provider that is not on the public internet — so a
+/// broken settings file can only ever start a *more* private tunnel.
+pub(crate) fn tunnel_defaults(
+    state: &AppState,
+) -> (
+    shprd_remote::tunnel::Provider,
+    shprd_remote::tunnel::Options,
+) {
+    use shprd_core::settings::{File, Request, resolve};
+    let resolved = match Place::of(state).and_then(|place| place.load()) {
+        Ok(loaded) => loaded.resolve(None),
+        Err(_) => resolve(&File::default(), &Request::default()),
+    };
+    let provider = shprd_remote::tunnel::Provider::parse(resolved.web_tunnel())
+        .unwrap_or(shprd_remote::tunnel::Provider::Tailscale);
+    let options = shprd_remote::tunnel::Options {
+        stable: resolved.web_stable(),
+        cloudflared_name: resolved.web_cloudflared_name().to_owned(),
+        cloudflared_host: resolved.web_cloudflared_host().to_owned(),
+    };
+    (provider, options)
+}
+
 /// The merge policy this service resolves, when it can read the settings at all.
 ///
 /// It is the one setting an *action* reads: `task.accept` records a human's
@@ -104,6 +144,8 @@ pub(crate) fn write(state: &AppState, body: &Bytes) -> Result<SettingsWriteDto, 
         key.check(value)
             .map_err(|reason| ApiReject::bad_request(format!("`{}` {reason}", key.name())))?;
     }
+    // A role's name is stored trimmed and cut; an empty one is no name at all.
+    let value = key.normalized(value);
     let loaded = place.load()?;
     let scope = match request.for_repo {
         true => Scope::Repo(loaded.repo.clone().ok_or_else(|| {
@@ -142,6 +184,30 @@ pub(crate) fn write(state: &AppState, body: &Bytes) -> Result<SettingsWriteDto, 
     let written = loaded
         .write(place.home, &scope, &key, value, None)
         .map_err(read_failure)?;
+    // A settings write is a change a window has to see: the change file is what
+    // a mod follows, and a role's name shows on the coordinator's tab at once.
+    let _ = crate::changes::touch(
+        &state.state_dir,
+        crate::ledger::last_seq(&state.repo).unwrap_or(0),
+    );
+    let titled = match &key {
+        Key::Role {
+            id,
+            field: shprd_core::settings::RoleField::Title,
+        } => Some(id.as_str()),
+        _ => None,
+    };
+    if let Some(id) = titled
+        && let Some(role) = written.resolved.roles().into_iter().find(|role| {
+            role.kind.value == shprd_core::settings::RoleKind::Coordinator && role.id == id
+        })
+    {
+        // The tab follows the name; a host that cannot rename it is not a refused
+        // write: the name is read again when the coordinator next starts.
+        if let Err(reason) = state.agents.name_coordinator(&role.display_title()) {
+            tracing::warn!(%reason, "the coordinator's tab was not renamed");
+        }
+    }
     Ok(SettingsWriteDto {
         outcome: written.outcome.into(),
         settings: document(state, &loaded, written.resolved),

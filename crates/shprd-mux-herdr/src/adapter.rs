@@ -70,6 +70,7 @@ impl Host for HerdrMux {
             agent_reports: true,
             close_space: !refused.close_space,
             list_spaces: true,
+            headless_agents: false,
         }
     }
 

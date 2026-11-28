@@ -13,9 +13,11 @@ export type HealthDto = {
  */
 ok: boolean, 
 /**
- * The service's identity, as `service.json` records it.
+ * The service's identity, as `service.json` records it. Left out for a
+ * caller that is not on loopback: the id is the local handshake's, and a
+ * public caller has no use for it.
  */
-id: string, 
+id?: string, 
 /**
  * The service's version.
  */

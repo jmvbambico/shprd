@@ -201,7 +201,7 @@ fn an_opencode_worker_receives_its_brief_with_nobody_typing() {
     let stdout = String::from_utf8_lossy(&spawned.stdout).to_string();
     let stderr = String::from_utf8_lossy(&spawned.stderr).to_string();
     assert!(spawned.status.success(), "spawn failed: {stderr}");
-    assert!(stdout.contains("ok spawned M4.4 attempt 1"), "{stdout}");
+    assert!(stdout.contains("ok spawned M4.4·a1"), "{stdout}");
     // The bug this test exists for: the delivery must not be a warning.
     assert!(
         !stderr.contains("brief not delivered"),
@@ -263,8 +263,8 @@ fn an_opencode_worker_receives_its_brief_with_nobody_typing() {
         "the file is not what the brief asked for: {written:?}"
     );
 
-    // The task space is left for the test's own teardown: the service is what
-    // closes it on a landing, and no landing runs here.
+    // The worker is left for the test's own teardown: the service is what stops
+    // it on a landing, and no landing runs here.
 }
 
 /// The first free model `opencode models` lists, or the fallback the gate used.

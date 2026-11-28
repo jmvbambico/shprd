@@ -27,6 +27,9 @@
 // Shared: the source is `mods/lib/toasts.js`; `bin/sync-shared` copies it into
 // every mod folder that imports it. Edit the source, never a copy.
 
+import { forYou, newestDecision } from "./board.js";
+import { desktopWords, roleRename, waitLabel } from "./tokens.js";
+
 /** How many toasts are on screen at once (`core/toasts.js:11`). */
 export const SHOWN = 3;
 /** How wide the float is, px (`core/toasts.js:12`). */
@@ -102,6 +105,16 @@ function finished(state, taskId) {
   return task?.status === "integrated" || task?.status === "dropped";
 }
 
+/**
+ * Whether the card on `taskId` is the person's: the same rule For you and the
+ * Needs you badge use (`forYou`), so a toast and the board cannot disagree. A
+ * card with no task row in the snapshot is not on the board, so not theirs.
+ */
+export function isTheirs(state, taskId) {
+  const task = (state?.tasks ?? []).find((entry) => entry?.id === taskId);
+  return Boolean(task) && forYou(task);
+}
+
 /** The integration branch a landed task went into, as a person reads it. */
 function landedBody(state, taskId) {
   const task = (state?.tasks ?? []).find((entry) => entry?.id === taskId);
@@ -112,10 +125,10 @@ function landedBody(state, taskId) {
 
 /** The card a task's needs-you toast says, when the service has one. */
 function needBody(state, taskId) {
-  const card = (state?.needs ?? []).find((entry) => entry?.task === taskId);
-  if (card?.body) return clip(card.body);
+  const card = newestDecision(state, taskId);
+  if (card?.body) return clip(desktopWords(card.body, taskId));
   const task = (state?.tasks ?? []).find((entry) => entry?.id === taskId);
-  if (task?.derived?.reason) return clip(task.derived.reason);
+  if (task?.derived?.reason) return clip(desktopWords(task.derived.reason, taskId));
   return "It waits for you.";
 }
 
@@ -164,10 +177,16 @@ export function newsItems(changes, state) {
     }
     if (level === "warning") {
       if (finished(state, task)) continue;
+      // "Needs you" is For you's word: a card the coordinator or the engine
+      // settles (operational, out of rounds, a stopped agent, the run-wide
+      // card, which has no task row) is not told to the person at all.
+      if (!isTheirs(state, task)) continue;
+      const label = waitLabel((state?.tasks ?? []).find((entry) => entry?.id === task));
+      const said = label.charAt(0).toUpperCase() + label.slice(1);
       items.push({
         id: eventId(change.seq),
         level,
-        title: task ? `${task} · Needs you` : "Needs you",
+        title: task ? `${task} · ${said}` : said,
         body: needBody(state, task),
         task,
       });
@@ -177,7 +196,10 @@ export function newsItems(changes, state) {
     // which one and what it found; without the snapshot's join it says the
     // least it truthfully can.
     const failed = failedGate(state, task);
-    const what = failed?.gate === "review" || !failed ? "Review failed" : `${failed.gate} failed`;
+    // The reviewer's own name, when the person gave it one: "QA failed it".
+    const qa = roleRename(state, "reviewer");
+    const review = qa ? `${qa} failed it` : "Review failed";
+    const what = failed?.gate === "review" || !failed ? review : `${failed.gate} failed`;
     items.push({
       id: eventId(change.seq),
       level,
@@ -187,6 +209,16 @@ export function newsItems(changes, state) {
     });
   }
   return items;
+}
+
+/**
+ * One failed step as a person reads it. A land failure is already one plain
+ * sentence ("Couldn't merge T1: …"), so it stands alone: no step name in front
+ * and no command line behind.
+ */
+export function failureText(step, where = "") {
+  if (step.step === "land" && /^Couldn't /.test(step.error ?? "")) return step.error;
+  return `${step.step}${where}: ${step.error}`;
 }
 
 /**
@@ -203,11 +235,25 @@ export function passItem(state) {
   const first = failed[0];
   const where = first.task ? ` on ${first.task}` : "";
   const others = failed.length - 1;
+  // A task that could not start is said in plain words: which task, and that
+  // nothing was lost. The engine's own wording (pass, attempt, branch names)
+  // stays in its log.
+  if (first.step === "start" && first.task) {
+    return {
+      id: passId(tick.at_ms),
+      level: "error",
+      title: "A task could not start",
+      body: clip(
+        `${first.task} could not start. Nothing was lost; it is still waiting to be started again.${others > 0 ? ` (+${others} more)` : ""}`,
+      ),
+      task: first.task,
+    };
+  }
   return {
     id: passId(tick.at_ms),
     level: "error",
     title: "The last pass failed",
-    body: clip(`${first.step}${where}: ${first.error}${others > 0 ? ` (+${others})` : ""}`),
+    body: clip(`${failureText(first, where)}${others > 0 ? ` (+${others})` : ""}`),
     task: first.task || "",
   };
 }

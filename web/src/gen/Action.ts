@@ -10,9 +10,10 @@
  */
 export type Action = { "kind": "task.add", 
 /**
- * Task id, e.g. `M1.6`.
+ * Task id, e.g. `M1.6`. Left out, the service assigns the next free
+ * `T<n>` and the reply's `task` carries it.
  */
-task: string, 
+task?: string, 
 /**
  * One-line title.
  */
@@ -61,6 +62,10 @@ task: string, } | { "kind": "task.stop",
 /**
  * The task whose agent should stop.
  */
+task: string, } | { "kind": "task.reopen", 
+/**
+ * The task to reopen.
+ */
 task: string, } | { "kind": "task.drop", 
 /**
  * The task to drop.
@@ -69,8 +74,44 @@ task: string,
 /**
  * Why the person decided against it.
  */
+reason: string, } | { "kind": "task.drop_many", 
+/**
+ * The tasks to drop.
+ */
+tasks: Array<string>, 
+/**
+ * Why the person decided against them, listed under `## Dropped`.
+ */
 reason: string, } | { "kind": "task.accept", 
 /**
  * The task to accept.
  */
-task: string, };
+task: string, } | { "kind": "need.dismiss", 
+/**
+ * The card's sequence number.
+ */
+seq: number, } | { "kind": "task.resend_brief", 
+/**
+ * The task whose brief should be delivered again.
+ */
+task: string, } | { "kind": "task.review_again", 
+/**
+ * The task whose review should start again.
+ */
+task: string, } | { "kind": "task.override", 
+/**
+ * The task whose failed gate is overridden.
+ */
+task: string, 
+/**
+ * Why the person lets it land.
+ */
+reason: string, } | { "kind": "agent.readmit", 
+/**
+ * The agent (a program, or `program/model`).
+ */
+agent: string, 
+/**
+ * Why it can be used again.
+ */
+reason: string, } | { "kind": "run.sync", };

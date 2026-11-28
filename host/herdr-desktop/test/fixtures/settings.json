@@ -7,14 +7,13 @@
         "coordinator",
         "worker",
         "reviewer",
-        "backup",
         "docs"
       ],
       "source": "you"
     },
     {
       "key": "roles.coordinator.title",
-      "value": "Assistant",
+      "value": "Orchestrator",
       "source": "built_in"
     },
     {
@@ -175,61 +174,6 @@
     {
       "key": "roles.reviewer.readonly",
       "value": true,
-      "source": "built_in"
-    },
-    {
-      "key": "roles.backup.title",
-      "value": "Backup agent",
-      "source": "built_in"
-    },
-    {
-      "key": "roles.backup.about",
-      "value": "Takes a task over once, when the worker's CLI cannot go on.",
-      "source": "built_in"
-    },
-    {
-      "key": "roles.backup.kind",
-      "value": "worker",
-      "source": "built_in"
-    },
-    {
-      "key": "roles.backup.prompt",
-      "value": "prompt:backup",
-      "source": "built_in"
-    },
-    {
-      "key": "roles.backup.agent",
-      "value": "codex",
-      "source": "you"
-    },
-    {
-      "key": "roles.backup.model",
-      "value": null,
-      "source": null
-    },
-    {
-      "key": "roles.backup.effort",
-      "value": null,
-      "source": null
-    },
-    {
-      "key": "roles.backup.fast",
-      "value": false,
-      "source": "built_in"
-    },
-    {
-      "key": "roles.backup.perm",
-      "value": null,
-      "source": null
-    },
-    {
-      "key": "roles.backup.fallback",
-      "value": [],
-      "source": "built_in"
-    },
-    {
-      "key": "roles.backup.readonly",
-      "value": false,
       "source": "built_in"
     },
     {

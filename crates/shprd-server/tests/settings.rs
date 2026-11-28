@@ -19,6 +19,12 @@ use shprd_server::App;
 use tempfile::TempDir;
 use tower::ServiceExt;
 
+/// The `Host` every fixture request is addressed to.
+///
+/// The gate refuses a request with no `Host` (`421`), so a test that drove the
+/// router without one would be testing the refusal, not the route.
+const HOST: &str = "127.0.0.1:18080";
+
 /// The port the fixture claims; no `Origin` is sent, so it is only a label.
 const PORT: u16 = 18_090;
 
@@ -69,6 +75,7 @@ impl Fixture {
         let mut request = Request::builder()
             .method(method.clone())
             .uri(path)
+            .header(header::HOST, HOST)
             .header(header::AUTHORIZATION, format!("Bearer {}", self.token));
         if method != Method::GET {
             request = request.header("x-shprd", "1");
@@ -307,6 +314,7 @@ async fn a_write_needs_the_write_header() {
     let request = Request::builder()
         .method(Method::PUT)
         .uri("/api/settings")
+        .header(header::HOST, HOST)
         .header(header::AUTHORIZATION, format!("Bearer {}", fixture.token))
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(
@@ -420,4 +428,197 @@ async fn a_broken_pair_someone_left_does_not_block_other_keys() {
             .contains("no harness defines"),
         "{reply}"
     );
+}
+
+/// An opener that keeps the names the coordinator's tab was given and the
+/// restarts it was asked for.
+#[derive(Debug, Default)]
+struct Tabs {
+    named: std::sync::Mutex<Vec<String>>,
+    restarts: std::sync::Mutex<u32>,
+}
+
+impl shprd_server::AgentOpener for Tabs {
+    fn open(&self, _: &str, _: Option<&str>) -> Result<shprd_server::OpenedTab, String> {
+        Err("not used".to_owned())
+    }
+
+    fn name_coordinator(&self, title: &str) -> Result<(), String> {
+        self.named.lock().expect("lock").push(title.to_owned());
+        Ok(())
+    }
+
+    fn restart_coordinator(&self) -> Result<(), String> {
+        *self.restarts.lock().expect("lock") += 1;
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn naming_the_coordinator_renames_its_tab_and_the_state_carries_the_names() {
+    let tabs = std::sync::Arc::new(Tabs::default());
+    let mut fixture = Fixture::new();
+    fixture.app = fixture.app.with_agent_opener(tabs.clone());
+    // A name is trimmed, and shows in the state for every client.
+    let (status, reply) = fixture
+        .put(json!({"key": "roles.coordinator.title", "value": "  Orchestrator "}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{reply}");
+    assert_eq!(
+        row(&reply["settings"], "roles.coordinator.title")["value"],
+        "Orchestrator"
+    );
+    assert_eq!(*tabs.named.lock().expect("lock"), ["Orchestrator"]);
+    fixture
+        .put(json!({"key": "roles.worker.title", "value": "Dev"}))
+        .await;
+    let (_, state) = fixture.send(Method::GET, "/api/state", None).await;
+    assert_eq!(state["role_titles"]["coordinator"], "Orchestrator");
+    assert_eq!(state["role_titles"]["worker"], "Dev");
+    assert_eq!(state["role_titles"]["reviewer"], "Reviewer");
+    // A worker's name does not touch the coordinator's tab.
+    assert_eq!(tabs.named.lock().expect("lock").len(), 1);
+    // A blank name is no name: the built-in title comes back, and the tab follows.
+    let (status, _) = fixture
+        .put(json!({"key": "roles.coordinator.title", "value": "   "}))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        tabs.named.lock().expect("lock").last().map(String::as_str),
+        Some("Orchestrator")
+    );
+    let (_, state) = fixture.send(Method::GET, "/api/state", None).await;
+    assert_eq!(state["role_titles"]["coordinator"], "Orchestrator");
+    // A name is cut to its cap.
+    fixture
+        .put(json!({"key": "roles.reviewer.title", "value": "x".repeat(60)}))
+        .await;
+    let (_, state) = fixture.send(Method::GET, "/api/state", None).await;
+    assert_eq!(state["role_titles"]["reviewer"].as_str().unwrap().len(), 24);
+}
+
+#[tokio::test]
+async fn restarting_the_coordinator_asks_the_host_once() {
+    let tabs = std::sync::Arc::new(Tabs::default());
+    let mut fixture = Fixture::new();
+    fixture.app = fixture.app.with_agent_opener(tabs.clone());
+    let (status, _) = fixture
+        .send(Method::POST, "/api/coordinator/restart", None)
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(*tabs.restarts.lock().expect("lock"), 1);
+}
+
+#[tokio::test]
+async fn a_service_with_no_host_refuses_to_restart_the_coordinator() {
+    let fixture = Fixture::new();
+    let (status, _) = fixture
+        .send(Method::POST, "/api/coordinator/restart", None)
+        .await;
+    assert_ne!(status, StatusCode::NO_CONTENT);
+}
+
+/// The model the dialog would choose for a program: the roster's first model, or —
+/// for `pi`, whose models this hand-built service cannot list — two of the
+/// provider-qualified ids its own `--list-models` prints.
+fn model_for(roster: &Value, program: &str, other_vendor: bool) -> Option<String> {
+    if program == "pi" {
+        return Some(match other_vendor {
+            false => "Command Code/deepseek/deepseek-v4.1-flash".to_owned(),
+            true => "Command Code/z-ai/glm-5.3-flash".to_owned(),
+        });
+    }
+    roster["programs"]
+        .as_array()?
+        .iter()
+        .find(|entry| entry["id"] == program)?["models"]
+        .as_array()?
+        .first()?["id"]
+        .as_str()
+        .map(str::to_owned)
+}
+
+/// The writes the dialog makes to put `program` (with `model`) in the first line of
+/// `role`: the old program's model, level and mode out, then the program, then its model.
+fn first_line_writes(role: &str, program: &str, model: Option<&str>) -> Vec<Value> {
+    let key = |field: &str| format!("roles.{role}.{field}");
+    let mut writes = vec![
+        json!({"key": key("model"), "value": null}),
+        json!({"key": key("effort"), "value": null}),
+        json!({"key": key("perm"), "value": null}),
+        json!({"key": key("agent"), "value": program}),
+    ];
+    if let Some(model) = model {
+        writes.push(json!({"key": key("model"), "value": model}));
+    }
+    writes
+}
+
+/// Every roster program, as the first and as the second line of Worker (s) and of
+/// Reviewer (s), through the calls the dialog makes: each write is accepted, or
+/// refused only with the cross-vendor sentence.
+#[tokio::test]
+async fn every_harness_is_accepted_in_every_slot() {
+    let mut accepted = 0;
+    let mut cross_vendor = 0;
+    let probe = Fixture::new();
+    let (_, roster) = probe.send(Method::GET, "/api/roster", None).await;
+    let programs: Vec<String> = roster["programs"]
+        .as_array()
+        .expect("programs")
+        .iter()
+        .map(|entry| entry["id"].as_str().expect("id").to_owned())
+        .collect();
+    assert_eq!(programs, ["claude", "codex", "kilo", "opencode", "pi"]);
+    for role in ["worker", "reviewer"] {
+        for position in [0usize, 1] {
+            for program in &programs {
+                let fixture = Fixture::new();
+                // Both roles start on other programs, with a model and a level set.
+                for (key, value) in [
+                    ("roles.worker.agent", json!("claude")),
+                    ("roles.worker.model", json!("opus")),
+                    ("roles.reviewer.agent", json!("codex")),
+                    ("roles.reviewer.model", json!("gpt-6-luna")),
+                ] {
+                    let (status, reply) = fixture.put(json!({"key": key, "value": value})).await;
+                    assert_eq!(status, StatusCode::OK, "{key}: {reply}");
+                }
+                // The other role's vendor decides which Pi model is a different vendor.
+                let other_vendor = role == "reviewer";
+                let model = model_for(&roster, program, other_vendor);
+                let writes = if position == 0 {
+                    first_line_writes(role, program, model.as_deref())
+                } else {
+                    let line = format!("{program}|{}|||", model.as_deref().unwrap_or(""));
+                    vec![json!({"key": format!("roles.{role}.agents"), "value": [line]})]
+                };
+                for write in writes {
+                    let (status, reply) = fixture.put(write.clone()).await;
+                    match status {
+                        StatusCode::OK => accepted += 1,
+                        _ => {
+                            let message = reply["message"].as_str().unwrap_or_default();
+                            assert!(
+                                message.contains("not cross-vendor"),
+                                "{program} as {role} line {}: {write} was refused: {message}",
+                                position + 1
+                            );
+                            cross_vendor += 1;
+                        }
+                    }
+                }
+                let document = fixture.settings().await;
+                assert_eq!(
+                    document["problems"],
+                    json!([]),
+                    "{program} {role} {position}"
+                );
+            }
+        }
+    }
+    println!(
+        "harness x role x position: {accepted} writes accepted, {cross_vendor} refused as cross-vendor"
+    );
+    assert!(accepted > 40, "{accepted}");
 }

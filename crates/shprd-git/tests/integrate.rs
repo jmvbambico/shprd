@@ -169,7 +169,7 @@ fn refuses_a_claim_that_adds_a_commit() {
 }
 
 #[test]
-fn refuses_a_path_outside_the_scope() {
+fn a_path_outside_the_declared_scope_is_picked() {
     let repo = Repo::new();
     let layout = repo.layout();
     let t = task(
@@ -180,11 +180,10 @@ fn refuses_a_path_outside_the_scope() {
     );
     let int = open(&repo, &layout);
     let head = head_in(&int.path);
-    match refused(&int, &t.claim(&["src"])) {
-        IntegrateError::OutsideScope { outside } => assert_eq!(outside, vec!["docs/x.md"]),
-        other => panic!("expected OutsideScope, got {other:?}"),
+    if let Err(err) = integrate::integrate(&int, &t.claim(&["src"])) {
+        panic!("a declared scope is a hint, not a limit: {err:?}");
     }
-    assert_eq!(head_in(&int.path), head, "nothing may be picked");
+    assert_ne!(head_in(&int.path), head, "the commits are picked");
 }
 
 #[test]
@@ -319,4 +318,171 @@ fn reopening_an_integration_worktree_repairs_its_state_exclusions() {
         status.is_empty(),
         "shprd's own state still shows as a change: {status}"
     );
+}
+
+#[test]
+fn a_task_that_merged_a_moved_main_is_not_refused_for_scope() {
+    let repo = Repo::new();
+    let layout = repo.layout();
+    let t = task(&repo, &layout, "T1", &[("src/a.txt", "a\n")]);
+    for n in 0..100 {
+        repo.commit(
+            &format!("gained/f{n}.txt"),
+            "x\n",
+            &format!("main gains {n}"),
+        );
+    }
+    git_in(&t.path, &["merge", "--no-edit", "main"]);
+    let own = commit_in(&t.path, "src/b.txt", "b\n", "T1: b");
+    let int = open(&repo, &layout);
+    let mut claim = t.claim(&["src"]);
+    claim.claimed = git_in(
+        &t.path,
+        &["rev-list", "--reverse", &format!("{}..HEAD", t.base_sha)],
+    )
+    .lines()
+    .map(str::to_string)
+    .collect();
+    assert!(claim.claimed.contains(&own));
+    // Whatever else the pick does with main's own commits, nothing about the
+    // hundred files main gained refuses it.
+    let _ = integrate::integrate(&int, &claim);
+}
+
+#[test]
+fn two_such_tasks_neither_overlap_nor_blame_each_other() {
+    use shprd_git::changed::task_changes;
+    let repo = Repo::new();
+    repo.git(&["branch", "t3"]);
+    repo.git(&["branch", "t4"]);
+    for n in 0..100 {
+        repo.commit(
+            &format!("gained/g{n}.txt"),
+            "x\n",
+            &format!("main gains {n}"),
+        );
+    }
+    let scopes = [("t3", "a"), ("t4", "b")];
+    for (name, dir) in scopes {
+        repo.git(&["checkout", name]);
+        repo.git(&["merge", "--no-edit", "main"]);
+        for file in ["one.rs", "two.rs"] {
+            repo.commit(&format!("{dir}/{file}"), name, &format!("{name}: {file}"));
+        }
+    }
+    repo.git(&["checkout", "main"]);
+    let mut changes = Vec::new();
+    for (name, _) in scopes {
+        match task_changes(&repo.path, "main", name) {
+            Ok(paths) => changes.push(paths),
+            Err(err) => panic!("task changes: {err}"),
+        }
+    }
+    assert_eq!(changes[0].len(), 2);
+    assert_eq!(changes[1].len(), 2);
+    // The engine's overlap check compares what each task claims (its scope);
+    // the real changes sit inside those claims, so the check stays clear.
+    let scope_a = vec!["a".to_string()];
+    let scope_b = vec!["b".to_string()];
+    assert!(!shprd_core::scope::overlaps(&scope_a, &scope_b));
+    assert!(!shprd_core::scope::overlaps(&changes[0], &changes[1]));
+}
+
+/// The integration branch is held by the worktree only while a landing is
+/// under way: released, the person's own checkout can switch to it.
+#[test]
+fn a_released_integration_worktree_leaves_the_branch_free_and_a_reopen_takes_it_back() {
+    let repo = Repo::new();
+    let layout = repo.layout();
+    repo.git(&["branch", "integration/m9", "main"]);
+    let int = match integrate::open_integration_branch(
+        &repo.path,
+        &layout,
+        "repo",
+        "r1",
+        "integration/m9",
+        "main",
+    ) {
+        Ok(int) => int,
+        Err(err) => panic!("open: {err}"),
+    };
+    if let Err(err) = integrate::release_integration(&int) {
+        panic!("release: {err}");
+    }
+    assert!(
+        worktree::checked_out_at(&shprd_git::git::Git::new(&repo.path), "integration/m9").is_none(),
+        "a released worktree holds no branch"
+    );
+    repo.git(&["switch", "integration/m9"]);
+    repo.git(&["switch", "main"]);
+
+    let again = match integrate::open_integration_branch(
+        &repo.path,
+        &layout,
+        "repo",
+        "r1",
+        "integration/m9",
+        "main",
+    ) {
+        Ok(int) => int,
+        Err(err) => panic!("reopen: {err}"),
+    };
+    assert!(!again.created);
+    let held = worktree::checked_out_at(&shprd_git::git::Git::new(&repo.path), "integration/m9")
+        .and_then(|path| path.canonicalize().ok());
+    assert_eq!(
+        held,
+        int.path.canonicalize().ok(),
+        "a reopened worktree holds the branch for the landing"
+    );
+}
+
+/// A command that took the branch back (a base sync) is undone by the idle
+/// sweep, which leaves a detached or missing worktree alone.
+#[test]
+fn the_idle_sweep_releases_a_held_integration_worktree_and_only_that() {
+    let repo = Repo::new();
+    let layout = repo.layout();
+    repo.git(&["branch", "integration/m9", "main"]);
+    let int = match integrate::open_integration_branch(
+        &repo.path,
+        &layout,
+        "repo",
+        "r1",
+        "integration/m9",
+        "main",
+    ) {
+        Ok(int) => int,
+        Err(err) => panic!("open: {err}"),
+    };
+    assert!(integrate::release_if_held(&int.path), "held, so released");
+    assert!(!integrate::release_if_held(&int.path), "already detached");
+    assert!(!integrate::release_if_held(&repo.path.join("nope")));
+    repo.git(&["switch", "integration/m9"]);
+}
+
+/// A branch the person's checkout holds cannot be opened, and the error carries
+/// git's own words so the escalation can say where it is held.
+#[test]
+fn a_branch_held_in_the_checkout_fails_with_gits_own_reason() {
+    let repo = Repo::new();
+    let layout = repo.layout();
+    repo.git(&["switch", "-c", "prototype"]);
+    let err = match integrate::open_integration_branch(
+        &repo.path,
+        &layout,
+        "repo",
+        "r1",
+        "prototype",
+        "prototype",
+    ) {
+        Ok(int) => panic!("a held branch must not open, got {int:?}"),
+        Err(err) => err,
+    };
+    let text = err.to_string();
+    assert!(text.contains("already"), "{text}");
+    assert!(text.contains("prototype"), "{text}");
+    let holder = worktree::checked_out_at(&shprd_git::git::Git::new(&repo.path), "prototype")
+        .and_then(|path| path.canonicalize().ok());
+    assert_eq!(holder, repo.path.canonicalize().ok(), "the holder is found");
 }

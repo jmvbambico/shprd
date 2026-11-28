@@ -23,7 +23,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
@@ -338,7 +338,7 @@ fn a_live_pi_turn_is_read_back_through_the_chat_route() {
     let record = wait_for_record(&state);
     let port = record["port"].as_u64().expect("a port") as u16;
     let base = format!("http://127.0.0.1:{port}");
-    let token = std::fs::read_to_string(state.join("shprd").join("token"))
+    let token = std::fs::read_to_string(service_dir(&state).join("token"))
         .expect("the token is there")
         .trim()
         .to_string();
@@ -434,17 +434,19 @@ fn first_pane(server: &LiveServer) -> Option<String> {
 
 /// Waits for the service's discovery record and answers it.
 fn wait_for_record(state: &Path) -> Value {
-    let path = state.join("shprd").join("service.json");
     let deadline = Instant::now() + Duration::from_secs(20);
     while Instant::now() < deadline {
-        if let Ok(text) = std::fs::read_to_string(&path)
+        if let Ok(text) = std::fs::read_to_string(service_dir(state).join("service.json"))
             && let Ok(value) = serde_json::from_str(&text)
         {
             return value;
         }
         sleep(Duration::from_millis(50));
     }
-    panic!("the service never wrote {}", path.display());
+    panic!(
+        "the service never wrote its record under {}",
+        state.display()
+    );
 }
 
 /// Copies the person's pi credentials, model catalog and settings into
@@ -477,4 +479,9 @@ fn pane_text(server: &LiveServer, pane: &str) -> String {
         .herdr(&["pane", "read", pane, "--lines", "40", "--format", "text"])
         .map(|output| String::from_utf8_lossy(&output.stdout).to_string())
         .unwrap_or_else(|err| format!("(the pane could not be read: {err})"))
+}
+
+/// The one service's directory under this state home.
+fn service_dir(state: &Path) -> PathBuf {
+    state.join("shprd")
 }

@@ -95,6 +95,7 @@ export async function followChanges(dir, onChange, io = {}) {
   try {
     for (;;) {
       const paths = await watch(dir);
+      if (io.stop?.()) return;
       if (!changeMatters(paths, dir)) continue;
       const change = await readChange(dir, read);
       if (change === null || sameChange(change, last)) continue;

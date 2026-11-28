@@ -18,6 +18,12 @@ use shprd_server::App;
 use tempfile::TempDir;
 use tower::ServiceExt;
 
+/// The `Host` every fixture request is addressed to.
+///
+/// The gate refuses a request with no `Host` (`421`), so a test that drove the
+/// router without one would be testing the refusal, not the route.
+const HOST: &str = "127.0.0.1:18080";
+
 /// The port the fixture claims; no `Origin` is sent, so it is only a label.
 const PORT: u16 = 18_091;
 
@@ -63,6 +69,7 @@ impl Fixture {
         let mut request = Request::builder()
             .method(method.clone())
             .uri(path)
+            .header(header::HOST, HOST)
             .header(header::AUTHORIZATION, format!("Bearer {}", self.token));
         if method != Method::GET {
             request = request.header("x-shprd", "1");
@@ -266,6 +273,7 @@ async fn a_reset_of_a_prompt_nothing_ships_is_a_404_and_needs_the_write_header()
     let request = Request::builder()
         .method(Method::DELETE)
         .uri("/api/prompts/worker")
+        .header(header::HOST, HOST)
         .header(header::AUTHORIZATION, format!("Bearer {}", fixture.token))
         .body(Body::empty())
         .expect("the request");

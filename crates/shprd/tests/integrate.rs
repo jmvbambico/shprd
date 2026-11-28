@@ -10,7 +10,7 @@ use tempfile::TempDir;
 
 mod support;
 
-use support::herdr::isolate;
+use support::isolate;
 
 /// The binary under test, built by cargo for this integration test.
 const BIN: &str = env!("CARGO_BIN_EXE_shprd");
@@ -125,6 +125,9 @@ impl Fixture {
 
     /// Starts run `r1`, whose integration work lands on `main`'s tip.
     fn start(&self) {
+        // The run lands on `main`, which git lets one worktree hold: the
+        // checkout lets go of it first, as `run start` asks of a person.
+        self.git(&["switch", "--detach"]);
         self.ok(&[
             "run",
             "start",
@@ -229,17 +232,7 @@ impl Fixture {
             "--changed",
             scope,
         ]);
-        self.ok(&[
-            "agent",
-            "gate",
-            "pass",
-            "--task",
-            id,
-            "--attempt",
-            "1",
-            "--gate",
-            "lint",
-        ]);
+        support::pass_review(&self.root, id);
     }
 
     /// The run's event log as text.

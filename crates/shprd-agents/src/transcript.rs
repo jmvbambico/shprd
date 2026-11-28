@@ -92,6 +92,9 @@ pub enum Role {
     User,
     /// The agent.
     Assistant,
+    /// What shprd's service told the agent: a task's news, typed into the
+    /// conversation as `<shprd-news>` lines and shown as plain news lines.
+    News,
 }
 
 impl Role {
@@ -100,6 +103,7 @@ impl Role {
         match self {
             Self::User => "user",
             Self::Assistant => "assistant",
+            Self::News => "news",
         }
     }
 }
@@ -134,6 +138,123 @@ impl Message {
     }
 }
 
+/// One choice of a question the agent put to the person.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuestionOption {
+    /// The choice as the dialog shows it.
+    pub label: String,
+    /// What choosing it means; may be empty.
+    pub description: String,
+}
+
+/// One question of a dialog the agent is waiting on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Question {
+    /// The short tag over the question (`Host`); may be empty.
+    pub header: String,
+    /// The question itself.
+    pub question: String,
+    /// Whether more than one choice may be picked.
+    pub multi_select: bool,
+    /// The choices, in the order the dialog numbers them.
+    pub options: Vec<QuestionOption>,
+}
+
+/// A question tool call the agent made that has no answer in its record yet:
+/// its terminal shows the dialog and waits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingQuestion {
+    /// The tool call's own id, which names this question until it is answered.
+    pub id: String,
+    /// The dialog's questions, in order (almost always one).
+    pub questions: Vec<Question>,
+}
+
+/// The question a Claude Code record is waiting on, read from `bytes` (a whole
+/// record or its tail): the last `AskUserQuestion` call that no `tool_result`
+/// answers and no later reply follows. Lines that do not parse are skipped.
+pub fn claude_pending_question(bytes: &[u8]) -> Option<PendingQuestion> {
+    let mut pending: Option<PendingQuestion> = None;
+    for raw in bytes.split(|byte| *byte == b'\n') {
+        let Ok(value) = serde_json::from_slice::<Value>(raw) else {
+            continue;
+        };
+        if value.get("isSidechain") == Some(&Value::Bool(true)) {
+            continue;
+        }
+        let Some(blocks) = value
+            .get("message")
+            .and_then(|message| message.get("content"))
+            .and_then(Value::as_array)
+        else {
+            continue;
+        };
+        match value.get("type").and_then(Value::as_str) {
+            Some("assistant") => {
+                // Any later assistant line means the agent went on: it was answered.
+                pending = blocks.iter().find_map(|block| {
+                    (block.get("type").and_then(Value::as_str) == Some("tool_use")
+                        && block.get("name").and_then(Value::as_str) == Some("AskUserQuestion"))
+                    .then(|| question_of(block))
+                    .flatten()
+                });
+            }
+            Some("user") => {
+                let answered = blocks.iter().any(|block| {
+                    block.get("type").and_then(Value::as_str) == Some("tool_result")
+                        && pending.as_ref().is_some_and(|ask| {
+                            block.get("tool_use_id").and_then(Value::as_str) == Some(&ask.id)
+                        })
+                });
+                if answered {
+                    pending = None;
+                }
+            }
+            _ => {}
+        }
+    }
+    pending
+}
+
+/// One `AskUserQuestion` tool_use block as a pending question.
+fn question_of(block: &Value) -> Option<PendingQuestion> {
+    let id = block.get("id")?.as_str()?.to_owned();
+    let text = |value: &Value, key: &str| {
+        value
+            .get(key)
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_owned()
+    };
+    let questions: Vec<Question> = block
+        .get("input")?
+        .get("questions")?
+        .as_array()?
+        .iter()
+        .map(|question| Question {
+            header: text(question, "header"),
+            question: text(question, "question"),
+            multi_select: question.get("multiSelect") == Some(&Value::Bool(true)),
+            options: question
+                .get("options")
+                .and_then(Value::as_array)
+                .map(|options| {
+                    options
+                        .iter()
+                        .map(|option| QuestionOption {
+                            label: text(option, "label"),
+                            description: text(option, "description"),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        })
+        .filter(|question| !question.question.is_empty())
+        .collect();
+    (!questions.is_empty()).then_some(PendingQuestion { id, questions })
+}
+
 /// What one read answered.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Page {
@@ -143,6 +264,9 @@ pub struct Page {
     pub cursor: String,
     /// Whether the record had more to give when the page filled up.
     pub more: bool,
+    /// Where to ask (with [`Transcript::read_before`]) for the messages written
+    /// before this page, or `None` when the page starts at the record's start.
+    pub older: Option<String>,
 }
 
 /// One session's record, found and ready to read.
@@ -225,14 +349,32 @@ impl Transcript {
     /// that CLI had — the real `HOME` it inherits and its XDG data home — never
     /// under the engine's home, which no CLI writes a session into.
     pub fn locate_in(spec: &TranscriptSpec, roots: &Roots, cwd: &Path) -> Option<Transcript> {
+        Self::locate_since(spec, roots, cwd, None)
+    }
+
+    /// [`Transcript::locate_in`] for an agent that started at `since_ms` (epoch
+    /// milliseconds): only a session that began then or later is its own.
+    ///
+    /// A directory holds every conversation anyone had there, a person's own
+    /// and an earlier agent's included, so "the newest in this directory" can be
+    /// somebody else's. An agent knows when it started, and its session is the
+    /// first one begun after that. `None` is the old rule: the newest session.
+    pub fn locate_since(
+        spec: &TranscriptSpec,
+        roots: &Roots,
+        cwd: &Path,
+        since_ms: Option<u64>,
+    ) -> Option<Transcript> {
         let format = spec.format?;
         let location = spec.location.as_deref()?;
         match format {
-            TranscriptFormat::OpencodeStorage => locate_store(&expand_path(location, roots)?, cwd),
-            TranscriptFormat::OpencodeSqlite => {
-                locate_database(&expand_path(location, roots)?, cwd)
+            TranscriptFormat::OpencodeStorage => {
+                locate_store(&expand_path(location, roots)?, cwd, since_ms)
             }
-            _ => locate_file(format, location, roots, cwd),
+            TranscriptFormat::OpencodeSqlite => {
+                locate_database(&expand_path(location, roots)?, cwd, since_ms)
+            }
+            _ => locate_file(format, location, roots, cwd, since_ms),
         }
     }
 
@@ -248,6 +390,167 @@ impl Transcript {
             Source::Store { root, session } => self.read_store(root, session, from),
             Source::Database { path, session } => self.read_database(path, session, from),
         }
+    }
+
+    /// The newest messages: the last page of the record, read from its end
+    /// without parsing what comes before it.
+    ///
+    /// `cursor` is where [`Transcript::read`] continues from (the end of what was
+    /// read), `older` where [`Transcript::read_before`] goes back from.
+    pub fn read_tail(&self) -> Result<Page, TranscriptError> {
+        self.read_back(None)
+    }
+
+    /// The page of messages written just before `before` (an `older` cursor of
+    /// this session). A cursor of another session answers the newest page.
+    pub fn read_before(&self, before: &str) -> Result<Page, TranscriptError> {
+        self.read_back(self.position_of(before))
+    }
+
+    /// One page ending at `end` (the record's end when `None`).
+    fn read_back(&self, end: Option<usize>) -> Result<Page, TranscriptError> {
+        match &self.source {
+            Source::File(path) => self.read_file_back(path, end),
+            Source::Store { root, session } => {
+                let messages = store_messages(root, session)?;
+                let total = messages.len();
+                let stop = end.map_or(total, |end| end.min(total));
+                let start = stop.saturating_sub(MAX_MESSAGES);
+                let mut page = Vec::new();
+                for (path, id) in &messages[start..stop] {
+                    if let Some(message) = store_message(root, id, path) {
+                        page.push(message);
+                    }
+                }
+                Ok(self.indexed_page(page, start, stop))
+            }
+            Source::Database { path, session } => {
+                let rows = database_messages(path, session)?;
+                let total = rows.len();
+                let stop = end.map_or(total, |end| end.min(total));
+                let start = stop.saturating_sub(MAX_MESSAGES);
+                let page = rows[start..stop]
+                    .iter()
+                    .filter_map(database_message)
+                    .collect();
+                Ok(self.indexed_page(page, start, stop))
+            }
+        }
+    }
+
+    /// A page of an index-addressed store: `[start, stop)`.
+    fn indexed_page(&self, messages: Vec<Message>, start: usize, stop: usize) -> Page {
+        Page {
+            messages,
+            cursor: self.cursor(stop),
+            more: false,
+            older: (start > 0).then(|| self.cursor(start)),
+        }
+    }
+
+    /// One JSONL record read backwards from `end` (its length when `None`):
+    /// whole lines only, in windows that double until a page of messages is held
+    /// or the start of the file is reached. Only the windows read are parsed.
+    fn read_file_back(&self, path: &Path, end: Option<usize>) -> Result<Page, TranscriptError> {
+        let fail = |source: std::io::Error| TranscriptError::Read {
+            path: path.to_path_buf(),
+            source,
+        };
+        let mut file = std::fs::File::open(path).map_err(fail)?;
+        let len = file.metadata().map_err(fail)?.len();
+        let end = end.map_or(len, |end| (end as u64).min(len));
+        let mut window = MAX_BYTES as u64;
+        loop {
+            let start = end.saturating_sub(window);
+            file.seek(SeekFrom::Start(start)).map_err(fail)?;
+            let mut buffer = vec![0u8; (end - start) as usize];
+            file.read_exact(&mut buffer).map_err(fail)?;
+            // A window that does not reach the file's start begins mid-line: that
+            // partial line is left to the next, wider window.
+            let skip = if start > 0 {
+                buffer
+                    .iter()
+                    .position(|byte| *byte == b'\n')
+                    .map_or(buffer.len(), |at| at + 1)
+            } else {
+                0
+            };
+            let (whole, used) = whole_lines(&buffer[skip..], end >= len);
+            let mut lines: Vec<(usize, Message)> = Vec::new();
+            let mut delivered = Delivered::default();
+            let mut at = start as usize + skip;
+            for raw in whole.split_inclusive(|byte| *byte == b'\n') {
+                let text = raw.strip_suffix(b"\n").unwrap_or(raw);
+                if let Some(message) = parse_line(self.format, text)
+                    && delivered.admit(&message, is_queued_line(self.format, text))
+                {
+                    lines.push((at, message));
+                }
+                at += raw.len();
+            }
+            if start > 0 && lines.len() < MAX_MESSAGES {
+                window = window.saturating_mul(2);
+                continue;
+            }
+            let dropped = lines.len().saturating_sub(MAX_MESSAGES);
+            let kept = lines.split_off(dropped);
+            let older = match kept.first() {
+                // Everything before the first kept message was read and is
+                // all of it when the window reached the file's start.
+                Some((position, _)) if start > 0 || dropped > 0 => Some(self.cursor(*position)),
+                _ => None,
+            };
+            return Ok(Page {
+                messages: kept.into_iter().map(|(_, message)| message).collect(),
+                cursor: self.cursor(start as usize + skip + used),
+                more: false,
+                older,
+            });
+        }
+    }
+
+    /// The question the agent's terminal is waiting on, for a program whose
+    /// record says so (Claude Code's question tool). `None` for any other
+    /// program and for a record with nothing unanswered.
+    pub fn pending_question(&self) -> Result<Option<PendingQuestion>, TranscriptError> {
+        let (TranscriptFormat::ClaudeJsonl, Source::File(path)) = (self.format, &self.source)
+        else {
+            return Ok(None);
+        };
+        let fail = |source: std::io::Error| TranscriptError::Read {
+            path: path.clone(),
+            source,
+        };
+        let mut file = std::fs::File::open(path).map_err(fail)?;
+        let len = file.metadata().map_err(fail)?.len();
+        let start = len.saturating_sub(MAX_BYTES as u64);
+        file.seek(SeekFrom::Start(start)).map_err(fail)?;
+        let mut buffer = Vec::with_capacity((len - start) as usize);
+        file.read_to_end(&mut buffer).map_err(fail)?;
+        // A window that starts mid-line leaves that partial line out.
+        let skip = if start > 0 {
+            buffer
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .map_or(buffer.len(), |at| at + 1)
+        } else {
+            0
+        };
+        Ok(claude_pending_question(&buffer[skip..]))
+    }
+
+    /// Whether `cursor` names a position in this session (not another's, not empty).
+    pub fn names(&self, cursor: &str) -> bool {
+        self.position_of(cursor).is_some()
+    }
+
+    /// The position `since` names in this session, if it names one.
+    fn position_of(&self, since: &str) -> Option<usize> {
+        let (session, position) = since.rsplit_once('@')?;
+        if session != self.session {
+            return None;
+        }
+        position.trim().parse::<usize>().ok()
     }
 
     /// The position `since` names in this session, or 0 when it names none.
@@ -287,17 +590,35 @@ impl Transcript {
                 path: path.to_path_buf(),
                 source,
             })?;
-        let mut buffer = vec![0u8; MAX_BYTES];
-        let read = file
-            .read(&mut buffer)
-            .map_err(|source| TranscriptError::Read {
-                path: path.to_path_buf(),
-                source,
-            })?;
-        buffer.truncate(read);
-        let at_eof = start + read as u64 >= len;
-        let (body, _) = whole_lines(&buffer, at_eof);
+        let mut size = MAX_BYTES;
+        // A record longer than one read (a program's request dump can run to
+        // megabytes) holds no whole line in the buffer: read wider until a line
+        // fits, or the cursor would never pass it and nothing after it shows.
+        let (buffer, used) = loop {
+            file.seek(SeekFrom::Start(start))
+                .map_err(|source| TranscriptError::Read {
+                    path: path.to_path_buf(),
+                    source,
+                })?;
+            let mut buffer = Vec::with_capacity(size.min(len as usize));
+            let read = (&mut file)
+                .take(size as u64)
+                .read_to_end(&mut buffer)
+                .map_err(|source| TranscriptError::Read {
+                    path: path.to_path_buf(),
+                    source,
+                })?;
+            let at_eof = start + read as u64 >= len;
+            let (body, _) = whole_lines(&buffer, at_eof);
+            if !body.is_empty() || at_eof {
+                let used = body.len();
+                break (buffer, used);
+            }
+            size = size.saturating_mul(2);
+        };
+        let body = &buffer[..used];
         let mut messages = Vec::new();
+        let mut delivered = Delivered::default();
         let mut position = start as usize;
         for line in body.split_inclusive(|byte| *byte == b'\n') {
             // A page that fills up stops at a line boundary, so the next read
@@ -307,7 +628,9 @@ impl Transcript {
             }
             position += line.len();
             let text = line.strip_suffix(b"\n").unwrap_or(line);
-            if let Some(message) = parse_line(self.format, text) {
+            if let Some(message) = parse_line(self.format, text)
+                && delivered.admit(&message, is_queued_line(self.format, text))
+            {
                 messages.push(message);
             }
         }
@@ -316,6 +639,7 @@ impl Transcript {
             messages,
             cursor: self.cursor(position),
             more,
+            older: None,
         })
     }
 
@@ -336,6 +660,7 @@ impl Transcript {
             messages: page,
             cursor: self.cursor(position),
             more: position < total,
+            older: None,
         })
     }
 
@@ -364,8 +689,47 @@ impl Transcript {
             messages: page,
             cursor: self.cursor(position),
             more: position < total,
+            older: None,
         })
     }
+}
+
+/// How close, in ms, a queued command and a `user` record of the same words
+/// must be to be one message recorded twice.
+const DELIVERY_WINDOW_MS: i64 = 30_000;
+
+/// Spots a message the record holds twice: a queued command and a `user` record
+/// of the same text, stamped within [`DELIVERY_WINDOW_MS`] of each other. Two
+/// records of the same kind are never merged, so a person who sends the same
+/// words twice sees both. It sees one read's lines only.
+#[derive(Default)]
+struct Delivered {
+    seen: Vec<(Message, bool)>,
+}
+
+impl Delivered {
+    /// Whether `message` (from a queued command when `queued`) is new; it is not
+    /// when the other kind of record already holds the same words just before.
+    fn admit(&mut self, message: &Message, queued: bool) -> bool {
+        if message.role != Role::User {
+            return true;
+        }
+        let repeat = self.seen.iter().rev().any(|(earlier, was_queued)| {
+            *was_queued != queued
+                && earlier.text == message.text
+                && matches!((earlier.at_ms, message.at_ms),
+                    (Some(a), Some(b)) if (b - a).abs() <= DELIVERY_WINDOW_MS)
+        });
+        if !repeat {
+            self.seen.push((message.clone(), queued));
+        }
+        !repeat
+    }
+}
+
+/// Whether a Claude Code line is a queued command's record.
+fn is_queued_line(format: TranscriptFormat, line: &[u8]) -> bool {
+    format == TranscriptFormat::ClaudeJsonl && line.windows(16).any(|w| w == b"\"queued_command\"")
 }
 
 /// The whole lines of `buffer`, and how many bytes they take.
@@ -398,12 +762,169 @@ fn parse_line(format: TranscriptFormat, line: &[u8]) -> Option<Message> {
         return None;
     }
     let value: Value = serde_json::from_slice(line).ok()?;
-    match format {
+    let message = match format {
         TranscriptFormat::ClaudeJsonl => claude_message(&value),
         TranscriptFormat::CodexJsonl => codex_message(&value),
         TranscriptFormat::PiJsonl => pi_message(&value),
         // OpenCode's two shapes are read from files of their own, not lines.
         TranscriptFormat::OpencodeStorage | TranscriptFormat::OpencodeSqlite => None,
+    }?;
+    hc_clean(notice_of(news_of(message)))
+}
+
+/// Herdr's own `<hc …>` markup, taken out of a message.
+///
+/// `hc` tags are for the agent, never for the person: a wrapper
+/// `<hc from="t7 name">text</hc>` is another agent's message (shown as a news
+/// line with its words), a wrapper without a sender is a notice the host typed
+/// (`<hc>t9v exited (signal 1)…</hc>`: hidden, as Shepherdr's chat hides it),
+/// and the self-closing tags (`<hc react=…/>`, `suggest`, `no-reply`,
+/// `reply-to`) and a task mention's `<hc task=…>…</hc>` block carry no words a
+/// person reads. Code, fenced or inline, is left as written. `None` when
+/// nothing is left to show.
+fn hc_clean(message: Message) -> Option<Message> {
+    if !message.text.contains("<hc") {
+        return Some(message);
+    }
+    let trimmed = message.text.trim();
+    if message.role == Role::User
+        && trimmed.starts_with("<hc")
+        && trimmed.ends_with("</hc>")
+        && let Some(open_end) = trimmed.find('>')
+        && open_end < trimmed.len() - "</hc>".len()
+    {
+        let open = &trimmed[..open_end];
+        let inner = &trimmed[open_end + 1..trimmed.len() - "</hc>".len()];
+        if !open.ends_with('/') && !inner.contains("<hc") {
+            let words = inner.trim();
+            // A sender's wrapper is another agent's words; a wrapper without
+            // one is a notice the host typed. Either is shown as a muted line.
+            return (!words.is_empty()).then(|| Message {
+                role: Role::News,
+                text: words.to_owned(),
+                ..message
+            });
+        }
+    }
+    let text = strip_hc_tags(&message.text);
+    let text = text.trim().to_owned();
+    let cleaned = Message { text, ..message };
+    (!cleaned.is_empty()).then_some(cleaned)
+}
+
+/// `text` without its self-closing `<hc …/>` tags and `<hc task=…>…</hc>`
+/// blocks, outside code.
+fn strip_hc_tags(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for (index, part) in text.split('`').enumerate() {
+        if index > 0 {
+            out.push('`');
+        }
+        if index % 2 == 1 {
+            out.push_str(part);
+            continue;
+        }
+        let mut rest = part;
+        while let Some(at) = rest.find("<hc") {
+            let after = &rest[at + 3..];
+            let tag = after.starts_with(|c: char| c.is_whitespace() || c == '/' || c == '>');
+            let Some(gt) = after.find('>').filter(|_| tag) else {
+                out.push_str(&rest[..at + 3]);
+                rest = after;
+                continue;
+            };
+            out.push_str(&rest[..at]);
+            let open = &after[..gt];
+            let mut tail = &after[gt + 1..];
+            if !open.ends_with('/') {
+                // An opener. A task mention's block and a host notice (no
+                // sender) go whole; another agent's wrapper (`from=`) goes and
+                // its words stay.
+                match tail.find("</hc>") {
+                    Some(end) if open.contains("from=") && !open.contains("task=") => {
+                        out.push_str(&tail[..end]);
+                        tail = &tail[end + "</hc>".len()..];
+                    }
+                    Some(end) => tail = &tail[end + "</hc>".len()..],
+                    None => {}
+                }
+            }
+            rest = tail.strip_prefix('\n').unwrap_or(tail);
+        }
+        out.push_str(rest);
+    }
+    out
+}
+
+/// The lines shprd's own service types into the coordinator that are not
+/// wrapped in tags: the self-update notices.
+const SYSTEM_NOTICES: [&str; 2] = [
+    "shprd will restart once",
+    "shprd restarted and is now running",
+];
+
+/// A user turn that is one of shprd's own notices, as a news message.
+fn notice_of(message: Message) -> Message {
+    let trimmed = message.text.trim();
+    if message.role == Role::User && SYSTEM_NOTICES.iter().any(|n| trimmed.starts_with(n)) {
+        return Message {
+            role: Role::News,
+            text: trimmed.to_owned(),
+            ..message
+        };
+    }
+    message
+}
+
+/// A user turn that is shprd's news, as news lines.
+///
+/// The service types `<shprd-news task="T7" event="needs-you">…</shprd-news>`
+/// into the coordinator, and the program records it as something the person
+/// said. It is not: the words inside the tags are shown, as a news message, and
+/// the tags, and the wrapper a paste adds around them, are not.
+fn news_of(message: Message) -> Message {
+    if message.role != Role::User || !message.text.contains("<shprd-news") {
+        return message;
+    }
+    let mut lines: Vec<String> = Vec::new();
+    let mut rest = String::new();
+    let mut remaining = message.text.as_str();
+    while let Some(at) = remaining.find("<shprd-news") {
+        rest.push_str(&remaining[..at]);
+        let after = &remaining[at..];
+        let Some(open_end) = after.find('>') else {
+            rest.push_str(after);
+            remaining = "";
+            break;
+        };
+        let body = &after[open_end + 1..];
+        let (inside, tail) = match body.find("</shprd-news>") {
+            Some(end) => (&body[..end], &body[end + "</shprd-news>".len()..]),
+            None => (body, ""),
+        };
+        for line in inside.lines() {
+            let line = line.trim();
+            if !line.is_empty() {
+                lines.push(line.to_owned());
+            }
+        }
+        remaining = tail;
+    }
+    rest.push_str(remaining);
+    // What is left is a paste's wrapper tags and whitespace, or words the
+    // person typed beside the news.
+    let rest = unwrap_tag(&rest, "pasted_content");
+    let rest = rest.trim();
+    if !rest.is_empty() {
+        lines.push(rest.to_owned());
+    }
+    if lines.is_empty() {
+        return message;
+    }
+    Message {
+        role: Role::News,
+        text: lines.join("\n"),
+        ..message
     }
 }
 
@@ -418,11 +939,28 @@ fn claude_message(value: &Value) -> Option<Message> {
         return None;
     }
     let kind = value.get("type")?.as_str()?;
-    let content = value.get("message")?.get("content")?;
     let at_ms = value
         .get("timestamp")
         .and_then(|at| at.as_str())
         .and_then(iso_ms);
+    // A message typed while the agent was mid-turn is not a `user` record: the
+    // CLI queues it and records its delivery as a `queued_command` attachment.
+    // (The `queue-operation` lines around it are bookkeeping, not read.)
+    if kind == "attachment" {
+        let attachment = value.get("attachment")?;
+        if attachment.get("type")?.as_str()? != "queued_command" {
+            return None;
+        }
+        let prompt = attachment.get("prompt")?.as_str()?;
+        let message = Message {
+            role: Role::User,
+            text: claude_person(prompt.trim())?,
+            tools: Vec::new(),
+            at_ms,
+        };
+        return (!message.is_empty()).then_some(message);
+    }
+    let content = value.get("message")?.get("content")?;
     let (role, text, tools) = match kind {
         // A user line is not always the person's: Claude Code writes a slash
         // command, a system reminder and a local command's output there too, so
@@ -511,7 +1049,9 @@ fn codex_message(value: &Value) -> Option<Message> {
                         !codex_injected(text)
                     })
                 }
-                Role::Assistant => texts(content, &["input_text", "output_text", "text"]),
+                Role::Assistant | Role::News => {
+                    texts(content, &["input_text", "output_text", "text"])
+                }
             };
             let message = Message {
                 role,
@@ -689,6 +1229,23 @@ fn unwrap_tag(text: &str, name: &str) -> String {
             rest = after;
             continue;
         }
+        // A closing tag that carries attributes (`</pasted_content id="56ab">`)
+        // or has its slash escaped (`<\/pasted_content …>`) is the same wrapper
+        // as the pasted block shows it.
+        let closing = format!("</{name}");
+        let escaped = format!("<\\/{name}");
+        if let Some(after) = rest
+            .strip_prefix(closing.as_str())
+            .or_else(|| rest.strip_prefix(escaped.as_str()))
+        {
+            match after.find('>') {
+                Some(gt) => {
+                    rest = &after[gt + 1..];
+                    continue;
+                }
+                None => break,
+            }
+        }
         if let Some(after) = rest.strip_prefix(open.as_str()) {
             match after.find('>') {
                 Some(gt) => {
@@ -845,18 +1402,40 @@ fn locate_file(
     location: &str,
     roots: &Roots,
     cwd: &Path,
+    since_ms: Option<u64>,
 ) -> Option<Transcript> {
     let (root, components) = pattern_parts(location, roots, cwd, format)?;
     let mut found: Option<(SystemTime, PathBuf)> = None;
+    // A second of slack: a clock the host and the file system read apart.
+    let since = since_ms.map(|ms| {
+        std::time::UNIX_EPOCH + std::time::Duration::from_millis(ms.saturating_sub(1_000))
+    });
     walk(&root, &components, 0, &mut |path| {
         if format == TranscriptFormat::CodexJsonl && !codex_belongs(path, cwd) {
             return;
         }
-        let Ok(modified) = std::fs::metadata(path).and_then(|meta| meta.modified()) else {
+        let Ok(meta) = std::fs::metadata(path) else {
             return;
         };
-        if found.as_ref().is_none_or(|(kept, _)| modified >= *kept) {
-            found = Some((modified, path.to_path_buf()));
+        let Ok(modified) = meta.modified() else {
+            return;
+        };
+        match since {
+            // The first session begun since the agent started is its own.
+            Some(since) => {
+                let began = meta.created().unwrap_or(modified);
+                if began < since {
+                    return;
+                }
+                if found.as_ref().is_none_or(|(kept, _)| began < *kept) {
+                    found = Some((began, path.to_path_buf()));
+                }
+            }
+            None => {
+                if found.as_ref().is_none_or(|(kept, _)| modified >= *kept) {
+                    found = Some((modified, path.to_path_buf()));
+                }
+            }
         }
     });
     let (_, path) = found?;
@@ -874,7 +1453,7 @@ fn locate_file(
 /// that belongs to a directory is the one that says so, not the newest one on
 /// the machine. The comparison follows symlinks: a session recorded from the
 /// resolved path belongs to the directory a person names by its symlinked one.
-fn locate_store(root: &Path, cwd: &Path) -> Option<Transcript> {
+fn locate_store(root: &Path, cwd: &Path, since_ms: Option<u64>) -> Option<Transcript> {
     let sessions = root.join("session");
     let mut candidates: Vec<(i64, String, PathBuf)> = Vec::new();
     for project in std::fs::read_dir(&sessions).ok()?.flatten() {
@@ -909,11 +1488,31 @@ fn locate_store(root: &Path, cwd: &Path) -> Option<Transcript> {
                 .and_then(|time| time.get("updated"))
                 .and_then(number_ms)
                 .unwrap_or(0);
-            candidates.push((updated, id.to_owned(), path));
+            // An agent's own session began after it started: it is judged by
+            // when it was created, never by when it was last touched.
+            let created = value
+                .get("time")
+                .and_then(|time| time.get("created"))
+                .and_then(number_ms)
+                .unwrap_or(updated);
+            if since_ms.is_some_and(|since| created < i64::try_from(since).unwrap_or(i64::MAX)) {
+                continue;
+            }
+            candidates.push((
+                if since_ms.is_some() { created } else { updated },
+                id.to_owned(),
+                path,
+            ));
         }
     }
     candidates.sort_by_key(|candidate| candidate.0);
-    let (_, session, _) = candidates.pop()?;
+    // The newest session, or (for an agent that knows when it started) the
+    // first one begun since.
+    let (_, session, _) = if since_ms.is_some() {
+        candidates.into_iter().next()?
+    } else {
+        candidates.pop()?
+    };
     Some(Transcript {
         format: TranscriptFormat::OpencodeStorage,
         source: Source::Store {
@@ -1084,24 +1683,23 @@ fn store_message(root: &Path, id: &str, path: &Path) -> Option<Message> {
 /// the directory the session belongs to. The database is opened read-only
 /// through a `mode=ro` URI, exactly as the watchdog reads it: a chat must never
 /// be the reason a live CLI's store is locked or migrated.
-fn locate_database(db: &Path, cwd: &Path) -> Option<Transcript> {
+fn locate_database(db: &Path, cwd: &Path, since_ms: Option<u64>) -> Option<Transcript> {
     let connection = open_ro(db)?;
-    let mut statement = connection
-        .prepare(
-            "SELECT id, directory FROM session \
-             ORDER BY time_updated DESC, id DESC",
-        )
-        .ok()?;
-    let rows = statement
-        .query_map((), |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
-        })
-        .ok()?;
+    let mut rows = session_rows(&connection, true).or_else(|| session_rows(&connection, false))?;
+    let floor = since_ms.and_then(|since| i64::try_from(since).ok());
+    // An agent's own session is the first one *created* since it started, not
+    // whichever was touched last; with no start to go by it is the newest.
+    if floor.is_some() {
+        rows.sort_by_key(|(id, _, _, created)| (*created, id.clone()));
+    }
     // The first row is the newest session that belongs here: the query is
     // newest-first, so the search stops at its answer.
     let session = rows
-        .flatten()
-        .find(|(_, directory)| {
+        .into_iter()
+        .filter(|(_, _, _, created)| {
+            floor.is_none_or(|floor| created.is_some_and(|created| created >= floor))
+        })
+        .find(|(_, directory, _, _)| {
             // A session that records no directory at all is not refused: an older
             // OpenCode wrote the folder only into the message parts, and a row
             // with an empty `directory` records nothing either.
@@ -1109,7 +1707,7 @@ fn locate_database(db: &Path, cwd: &Path) -> Option<Transcript> {
                 .as_deref()
                 .is_none_or(|directory| directory.is_empty() || same_dir(Path::new(directory), cwd))
         })
-        .map(|(id, _)| id)?;
+        .map(|(id, _, _, _)| id)?;
     Some(Transcript {
         format: TranscriptFormat::OpencodeSqlite,
         source: Source::Database {
@@ -1118,6 +1716,34 @@ fn locate_database(db: &Path, cwd: &Path) -> Option<Transcript> {
         },
         session,
     })
+}
+
+/// One `session` row: its id, directory, last update and (where the schema has
+/// it) creation time.
+type SessionRow = (String, Option<String>, Option<i64>, Option<i64>);
+
+/// The `session` rows, newest-updated first. A schema with no `time_created`
+/// column (an older OpenCode) is read with the creation time unknown.
+fn session_rows(connection: &rusqlite::Connection, with_created: bool) -> Option<Vec<SessionRow>> {
+    let sql = if with_created {
+        "SELECT id, directory, time_updated, time_created FROM session \
+         ORDER BY time_updated DESC, id DESC"
+    } else {
+        "SELECT id, directory, time_updated, NULL FROM session \
+         ORDER BY time_updated DESC, id DESC"
+    };
+    let mut statement = connection.prepare(sql).ok()?;
+    let rows = statement
+        .query_map((), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+            ))
+        })
+        .ok()?;
+    Some(rows.flatten().collect())
 }
 
 /// One message row of OpenCode's database, with its parts, oldest first.
@@ -1678,6 +2304,105 @@ mod tests {
         assert_eq!(message.tools.len(), 1);
         assert_eq!(message.tools[0].name, "Bash");
         assert_eq!(message.tools[0].summary, "ls");
+    }
+
+    #[test]
+    fn shprd_news_is_a_news_message_not_raw_tags() {
+        // SHPR-65 bug 5: the service types its news into the coordinator, and a
+        // paste's wrapper tags (one with an attribute, one with its slash
+        // escaped) came out around it as text.
+        let pasted = "<pasted_content id=\"56ab\">\n\
+            <shprd-news task=\"T7\" event=\"needs-you\">T7 needs you: Should pow handle negative exponents? (Add pow)</shprd-news>\n\
+            <shprd-news task=\"T10\" event=\"landed\">T10 is done (Create docs/b.md)</shprd-news>\n\
+            <\\/pasted_content id=\"56ab\">";
+        let value = serde_json::json!({
+            "type": "user",
+            "message": {"role": "user", "content": pasted}
+        });
+        let message = parse_line(TranscriptFormat::ClaudeJsonl, &line(&value)).unwrap();
+        assert_eq!(message.role, Role::News);
+        assert_eq!(
+            message.text,
+            "T7 needs you: Should pow handle negative exponents? (Add pow)\nT10 is done (Create docs/b.md)"
+        );
+        assert!(!message.text.contains('<'), "{}", message.text);
+        // A person's own words are still theirs.
+        let said = serde_json::json!({
+            "type": "user",
+            "message": {"role": "user", "content": "start T3 please"}
+        });
+        let message = parse_line(TranscriptFormat::ClaudeJsonl, &line(&said)).unwrap();
+        assert_eq!(message.role, Role::User);
+    }
+
+    #[test]
+    fn self_update_notices_are_news_not_the_persons_turn() {
+        for text in [
+            "shprd will restart once to apply the accepted change (7c2b6b571). Nothing is lost: the work on the board stays.",
+            "shprd restarted and is now running version 0.0.0 (commit 7c2b6b571).",
+        ] {
+            let value =
+                serde_json::json!({"type": "user", "message": {"role": "user", "content": text}});
+            let message = parse_line(TranscriptFormat::ClaudeJsonl, &line(&value)).unwrap();
+            assert_eq!(message.role, Role::News, "{text}");
+            assert_eq!(message.text, text);
+        }
+        let value = serde_json::json!({"type": "user", "message": {"role": "user", "content": "shprd is great"}});
+        let message = parse_line(TranscriptFormat::ClaudeJsonl, &line(&value)).unwrap();
+        assert_eq!(message.role, Role::User);
+    }
+
+    #[test]
+    fn hc_markup_is_never_shown_raw() {
+        let parse = |role: &str, text: &str| {
+            let value =
+                serde_json::json!({"type": role, "message": {"role": role, "content": text}});
+            parse_line(TranscriptFormat::ClaudeJsonl, &line(&value))
+        };
+        // A host notice has no sender: a muted news line, never the person's.
+        let notice = parse("user", "<hc>t9v exited (signal 1). Read: hc read t9v</hc>").unwrap();
+        assert_eq!(notice.role, Role::News);
+        assert_eq!(notice.text, "t9v exited (signal 1). Read: hc read t9v");
+        // Another agent's message is a news line with its words.
+        let from = parse("user", "<hc from=\"t7 herd-1\">Done, see the PR.</hc>").unwrap();
+        assert_eq!(from.role, Role::News);
+        assert_eq!(from.text, "Done, see the PR.");
+        // Self-closing tags and a reply-to line go, the words stay.
+        let reply = parse("user", "<hc reply-to=\"first words\"/>\nyes, merge it").unwrap();
+        assert_eq!(reply.role, Role::User);
+        assert_eq!(reply.text, "yes, merge it");
+        // Malformed wrappers never panic.
+        let _ = parse("user", "<hc</hc>");
+        // A reply that is only a tag shows nothing.
+        assert!(parse("assistant", "<hc no-reply/>").is_none());
+        let said = parse("assistant", "Merged.\n<hc suggest=\"show me the diff\"/>").unwrap();
+        assert_eq!(said.text, "Merged.");
+        // Code keeps its tags.
+        let code = parse("assistant", "Write `<hc react=\"👀\"/>` on a line").unwrap();
+        assert!(code.text.contains("<hc react"), "{}", code.text);
+        // A task mention's block goes whole.
+        let task = parse(
+            "user",
+            "look at <hc task=\"T1\" title=\"x\">prompt</hc>this",
+        )
+        .unwrap();
+        assert!(!task.text.contains("<hc"), "{}", task.text);
+        // A notice among other words goes whole; a sender's wrapper keeps its words.
+        let mixed = parse("user", "ok\n<hc>t9v exited (signal 1)</hc>\nnext").unwrap();
+        assert_eq!(mixed.text, "ok\nnext");
+        let from = parse("user", "see <hc from=\"t7 x\">done</hc> ok").unwrap();
+        assert_eq!(from.text, "see done ok");
+    }
+
+    #[test]
+    fn a_pastes_closing_tag_with_an_attribute_or_an_escaped_slash_is_removed() {
+        for close in ["</pasted_content id=\"9\">", "<\\/pasted_content id=\"9\">"] {
+            let text = format!("<pasted_content id=\"9\">hello{close}");
+            let value =
+                serde_json::json!({"type": "user", "message": {"role": "user", "content": text}});
+            let message = parse_line(TranscriptFormat::ClaudeJsonl, &line(&value)).unwrap();
+            assert_eq!(message.text, "hello", "{close}");
+        }
     }
 
     #[test]

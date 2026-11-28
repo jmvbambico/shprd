@@ -32,25 +32,23 @@
                 "mod": "shprd-spaces"
               },
               "size": {
-                "weight": 1
+                "weight": 3
               },
               "min": 90
+            },
+            {
+              "id": "agents",
+              "type": "block",
+              "content": {
+                "mod": "shprd-agents"
+              },
+              "size": {
+                "weight": 2
+              },
+              "min": 120
             }
           ],
-          "resizable": false
-        },
-        {
-          "id": "coordinator",
-          "type": "block",
-          "content": {
-            "mod": "shprd-coordinator",
-            "props": {
-              "compact": true
-            }
-          },
-          "size": {
-            "px": 190
-          }
+          "resizable": true
         },
         {
           "id": "sidebar-footer",
@@ -180,10 +178,13 @@
                               "type": "stack",
                               "children": [
                                 {
-                                  "id": "tasks-thread-accept",
+                                  "id": "tasks-thread-chat",
                                   "type": "block",
                                   "content": {
-                                    "mod": "shprd-accept"
+                                    "mod": "shprd-chat",
+                                    "props": {
+                                      "thread": true
+                                    }
                                   }
                                 },
                                 {
@@ -194,14 +195,34 @@
                                   }
                                 },
                                 {
+                                  "id": "tasks-thread-stream",
+                                  "type": "block",
+                                  "content": {
+                                    "mod": "shprd-task-view",
+                                    "props": {
+                                      "view": "stream"
+                                    }
+                                  }
+                                },
+                                {
                                   "id": "tasks-thread-pr",
                                   "type": "block",
                                   "content": {
                                     "mod": "shprd-task-pr"
                                   }
+                                },
+                                {
+                                  "id": "tasks-thread-artifacts",
+                                  "type": "block",
+                                  "content": {
+                                    "mod": "shprd-task-view",
+                                    "props": {
+                                      "view": "artifacts"
+                                    }
+                                  }
                                 }
                               ],
-                              "active": "tasks-thread-accept"
+                              "active": "tasks-thread-chat"
                             }
                           ],
                           "background": "background",
@@ -214,48 +235,9 @@
                         }
                       ],
                       "active": "tasks-list"
-                    },
-                    {
-                      "id": "asks",
-                      "type": "block",
-                      "content": {
-                        "mod": "shprd-asks"
-                      }
-                    },
-                    {
-                      "id": "settings",
-                      "type": "block",
-                      "content": {
-                        "mod": "shprd-settings"
-                      }
                     }
                   ],
                   "active": "tasks"
-                },
-                {
-                  "id": "graph",
-                  "type": "stack",
-                  "size": {
-                    "px": 300
-                  },
-                  "min": 120,
-                  "active": "graph-note",
-                  "children": [
-                    {
-                      "id": "graph-note",
-                      "type": "block",
-                      "content": {
-                        "mod": "shprd-graph"
-                      }
-                    },
-                    {
-                      "id": "graph-term",
-                      "type": "block",
-                      "content": {
-                        "terminal": "shprd-graph"
-                      }
-                    }
-                  ]
                 }
               ],
               "resizable": false,
@@ -303,6 +285,7 @@
     "color": "border"
   },
   "titlebar": "none",
+  "terminal_menu": "shprd-menu",
   "traffic_lights": [
     12,
     16

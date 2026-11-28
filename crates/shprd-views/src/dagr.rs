@@ -121,7 +121,12 @@ pub fn project(
             what: "a RunStarted event".to_string(),
         })?;
     let run_id = run.run_id.clone();
-    let title = format!("{} · {run_id}", repo_basename(&run.repo));
+    let title = match repo_basename(&run.repo) {
+        // A run started in the current folder names no repository: `. · q1`
+        // would read as a typo, so the title is the run alone.
+        "" | "." | ".." => run_id.clone(),
+        name => format!("{name} · {run_id}"),
+    };
     let (times, dropped) = times_by_attempt(events);
 
     let mut tasks: Vec<Value> = state
@@ -498,12 +503,16 @@ fn event_label(kind: &EventKind) -> &'static str {
         EventKind::GateFailed { .. } => "gate_failed",
         EventKind::Integrated { .. } => "integrated",
         EventKind::TaskDropped { .. } => "task_dropped",
+        EventKind::ScopeWidened { .. } => "scope_widened",
         EventKind::TaskStopped { .. } => "task_stopped",
+        EventKind::TaskReopened { .. } => "task_reopened",
         EventKind::ReviewRequested { .. } => "review_requested",
+        EventKind::ReviewSkipped { .. } => "review_skipped",
         EventKind::Dry { .. } => "dry",
         EventKind::Available { .. } => "available",
         EventKind::HandedOff { .. } => "handed_off",
         EventKind::Escalated { .. } => "escalated",
+        EventKind::NeedDismissed { .. } => "need_dismissed",
         EventKind::Override { .. } => "override",
         EventKind::Resource { .. } => "resource",
         EventKind::FullGate { .. } => "full_gate",
@@ -517,6 +526,7 @@ fn event_label(kind: &EventKind) -> &'static str {
         EventKind::WatchLaunched { .. } => "watch_launched",
         EventKind::OrchestratorNotified { .. } => "orchestrator_notified",
         EventKind::BaseSynced { .. } => "base_synced",
+        EventKind::GateBaselined { .. } => "gate_baselined",
         EventKind::Nudged { .. } => "nudged",
         EventKind::Backup { .. } => "backup",
         EventKind::ProviderGaveUp { .. } => "provider_gave_up",
@@ -533,6 +543,7 @@ fn event_task(kind: &EventKind) -> Option<&str> {
         | EventKind::TaskStatus { task, .. }
         | EventKind::AskRaised { task, .. }
         | EventKind::AskAnswered { task, .. }
+        | EventKind::ScopeWidened { task, .. }
         | EventKind::GatePassed { task, .. }
         | EventKind::GateFailed { task, .. }
         | EventKind::Integrated { task, .. }
@@ -830,20 +841,24 @@ mod tests {
     }
 
     fn gate(task: &str, attempt: u32, passed: bool, findings: Vec<Finding>) -> EventKind {
-        let gate = "full".to_string();
         if passed {
+            // Only a review verdict passes a task.
             EventKind::GatePassed {
                 task: task.to_string(),
                 attempt,
-                gate,
+                gate: "review".to_string(),
                 findings,
-                source: None,
+                source: Some(shprd_core::event::ReviewSource {
+                    reviewer: "codex/m1".to_string(),
+                    findings_sha256: "ba7816bf8f01cfea".to_string(),
+                    request_seq: 0,
+                }),
             }
         } else {
             EventKind::GateFailed {
                 task: task.to_string(),
                 attempt,
-                gate,
+                gate: "full".to_string(),
                 findings,
                 source: None,
             }
@@ -1112,6 +1127,22 @@ mod tests {
         assert_eq!(task(&doc, "e")["state"], "blocked");
         assert_eq!(task(&doc, "e")["unblock"], "human");
         assert_eq!(task(&doc, "e")["note"], "dropped: not needed");
+    }
+
+    #[test]
+    fn a_run_in_the_current_folder_is_titled_by_its_run_alone() {
+        let events = vec![event(
+            1,
+            T0,
+            EventKind::RunStarted {
+                run_id: "q1".to_string(),
+                repo: ".".to_string(),
+                base_branch: "main".to_string(),
+                integration_branch: "integration/q1".to_string(),
+            },
+        )];
+        let doc = project_doc(&state(&events), &events, T0 + MINUTE);
+        assert_eq!(doc["run"]["title"], "q1");
     }
 
     #[test]

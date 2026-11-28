@@ -21,7 +21,7 @@ mod support;
 
 use std::time::Duration;
 
-use shprd_mux::{Host, Waited};
+use shprd_mux::{AgentLaunch, AgentRole, Host, Waited};
 use shprd_mux_hc::{Endpoint, HcHost, Window};
 
 use support::live::Live;
@@ -123,6 +123,120 @@ fn a_task_space_is_made_filled_read_and_closed_on_a_private_window() {
     );
 }
 
+/// SHPR-23 on a real desktop: a worker started with `spawn_agent` is a labelled
+/// terminal with **no tab**: the window draws nothing for it, the host lists it by
+/// label, it can be read, and closing its handle stops it. The coordinator is the
+/// one agent that keeps a tab, in the repository's space.
+#[test]
+#[ignore = "needs a real hc and a private Herdr desktop; run at the milestone gate"]
+fn a_headless_worker_leaves_no_tab_on_a_private_window() {
+    let mut live = match Live::new() {
+        Ok(live) => live,
+        Err(reason) => {
+            eprintln!("skipped: {reason}");
+            return;
+        }
+    };
+    live.start_window()
+        .expect("a private Herdr window over this session");
+    let endpoint = Endpoint::with_binary(live.hc().to_string_lossy())
+        .with_session(live.session())
+        .with_directories(live.directories())
+        .with_timeout(Duration::from_secs(30));
+    let mut window = Window::from_endpoint(&endpoint);
+    for (key, value) in live.environment() {
+        window = window.with_variable(key, value);
+    }
+    let host = HcHost::connect(endpoint, window).expect("the private core answers");
+    assert!(host.capabilities().headless_agents);
+
+    let name = format!("shprd · live {}", std::process::id());
+    let space = host
+        .create_space(&name, live.root())
+        .expect("the window makes the repository's space");
+    wait_for_space(&host, &name);
+    let argv = |line: &str| vec!["/bin/sh".to_string(), "-c".to_string(), line.to_string()];
+
+    // The coordinator keeps a tab of the space.
+    let coordinator = host
+        .spawn_agent(&AgentLaunch {
+            space: &space.id,
+            title: "coordinator",
+            argv: &argv("echo coordinator-ready; sleep 60"),
+            env: &[],
+            cwd: live.root(),
+            role: AgentRole::Coordinator,
+            task: None,
+            program: "sh",
+            parent: None,
+        })
+        .expect("the coordinator starts");
+    wait_for_tab(&host, &space.id, &coordinator.id);
+    let tabs_before = host.list_tabs(&space.id).expect("tabs").len();
+    let spaces_before = host.list_spaces().expect("spaces").len();
+
+    // The worker is the coordinator's child and has no tab.
+    let worker = host
+        .spawn_agent(&AgentLaunch {
+            space: &space.id,
+            title: "sh·T1",
+            argv: &argv("echo worker-hi; sleep 60"),
+            env: &[],
+            cwd: live.root(),
+            role: AgentRole::Worker,
+            task: Some("T1"),
+            program: "sh",
+            parent: Some(&coordinator.root_pane),
+        })
+        .expect("the worker starts");
+    let waited = host
+        .wait(
+            &worker.root_pane,
+            &Waited::Output("worker-hi".to_string()),
+            Duration::from_secs(20),
+        )
+        .expect("the core waits");
+    assert!(waited.output.is_some(), "the worker's output is readable");
+
+    // The window draws a labelled terminal about two seconds after it starts, so
+    // give it that long to draw a tab it should not draw.
+    std::thread::sleep(Duration::from_secs(4));
+    assert_eq!(
+        host.list_tabs(&space.id).expect("tabs").len(),
+        tabs_before,
+        "the worker made no tab"
+    );
+    assert_eq!(
+        host.list_spaces().expect("spaces").len(),
+        spaces_before,
+        "and no space"
+    );
+    let listed = host.list_agents().expect("the host lists agents by label");
+    let ours = listed
+        .iter()
+        .find(|agent| agent.tab.root_pane == worker.root_pane)
+        .unwrap_or_else(|| panic!("the worker is not listed: {listed:?}"));
+    assert_eq!(ours.task.as_deref(), Some("T1"));
+    assert_eq!(ours.role, AgentRole::Worker);
+    assert_eq!(ours.program, "sh");
+    assert!(ours.live);
+
+    // Stopping the handle ends the program. The core keeps a finished terminal's
+    // record, so the agent is still listed — as finished, with its output still
+    // readable, which is what the Agents pane shows for a while — and the
+    // coordinator is untouched.
+    host.close_tab(&worker.id).expect("the handle stops it");
+    let after = host.list_agents().expect("agents");
+    let stopped = after
+        .iter()
+        .find(|agent| agent.tab.root_pane == worker.root_pane)
+        .unwrap_or_else(|| panic!("a finished agent stays listed: {after:?}"));
+    assert!(!stopped.live, "the worker's program ended");
+    assert!(stopped.ended_ms.is_some());
+    assert!(host.read(&worker.root_pane, 5).is_ok());
+    assert!(host.read(&coordinator.root_pane, 5).is_ok());
+}
+
 /// Wait for the layout to hold the space called `name`.
 fn wait_for_space(host: &HcHost, name: &str) -> shprd_mux::Space {
     for _ in 0..100 {
@@ -149,4 +263,57 @@ fn wait_for_tab(
         std::thread::sleep(Duration::from_millis(100));
     }
     tabs
+}
+
+/// Connects a fresh host over the live session, as a restarted `shprd serve`
+/// does.
+fn reconnect(live: &Live) -> HcHost {
+    let endpoint = Endpoint::with_binary(live.hc().to_string_lossy())
+        .with_session(live.session())
+        .with_directories(live.directories())
+        .with_timeout(Duration::from_secs(30));
+    let mut window = Window::from_endpoint(&endpoint);
+    for (key, value) in live.environment() {
+        window = window.with_variable(key, value);
+    }
+    HcHost::connect(endpoint, window).expect("the private core answers")
+}
+
+#[test]
+#[ignore = "needs a real hc and a private Herdr desktop; run at the milestone gate"]
+fn a_restarted_serve_finds_its_space_by_mark_and_keeps_its_name() {
+    let mut live = match Live::new() {
+        Ok(live) => live,
+        Err(reason) => {
+            eprintln!("skipped: {reason}");
+            return;
+        }
+    };
+    live.start_window()
+        .expect("a private Herdr window over this session");
+    let name = format!("shprd · restart {}", std::process::id());
+
+    let first = reconnect(&live);
+    let (made, created) = shprd_mux::ensure_marked_space(&first, &name, live.root())
+        .expect("the first start makes and marks the space");
+    assert!(created, "the first start made it");
+    wait_for_space(&first, &name);
+
+    // The restart: a new connection to the same window.
+    let second = reconnect(&live);
+    let (again, created) = shprd_mux::ensure_marked_space(&second, &name, live.root())
+        .expect("the restart finds the space");
+    assert!(!created, "the restart made a second space");
+    assert_eq!(again.id, made.id, "the restart found the same space");
+    assert_eq!(again.name, name, "the space keeps its name");
+
+    let spaces = second.list_spaces().expect("the layout lists");
+    let same: Vec<_> = spaces.iter().filter(|space| space.id == made.id).collect();
+    assert_eq!(same.len(), 1, "one space: {spaces:?}");
+    assert_eq!(same[0].name, name, "the sidebar name, not the raw id");
+    assert_eq!(
+        spaces.iter().filter(|space| space.name == name).count(),
+        1,
+        "no second space of that name: {spaces:?}"
+    );
 }

@@ -66,4 +66,40 @@ attempts: Array<AttemptDto>,
  * landing merges the branch into its base and opens nothing, so a card
  * that drew a pull request row for it would be inventing one.
  */
-pr?: TaskPrDto, };
+pr?: TaskPrDto, 
+/**
+ * The id of the space this task belongs to (`spaces[].id`): the one
+ * repository this service serves.
+ */
+space?: string, 
+/**
+ * A short group word for the Graph view, from a `phase:<word>` tag.
+ */
+phase?: string, 
+/**
+ * True exactly when a person accepted the task's newest failure with an
+ * `integrate_after_failed_gate` override: it then reads Ready and Accept is
+ * offered although its status is still failed.
+ */
+accepted_failure: boolean, 
+/**
+ * Why landing would refuse this task right now (`rules::ready_to_land`):
+ * no passing review, a failing hand-in check, a failed gate. Absent when
+ * the task would land, or has already landed or been dropped. The Accept
+ * button is offered disabled with this reason rather than recording an
+ * approval that landing then refuses.
+ */
+accept_blocked?: string, 
+/**
+ * When the task was added, ms since the Unix epoch.
+ *
+ * A board shows the newest work first and folds a run's old leftovers out
+ * of the way by it.
+ */
+added_at_ms: number, 
+/**
+ * When something last happened to the task (any event naming it but a
+ * progress line), ms since the Unix epoch. An open task untouched for hours
+ * is stale: a board offers to clear such tasks together.
+ */
+touched_at_ms: number, };

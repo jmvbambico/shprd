@@ -11,11 +11,13 @@
 //! event log, and never longer than [`BRIEF_MAX_LINES`] lines, so it fits in a
 //! prompt next to the task it describes. No model writes any of it.
 
-use shprd_core::event::{Event, Finding, Severity};
-use shprd_core::settings::{Key, Resolved, ResolvedRole, Sourced, TaskKey, Value};
-use shprd_core::state::{GateResult, OverrideRecord, RunState, Task, TaskStatus};
+use shprd_core::event::{Event, EventKind, Finding, Severity};
+use shprd_core::settings::{Key, Resolved, ResolvedRole, Source, Sourced, TaskKey, Value};
+use shprd_core::state::{
+    AskRecord, Escalation, GateResult, OverrideRecord, RunState, Task, TaskStatus,
+};
 
-use crate::clock;
+use crate::{cards, clock};
 
 /// Hard cap on the number of lines a brief may occupy.
 pub const BRIEF_MAX_LINES: usize = 40;
@@ -53,17 +55,16 @@ impl AskRoute {
 
 /// The rehydration block for `state`.
 ///
-/// The event log is accepted for symmetry with the other projectors, but every
-/// fact in a brief now lives in the folded state, including run-wide overrides,
-/// so the log is not consulted. Pass the log anyway: callers have it, and the
-/// argument keeps the projector signatures interchangeable.
+/// Every fact in a brief lives in the folded state, including run-wide overrides.
+/// The event log is read for one thing: which event closed an escalation, so the
+/// brief can say what resolved it.
 ///
 /// It carries a header line with the run and its branches, then the sections
 /// that have content: the task table, the tasks waiting at a gate, the failed
 /// gates, the dry agents, the most recent escalations and every override. Over
 /// [`BRIEF_MAX_LINES`] lines, lists are cut and marked `… and N more`, so the
 /// same state always renders the same brief and it always fits.
-pub fn brief(state: &RunState, _events: &[Event]) -> String {
+pub fn brief(state: &RunState, events: &[Event]) -> String {
     let Some(run) = &state.run else {
         return "no run".to_string();
     };
@@ -76,7 +77,8 @@ pub fn brief(state: &RunState, _events: &[Event]) -> String {
         Section::new("waiting on gates:", waiting_lines(state)),
         Section::new("failed gates:", failed_lines(state)),
         Section::new("dry agents:", dry_lines(state)),
-        Section::new("escalations:", escalation_lines(state)),
+        Section::new("asks:", ask_lines(state)),
+        Section::new("escalations:", escalation_lines(state, events)),
         Section::new("overrides:", override_lines(state)),
     ];
     sections.retain(|section| !section.lines.is_empty());
@@ -206,18 +208,109 @@ fn dry_lines(state: &RunState) -> Vec<String> {
         .collect()
 }
 
-/// The escalation count, then the bodies of the last few.
-fn escalation_lines(state: &RunState) -> Vec<String> {
-    let escalations = &state.escalations;
-    if escalations.is_empty() {
+/// The seq of the event that resolved `escalation`, when the log holds one.
+///
+/// A land failure or a "ready to land" notice is resolved by the task's landing
+/// (or its being integrated or dropped); a review kickoff that was not delivered
+/// by the review's gate result, or by the review being requested again; a
+/// dismissed card by its dismissal.
+fn resolved_by(escalation: &Escalation, events: &[Event]) -> Option<u64> {
+    let after = escalation.seq;
+    let task = escalation.task.as_deref();
+    let kickoff = cards_not_delivered(&escalation.body);
+    events
+        .iter()
+        .filter(|event| event.seq > after)
+        .find(|event| match &event.kind {
+            EventKind::NeedDismissed { need } => *need == after,
+            EventKind::TaskLanded {
+                task: t, outcome, ..
+            } => outcome.is_landed() && Some(t.as_str()) == task,
+            EventKind::Integrated { task: t, .. } | EventKind::TaskDropped { task: t, .. } => {
+                Some(t.as_str()) == task
+            }
+            EventKind::GatePassed { task: t, gate, .. } => {
+                kickoff && gate == "review" && Some(t.as_str()) == task
+            }
+            EventKind::GateFailed { task: t, gate, .. } => {
+                kickoff && gate == "review" && Some(t.as_str()) == task
+            }
+            EventKind::ReviewRequested { task: t, .. } => kickoff && Some(t.as_str()) == task,
+            _ => false,
+        })
+        .map(|event| event.seq)
+}
+
+/// Whether `body` says a review's first turn never arrived.
+fn cards_not_delivered(body: &str) -> bool {
+    body.starts_with("review kickoff not delivered")
+        || body.starts_with("review brief not delivered")
+}
+
+/// The open-escalation count, the bodies of the last few open ones, and the
+/// newest resolved ones with the seq that resolved each.
+///
+/// An escalation is open only while a card for it would still be drawn and the
+/// log holds nothing that settled it, so a task that landed no longer lists its
+/// old land failures and "ready to land" notices as open.
+fn escalation_lines(state: &RunState, events: &[Event]) -> Vec<String> {
+    let mut open: Vec<&Escalation> = Vec::new();
+    let mut resolved: Vec<(u64, Option<u64>)> = Vec::new();
+    for escalation in &state.escalations {
+        let by = resolved_by(escalation, events);
+        if by.is_none() && cards::card(state, escalation).is_some() {
+            open.push(escalation);
+        } else {
+            resolved.push((escalation.seq, by));
+        }
+    }
+    if open.is_empty() && resolved.is_empty() {
         return Vec::new();
     }
-    let mut lines = vec![format!("  {} open", escalations.len())];
-    let first = escalations.len().saturating_sub(ESCALATIONS_SHOWN);
-    for escalation in &escalations[first..] {
+    let mut lines = vec![format!("  {} open", open.len())];
+    let first = open.len().saturating_sub(ESCALATIONS_SHOWN);
+    for escalation in &open[first..] {
         lines.push(format!("  - {}", clock::clip(&escalation.body, TEXT_CHARS)));
     }
+    if !resolved.is_empty() {
+        let first = resolved.len().saturating_sub(ESCALATIONS_SHOWN);
+        let shown: Vec<String> = resolved[first..]
+            .iter()
+            .map(|(seq, by)| match by {
+                Some(by) => format!("#{seq} by #{by}"),
+                None => format!("#{seq}"),
+            })
+            .collect();
+        lines.push(format!(
+            "  {} resolved: {}",
+            resolved.len(),
+            shown.join(", ")
+        ));
+    }
     lines
+}
+
+/// Every ask a worker raised, oldest first, with what the person answered.
+///
+/// This is what the log says happened, so a coordinator reports a worker's question
+/// from here and never from a guess: an ask the person answered reads `answered`,
+/// one nobody has answered reads `open`.
+fn ask_lines(state: &RunState) -> Vec<String> {
+    let mut asks: Vec<_> = state.asks.values().collect();
+    asks.sort_by_key(|ask| ask.raised_seq);
+    asks.iter()
+        .map(|ask| {
+            let said = clock::clip(&ask.text, TEXT_CHARS);
+            match &ask.answer {
+                Some(answer) => format!(
+                    "  {}: asked \"{said}\", the person answered \"{}\"",
+                    ask.task,
+                    clock::clip(&answer.text, TEXT_CHARS)
+                ),
+                None => format!("  {}: asked \"{said}\", not answered yet", ask.task),
+            }
+        })
+        .collect()
 }
 
 /// Every override the state holds, oldest first, as recorded by a human.
@@ -330,6 +423,9 @@ pub struct BriefInput<'a> {
     /// What the launch already knows the agent should be told: an effort level
     /// its model cannot use, for one. Empty for most briefs.
     pub warnings: &'a [String],
+    /// Which of the worker's program lines this task got and why, as one
+    /// sentence, for the Settings block.
+    pub program_line: Option<&'a str>,
 }
 
 /// The longest detail the brief keeps from a previous attempt's finding, so one
@@ -343,15 +439,46 @@ const DETAIL_LIMIT: usize = 300;
 /// touch, which skills to load, how to report, and the Settings block naming
 /// every value that shapes the work and the layer that set it.
 pub fn task_brief(input: &BriefInput<'_>) -> String {
+    task_brief_with_asks(input, &[])
+}
+
+/// [`task_brief`] for a retry that also carries the asks the person already
+/// answered in the task's earlier attempts, so the agent never asks again what
+/// was settled. `asks` is every ask of the task from the fold; only the
+/// worker's own answered asks raised before this attempt are shown.
+pub fn task_brief_with_asks(input: &BriefInput<'_>, asks: &[AskRecord]) -> String {
     let mut out = String::new();
     if let Some(prompt) = input.prompt {
         out.push_str(prompt.trim_end());
         out.push_str("\n\n");
     }
-    out.push_str(&task_sections(input));
+    // The person's words for how a task starts come before the task itself, so
+    // the agent reads them first; the words for how it ends come with the rules
+    // it reports under.
+    let notes = input.settings.map(|resolved| resolved.tasks());
+    if let Some(start) = notes
+        .as_ref()
+        .map(|tasks| tasks.start_notes.trim())
+        .filter(|text| !text.is_empty())
+    {
+        out.push_str("## Before you start\n\n");
+        out.push_str(start);
+        out.push_str("\n\n");
+    }
+    out.push_str(&task_sections(input, asks));
+    if let Some(finish) = notes
+        .as_ref()
+        .map(|tasks| tasks.finish_notes.trim())
+        .filter(|text| !text.is_empty())
+    {
+        out.push_str("\n## Before you report\n\n");
+        out.push_str("Do this before you run `shprd agent report`:\n\n");
+        out.push_str(finish);
+        out.push('\n');
+    }
     if let Some(resolved) = input.settings {
         out.push('\n');
-        out.push_str(&settings_block(resolved, input.role));
+        out.push_str(&settings_block(resolved, input.role, input.program_line));
     }
     if !input.warnings.is_empty() {
         out.push_str("\n## Warnings\n\n");
@@ -362,9 +489,48 @@ pub fn task_brief(input: &BriefInput<'_>) -> String {
     out
 }
 
+/// The asks the person answered in earlier attempts, which still stand.
+///
+/// Empty for a first attempt and when nothing was answered. The engine's own
+/// cards (a refused hand-in, a scope widening) are left out: they were about
+/// that attempt's change, not about the task.
+fn earlier_asks(input: &BriefInput<'_>, asks: &[AskRecord]) -> String {
+    let spawn = input
+        .task
+        .attempts
+        .iter()
+        .find(|attempt| attempt.n == input.attempt)
+        .and_then(|attempt| attempt.spawn_seq);
+    let mut found: Vec<&AskRecord> = asks
+        .iter()
+        .filter(|ask| ask.task == input.task.id)
+        .filter(|ask| !shprd_core::ask::is_scope_card(&ask.id))
+        .filter(|ask| ask.answer.is_some())
+        .filter(|ask| spawn.is_none_or(|spawn| ask.raised_seq < spawn))
+        .collect();
+    if input.attempt <= 1 || found.is_empty() {
+        return String::new();
+    }
+    found.sort_by_key(|ask| ask.raised_seq);
+    let mut out =
+        String::from("## Asks the person already answered (these answers still stand)\n\n");
+    for ask in found {
+        let answer = ask
+            .answer
+            .as_ref()
+            .map_or("", |answer| answer.text.as_str());
+        out.push_str(&format!(
+            "- you asked \"{}\", the person answered \"{answer}\"\n",
+            ask.text
+        ));
+    }
+    out.push_str("\nDo not ask these again.\n\n");
+    out
+}
+
 /// The task's own half of the brief: everything but the role's words and the
 /// Settings block.
-fn task_sections(input: &BriefInput<'_>) -> String {
+fn task_sections(input: &BriefInput<'_>, asks: &[AskRecord]) -> String {
     let mut out = String::new();
     out.push_str(&format!("# {} {}\n\n", input.task.id, input.task.title));
     out.push_str(&format!(
@@ -383,8 +549,10 @@ fn task_sections(input: &BriefInput<'_>) -> String {
     ));
     if let Some(ref_name) = input.archive {
         out.push_str(&format!(
-            "the attempt before this one was archived at `{ref_name}`: \
-             `git cherry-pick {ref_name}` brings over whatever of its work you still need\n\n"
+            "the attempt before this one was archived at `{ref_name}`. If it committed \
+             anything, your branch starts from its last commit, so that work is already in \
+             your history (`git log` shows it): carry on from it rather than redoing it. \
+             If your branch does not hold it, `git cherry-pick {ref_name}` brings it over\n\n"
         ));
     }
     if let Some(gate) = previous_failure(input.task, input.attempt) {
@@ -395,11 +563,12 @@ fn task_sections(input: &BriefInput<'_>) -> String {
         }
         out.push_str("Fix these first; keep what already works.\n");
     }
+    out.push_str(&earlier_asks(input, asks));
     out.push_str("## Acceptance criteria\n\n");
     for item in &input.task.acceptance {
         out.push_str(&format!("- {item}\n"));
     }
-    out.push_str("\n## Scope — change only these paths\n\n");
+    out.push_str("\n## Where to start — a hint, not a limit\n\n");
     for path in &input.task.scope {
         out.push_str(&format!("- {path}\n"));
     }
@@ -412,30 +581,23 @@ fn task_sections(input: &BriefInput<'_>) -> String {
     }
     out.push_str("\n## Rules\n\n");
     out.push_str(&format!(
-        "- work only in `{}`; change nothing outside the scope above\n",
+        "- work only in `{}`; change what the task needs, wire it end to end, and leave protected \
+         paths alone unless the task names them\n",
         input.worktree
     ));
-    out.push_str(&format!(
-        "- commit on your branch `{}`; never push, never open a pull request\n",
-        input.branch
-    ));
+    out.push_str(&format!("- commit on your branch `{}`\n", input.branch));
     out.push_str(
-        "- `.shprd/` and `.dagr/` are shprd's own: the run's log, asks and graph live there, and \
-         the worktree's git already ignores them. Never commit them, never add them to the \
-         repository's `.gitignore`, and leave them out of your changes\n",
+        "- `.shprd/` and `.dagr/` are shprd's own and git ignores them: never commit them or add \
+         them to `.gitignore`\n",
     );
     out.push_str(&gate_rule(input.gates));
     out.push_str(&format!(
-        "- say where you are as you go: `shprd task status {t} --msg <one short line> [--progress 0-100]`\n",
+        "- status: `shprd task status {t} --msg <one short line> [--progress 0-100]`\n",
         t = input.task.id
     ));
-    out.push_str(&proof_rule(input.proof));
     out.push_str(&format!(
-        "- report when you are done: `shprd agent report --task {t} --attempt {a} --status <completed|blocked|failed> --summary <one line>` \
-         plus `--check <gate>|<command>|<exit code>[|<last 20 lines>]` for every gate you ran (a completed hand-in is refused \
-         without them, and refused if any exited non-zero), `--test <cmd>` for each command you ran, `--changed <path>` for each \
-         path you changed, `--commit <sha>` for your commit, `--skill-used <name>` for each skill above you actually used \
-         and `--proof <path>` for each artifact you left behind\n",
+        "- hand in: `shprd agent report --task {t} --attempt {a} --status <completed|blocked|failed> --summary <one line>` \
+         with `--check`, `--test`, `--changed`, `--commit`, `--skill-used` and `--proof` as your instructions say\n",
         t = input.task.id,
         a = input.attempt
     ));
@@ -475,7 +637,7 @@ fn asking_section(route: AskRoute) -> String {
             out.push_str(
                 "It blocks until the person answers, prints their answer on stdout and exits 0: carry \
                  on with that answer. `--kind permission` asks to run a tool and `--kind plan` offers a \
-                 plan; both offer Allow and Deny unless you name your own options. If it exits non-zero, \
+                 plan; a permission offers Allow and Deny and a plan Approve and Reject, unless you name your own options. If it exits non-zero, \
                  nobody answered within its wait (30 minutes by default; `--timeout-secs` changes it): the \
                  card stays open, so raise it again if the decision still blocks you, or hand in as \
                  `blocked` with the question in your summary.\n",
@@ -507,29 +669,9 @@ fn gate_rule(gates: &[String]) -> String {
         return gate_rule(&[]);
     }
     format!(
-        "- run the worker gates before you report: {}\n",
+        "- gates to run before you hand in, each passed with `--check`: {}\n",
         commands.join(", ")
     )
-}
-
-/// The Rules line that tells the agent where its proof goes, when it needs one.
-///
-/// It sits before the hand-in rule, not after it, because a hand-in is spent
-/// once: a worker that reads "say where it is in your summary" only after
-/// reporting has already written a summary it cannot change, and the re-report
-/// is refused. The proof path goes in `--proof`, where it costs the summary
-/// nothing, so the first report is right.
-fn proof_rule(proof: bool) -> String {
-    if !proof {
-        return String::new();
-    }
-    "- leave one real proof of the work behind (a screenshot of the change, a command's actual \
-     output, a test run) inside your worktree, and pass its path as `--proof <path>`, once per \
-     artifact: the artifact must be in the worktree, because that is the folder the reviewer is \
-     given, and a path outside it is refused. The proof path never goes in the summary, which is \
-     one plain line for the person. A mock is no proof of what people see; a bug fix shows the same \
-     repro failing before and passing after\n"
-        .to_string()
 }
 
 /// The settings that shape one task, each with the layer that set it.
@@ -542,81 +684,111 @@ fn proof_rule(proof: bool) -> String {
 /// role inherited and a value the person set for this repository must not read
 /// alike. A value nothing sets is named as shprd's own behaviour, with `built in`
 /// as its layer.
-pub fn settings_block(resolved: &Resolved, role: Option<&ResolvedRole>) -> String {
+pub fn settings_block(
+    resolved: &Resolved,
+    role: Option<&ResolvedRole>,
+    program_line: Option<&str>,
+) -> String {
     let mut out = String::from("## Your settings\n\n");
     out.push_str(
         "Each line ends with the layer that set it: `this task`, `this repo`, `you`, \
          `the repo's file` or `built in`. Where this brief says otherwise, the brief wins.\n\n",
     );
-    let role_line = |name: &str, field: Option<&Sourced<String>>, absent: &str| match field {
-        Some(sourced) if !sourced.value.trim().is_empty() => {
+    // The person's own name for the role, where it reads naturally: the agent is
+    // told what the person will call it. The role's key never changes.
+    if let Some(role) = role.filter(|role| role.title.source != Source::BuiltIn) {
+        out.push_str(&format!(
+            "You are the {} (the `{}` role) on this task.\n\n",
+            role.display_title(),
+            role.id
+        ));
+    }
+    if let Some(note) = program_line {
+        out.push_str(&format!("- Program line: {note}\n"));
+    }
+    // A role line is shown only when something other than shprd's own default
+    // set it; a value the agent can see for itself is not worth its tokens.
+    let role_line = |name: &str, field: Option<&Sourced<String>>| match field {
+        Some(sourced) if !sourced.value.trim().is_empty() && sourced.source != Source::BuiltIn => {
             format!("- {name}: {} ({})\n", sourced.value, sourced.source.label())
         }
-        _ => format!("- {name}: {absent} (built in)\n"),
+        _ => String::new(),
     };
     out.push_str(&role_line(
         "Program",
         role.and_then(|role| role.agent.as_ref()),
-        "the program's own default",
     ));
     out.push_str(&role_line(
         "Model",
         role.and_then(|role| role.model.as_ref()),
-        "the program's own default",
     ));
     out.push_str(&role_line(
         "Effort",
         role.and_then(|role| role.effort.as_ref()),
-        "the program's own default",
     ));
-    if let Some(role) = role {
+    if let Some(role) = role.filter(|role| role.fast.source != Source::BuiltIn) {
         out.push_str(&format!(
             "- Fast mode: {} ({})\n",
             if role.fast.value { "on" } else { "off" },
             role.fast.source.label()
         ));
-    } else {
-        out.push_str("- Fast mode: off (built in)\n");
     }
     out.push_str(&role_line(
         "Permissions",
         role.and_then(|role| role.perm.as_ref()),
-        "the program's own default",
     ));
-    let fallback = role
-        .filter(|role| !role.fallback.value.is_empty())
-        .map(|role| {
-            format!(
-                "{} ({})",
-                role.fallback.value.join(", "),
-                role.fallback.source.label()
-            )
+    // A task that got a program line says which and what comes next, which is
+    // the whole of the old fallback list's job.
+    if program_line.is_none()
+        && let Some(role) = role.filter(|role| {
+            !role.fallback.value.is_empty() && role.fallback.source != Source::BuiltIn
         })
-        .unwrap_or_else(|| "none: the configured workers (built in)".to_owned());
-    out.push_str(&format!("- Fallback: {fallback}\n"));
-    for (name, key, absent) in [
-        ("Merge", TaskKey::Merge, "ask"),
-        ("Review rounds", TaskKey::ReviewRounds, "0 (off)"),
-        ("Must fix", TaskKey::MustFix, "major"),
-        ("Proof", TaskKey::Proof, "none"),
-        ("Worktrees", TaskKey::Worktrees, "on"),
-        ("Base branch", TaskKey::Base, "the repo's own branch"),
-        ("Branch pattern", TaskKey::Branch, "task/{n}-{slug}"),
-        ("Tasks at once", TaskKey::MaxRunning, "10"),
-        ("Start notes", TaskKey::StartNotes, "none"),
-        ("Finish notes", TaskKey::FinishNotes, "none"),
+    {
+        out.push_str(&format!(
+            "- Fallback: {} ({})\n",
+            role.fallback.value.join(", "),
+            role.fallback.source.label()
+        ));
+    }
+    // (name, key, shown even when built in, value when nothing sets it)
+    for (name, key, always, absent) in [
+        ("Merge", TaskKey::Merge, true, "ask"),
+        ("Review rounds", TaskKey::ReviewRounds, true, "0 (off)"),
+        ("Must fix", TaskKey::MustFix, true, "major"),
+        ("Proof", TaskKey::Proof, true, "none"),
+        ("Worktrees", TaskKey::Worktrees, false, "on"),
+        ("Base branch", TaskKey::Base, false, "the repo's own branch"),
+        ("Branch pattern", TaskKey::Branch, false, "{run}/{task}"),
+        ("Tasks at once", TaskKey::MaxRunning, false, "10"),
+        ("Start notes", TaskKey::StartNotes, false, "none"),
+        ("Finish notes", TaskKey::FinishNotes, false, "none"),
     ] {
-        out.push_str(&task_line(resolved, name, key, absent));
+        out.push_str(&task_line(resolved, name, key, always, absent));
     }
     out
 }
 
-/// One workflow line of the Settings block.
-fn task_line(resolved: &Resolved, name: &str, key: TaskKey, absent: &str) -> String {
-    match resolved.get(&Key::Task(key)) {
+/// One workflow line of the Settings block. The person's notes print as `set`,
+/// never their text: the text is in the brief already.
+fn task_line(resolved: &Resolved, name: &str, key: TaskKey, always: bool, absent: &str) -> String {
+    let sourced = resolved.get(&Key::Task(key));
+    let built_in = sourced
+        .as_ref()
+        .is_none_or(|sourced| sourced.source == Source::BuiltIn);
+    if built_in && !always {
+        return String::new();
+    }
+    match sourced {
         Some(sourced) => {
+            let notes = matches!(key, TaskKey::StartNotes | TaskKey::FinishNotes);
             let words = match &sourced.value {
-                Value::Text(text) if text.trim().is_empty() => absent.to_owned(),
+                Value::Text(text) if text.trim().is_empty() => {
+                    if notes {
+                        return String::new();
+                    }
+                    absent.to_owned()
+                }
+                _ if notes => "set".to_owned(),
                 other => value_words(other),
             };
             format!("- {name}: {words} ({})\n", sourced.source.label())
@@ -873,6 +1045,7 @@ mod tests {
             settings: None,
             role: None,
             warnings: &[],
+            program_line: None,
         });
         match text.split_once("## Rules\n\n") {
             Some((_, rules)) => rules.to_string(),
@@ -887,7 +1060,7 @@ mod tests {
         let rules = rules_with(&gates);
         assert!(
             rules.contains(
-                "- run the worker gates before you report: `python3 -m pytest -q`, `python3 -m ruff check .`\n"
+                "- gates to run before you hand in, each passed with `--check`: `python3 -m pytest -q`, `python3 -m ruff check .`\n"
             ),
             "{rules}"
         );
@@ -927,7 +1100,7 @@ mod tests {
         let rules = rules_with(&gates);
         assert!(
             rules.contains(
-                "- run the worker gates before you report: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`\n"
+                "- gates to run before you hand in, each passed with `--check`: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`\n"
             ),
             "{rules}"
         );
@@ -936,7 +1109,7 @@ mod tests {
     #[test]
     fn settings_block_lists_every_value_with_the_layer_that_set_it() {
         let (resolved, role) = settings_fixture();
-        let block = settings_block(&resolved, Some(&role));
+        let block = settings_block(&resolved, Some(&role), None);
         let expected = "## Your settings
 
 Each line ends with the layer that set it: `this task`, `this repo`, `you`, `the repo's file` or `built in`. Where this brief says otherwise, the brief wins.
@@ -944,32 +1117,47 @@ Each line ends with the layer that set it: `this task`, `this repo`, `you`, `the
 - Program: claude (this task)
 - Model: opus (you)
 - Effort: high (this repo)
-- Fast mode: off (built in)
-- Permissions: the program's own default (built in)
-- Fallback: none: the configured workers (built in)
 - Merge: checks (this repo)
 - Review rounds: 2 (you)
 - Must fix: major (built in)
 - Proof: on (built in)
-- Worktrees: on (built in)
 - Base branch: main (the repo's file)
-- Branch pattern: task/{n}-{slug} (built in)
-- Tasks at once: 4 (built in)
-- Start notes: none (built in)
-- Finish notes: none (built in)
 ";
         assert_eq!(block, expected);
     }
 
     #[test]
+    fn the_notes_lines_say_set_and_never_print_the_text() {
+        use shprd_core::settings::{File, Key, Layer, Request, TaskKey, Value, resolve};
+        let mut file = File::default();
+        file.you.set(
+            Key::Task(TaskKey::StartNotes),
+            Value::Text("read the changelog first".to_owned()),
+        );
+        let mut task = Layer::new();
+        task.set(Key::Task(TaskKey::Worktrees), Value::Switch(false));
+        let resolved = resolve(
+            &file,
+            &Request {
+                repo: None,
+                repo_file: None,
+                task: Some(&task),
+            },
+        );
+        let block = settings_block(&resolved, None, None);
+        assert!(block.contains("- Start notes: set (you)"), "{block}");
+        assert!(!block.contains("changelog"), "{block}");
+        assert!(!block.contains("Finish notes"), "{block}");
+        assert!(block.contains("- Worktrees: off (this task)"), "{block}");
+    }
+
+    #[test]
     fn a_settings_block_without_a_role_says_the_program_decides() {
         let (resolved, _) = settings_fixture();
-        let block = settings_block(&resolved, None);
-        assert!(
-            block.contains("- Program: the program's own default (built in)"),
-            "{block}"
-        );
-        assert!(block.contains("- Fast mode: off (built in)"), "{block}");
+        let block = settings_block(&resolved, None, None);
+        assert!(!block.contains("- Program:"), "{block}");
+        assert!(!block.contains("- Fast mode:"), "{block}");
+        assert!(block.contains("- Merge: "), "{block}");
     }
 
     #[test]
@@ -998,6 +1186,7 @@ Each line ends with the layer that set it: `this task`, `this repo`, `you`, `the
             settings: Some(&resolved),
             role: Some(&role),
             warnings: &[],
+            program_line: None,
         });
         let expected = "You work on one shprd task.
 Stay within scope.
@@ -1011,7 +1200,7 @@ branch `task/30-m9-4` in worktree `/home/me/.shprd/worktrees/shprd/m9/M9.4`
 
 - M9.4 does what it says
 
-## Scope — change only these paths
+## Where to start — a hint, not a limit
 
 - data/templates
 - crates/shprd-views
@@ -1022,13 +1211,12 @@ branch `task/30-m9-4` in worktree `/home/me/.shprd/worktrees/shprd/m9/M9.4`
 
 ## Rules
 
-- work only in `/home/me/.shprd/worktrees/shprd/m9/M9.4`; change nothing outside the scope above
-- commit on your branch `task/30-m9-4`; never push, never open a pull request
-- `.shprd/` and `.dagr/` are shprd's own: the run's log, asks and graph live there, and the worktree's git already ignores them. Never commit them, never add them to the repository's `.gitignore`, and leave them out of your changes
-- run the worker gates before you report: `cargo fmt --all --check`, `cargo test --workspace`
-- say where you are as you go: `shprd task status M9.4 --msg <one short line> [--progress 0-100]`
-- leave one real proof of the work behind (a screenshot of the change, a command's actual output, a test run) inside your worktree, and pass its path as `--proof <path>`, once per artifact: the artifact must be in the worktree, because that is the folder the reviewer is given, and a path outside it is refused. The proof path never goes in the summary, which is one plain line for the person. A mock is no proof of what people see; a bug fix shows the same repro failing before and passing after
-- report when you are done: `shprd agent report --task M9.4 --attempt 1 --status <completed|blocked|failed> --summary <one line>` plus `--check <gate>|<command>|<exit code>[|<last 20 lines>]` for every gate you ran (a completed hand-in is refused without them, and refused if any exited non-zero), `--test <cmd>` for each command you ran, `--changed <path>` for each path you changed, `--commit <sha>` for your commit, `--skill-used <name>` for each skill above you actually used and `--proof <path>` for each artifact you left behind
+- work only in `/home/me/.shprd/worktrees/shprd/m9/M9.4`; change what the task needs, wire it end to end, and leave protected paths alone unless the task names them
+- commit on your branch `task/30-m9-4`
+- `.shprd/` and `.dagr/` are shprd's own and git ignores them: never commit them or add them to `.gitignore`
+- gates to run before you hand in, each passed with `--check`: `cargo fmt --all --check`, `cargo test --workspace`
+- status: `shprd task status M9.4 --msg <one short line> [--progress 0-100]`
+- hand in: `shprd agent report --task M9.4 --attempt 1 --status <completed|blocked|failed> --summary <one line>` with `--check`, `--test`, `--changed`, `--commit`, `--skill-used` and `--proof` as your instructions say
 
 ## Asking the person
 
@@ -1041,19 +1229,11 @@ Each line ends with the layer that set it: `this task`, `this repo`, `you`, `the
 - Program: claude (this task)
 - Model: opus (you)
 - Effort: high (this repo)
-- Fast mode: off (built in)
-- Permissions: the program's own default (built in)
-- Fallback: none: the configured workers (built in)
 - Merge: checks (this repo)
 - Review rounds: 2 (you)
 - Must fix: major (built in)
 - Proof: on (built in)
-- Worktrees: on (built in)
 - Base branch: main (the repo's file)
-- Branch pattern: task/{n}-{slug} (built in)
-- Tasks at once: 4 (built in)
-- Start notes: none (built in)
-- Finish notes: none (built in)
 ";
         assert_eq!(text, expected);
     }
@@ -1078,6 +1258,7 @@ Each line ends with the layer that set it: `this task`, `this repo`, `you`, `the
             settings: None,
             role: None,
             warnings: &[],
+            program_line: None,
         });
         assert!(
             text.starts_with("# M9.4 role templates and a brief\n"),
@@ -1110,6 +1291,7 @@ Each line ends with the layer that set it: `this task`, `this repo`, `you`, `the
             settings: None,
             role: None,
             warnings: &warnings,
+            program_line: None,
         });
         assert!(
             text.contains(
@@ -1139,8 +1321,60 @@ Each line ends with the layer that set it: `this task`, `this repo`, `you`, `the
             settings: None,
             role: None,
             warnings: &[],
+            program_line: None,
         });
         assert!(!text.contains("## Warnings"), "{text}");
+    }
+
+    /// A retry's brief shows the asks the person answered in attempt 1.
+    #[test]
+    fn a_retry_brief_carries_the_asks_answered_in_an_earlier_attempt() {
+        let plan = brief_task();
+        let ask = |id: &str, text: &str, seq: u64| shprd_core::state::AskRecord {
+            id: id.to_string(),
+            task: plan.id.clone(),
+            kind: shprd_core::ask::AskKind::Question,
+            text: text.to_string(),
+            options: Vec::new(),
+            created_at_ms: 0,
+            expires_at_ms: None,
+            raised_seq: seq,
+            answer: Some(shprd_core::state::AskAnswerRecord {
+                text: "use the mic".to_string(),
+                seq: seq + 1,
+            }),
+        };
+        let asks = vec![
+            ask("q1", "which input?", 5),
+            ask("scope-widen-1", "widen?", 6),
+        ];
+        let input = |attempt: u32| BriefInput {
+            task: &plan,
+            run: "m9",
+            attempt,
+            agent: "claude",
+            model: None,
+            branch: "b",
+            worktree: "/wt",
+            skills: &[],
+            gates: &[],
+            archive: None,
+            prompt: None,
+            ask: AskRoute::Hook,
+            proof: true,
+            settings: None,
+            role: None,
+            warnings: &[],
+            program_line: None,
+        };
+        let retry = task_brief_with_asks(&input(2), &asks);
+        assert!(
+            retry.contains("which input?") && retry.contains("use the mic"),
+            "{retry}"
+        );
+        assert!(!retry.contains("widen?"), "{retry}");
+        let first = task_brief_with_asks(&input(1), &asks);
+        assert!(!first.contains("which input?"), "{first}");
     }
 
     /// The plainest brief, with `ask` naming how its program asks.
@@ -1163,6 +1397,7 @@ Each line ends with the layer that set it: `this task`, `this repo`, `you`, `the
             settings: None,
             role: None,
             warnings: &[],
+            program_line: None,
         })
     }
 
@@ -1187,7 +1422,7 @@ Each line ends with the layer that set it: `this task`, `this repo`, `you`, `the
     #[test]
     fn a_program_without_an_ask_hook_is_told_the_raise_verb_and_how_it_waits() {
         let text = plain_brief(AskRoute::Command);
-        let expected = "\n## Asking the person\n\nThis program's CLI has no ask hook, so a question with its own question tool reaches nobody: nothing turns it into a card and the person never sees it. Raise the card yourself, from your worktree, and wait for the answer:\n\n```\nshprd ask raise --kind question \\\n    --text \"Can I take the window for 30s to screenshot the menu?\" \\\n    --option \"Take it, 30s\" --option \"Wait for my go-ahead\" --option \"Skip the screenshot\"\n```\n\nIt blocks until the person answers, prints their answer on stdout and exits 0: carry on with that answer. `--kind permission` asks to run a tool and `--kind plan` offers a plan; both offer Allow and Deny unless you name your own options. If it exits non-zero, nobody answered within its wait (30 minutes by default; `--timeout-secs` changes it): the card stays open, so raise it again if the decision still blocks you, or hand in as `blocked` with the question in your summary.\n";
+        let expected = "\n## Asking the person\n\nThis program's CLI has no ask hook, so a question with its own question tool reaches nobody: nothing turns it into a card and the person never sees it. Raise the card yourself, from your worktree, and wait for the answer:\n\n```\nshprd ask raise --kind question \\\n    --text \"Can I take the window for 30s to screenshot the menu?\" \\\n    --option \"Take it, 30s\" --option \"Wait for my go-ahead\" --option \"Skip the screenshot\"\n```\n\nIt blocks until the person answers, prints their answer on stdout and exits 0: carry on with that answer. `--kind permission` asks to run a tool and `--kind plan` offers a plan; a permission offers Allow and Deny and a plan Approve and Reject, unless you name your own options. If it exits non-zero, nobody answered within its wait (30 minutes by default; `--timeout-secs` changes it): the card stays open, so raise it again if the decision still blocks you, or hand in as `blocked` with the question in your summary.\n";
         let Some(start) = text.find("\n## Asking the person") else {
             panic!("the brief has an Asking section: {text}");
         };
@@ -1205,66 +1440,33 @@ Each line ends with the layer that set it: `this task`, `this repo`, `you`, `the
         let text = plain_brief(AskRoute::Hook);
         assert!(
             text.contains(
-                "- `.shprd/` and `.dagr/` are shprd's own: the run's log, asks and graph live there, and the worktree's git already ignores them. Never commit them, never add them to the repository's `.gitignore`, and leave them out of your changes\n"
+                "- `.shprd/` and `.dagr/` are shprd's own and git ignores them: never commit them or add them to `.gitignore`\n"
             ),
             "{text}"
         );
     }
 
-    /// The proof rule comes before the hand-in rule, and it says where the proof
-    /// path goes. A hand-in is spent once, so a worker that only learns about
-    /// `--proof` after reporting has no report left to correct.
+    /// The brief's Rules say where the worker is and how to report; the proof
+    /// rule has one home, the worker's prompt, so the brief does not repeat it.
     #[test]
-    fn the_proof_rule_is_read_before_the_hand_in_rule() {
+    fn the_rules_name_the_worktree_and_leave_the_proof_rule_to_the_prompt() {
         let text = plain_brief(AskRoute::Hook);
-        let proof = text
-            .find("- leave one real proof of the work behind")
-            .unwrap_or_else(|| panic!("the brief names the proof rule: {text}"));
-        let report = text
-            .find("- report when you are done:")
-            .unwrap_or_else(|| panic!("the brief names the hand-in rule: {text}"));
-        assert!(proof < report, "the proof rule comes first: {text}");
         assert!(
-            text.contains("pass its path as `--proof <path>`"),
-            "the rule says where the proof path goes: {text}"
+            text.contains(
+                "- work only in `/wt/M9.4`; change what the task needs, wire it end to end, and \
+                 leave protected paths alone unless the task names them\n"
+            ),
+            "{text}"
         );
         assert!(
-            text.contains("never goes in the summary"),
-            "the rule keeps the proof path out of the summary: {text}"
+            !text.contains("change only") && !text.contains("change nothing outside"),
+            "{text}"
         );
-        assert!(
-            text.contains("`--proof <path>` for each artifact you left behind"),
-            "the hand-in rule repeats the flag: {text}"
-        );
-    }
-
-    /// A run that does not ask for proof says nothing about it, so the rule
-    /// never becomes a line a worker skips over.
-    #[test]
-    fn a_run_without_proof_has_no_proof_rule() {
-        let plan = brief_task();
-        let text = task_brief(&BriefInput {
-            task: &plan,
-            run: "m9",
-            attempt: 1,
-            agent: "claude",
-            model: None,
-            branch: "task/30-m9-4",
-            worktree: "/wt/M9.4",
-            skills: &[],
-            gates: &[],
-            archive: None,
-            prompt: None,
-            ask: AskRoute::Hook,
-            proof: false,
-            settings: None,
-            role: None,
-            warnings: &[],
-        });
         assert!(!text.contains("leave one real proof"), "{text}");
+        assert!(!text.contains("Shepherdr"), "{text}");
         assert!(
-            text.contains("`--proof <path>` for each artifact you left behind"),
-            "the flag is still named by the hand-in rule: {text}"
+            text.contains("`--proof`"),
+            "the hand-in line still names the flag: {text}"
         );
     }
 
@@ -1289,5 +1491,101 @@ Each line ends with the layer that set it: `this task`, `this repo`, `you`, `the
             text.lines().count() <= 40,
             "the advertised cap must hold: {lines}"
         );
+    }
+
+    /// A role the person named is told its name in the brief; one nobody named is not.
+    #[test]
+    fn the_settings_block_says_the_name_the_person_gave_the_role() {
+        use shprd_core::settings::{File, Key, Request, RoleField, Value, resolve};
+        let mut file = File::default();
+        file.you.set(
+            Key::Role {
+                id: "worker".to_owned(),
+                field: RoleField::Title,
+            },
+            Value::Text("Dev".to_owned()),
+        );
+        let resolved = resolve(&file, &Request::default());
+        let Some(role) = resolved.role("worker") else {
+            panic!("the worker role resolves");
+        };
+        let text = settings_block(&resolved, Some(&role), None);
+        assert!(
+            text.contains("You are the Dev (the `worker` role)"),
+            "{text}"
+        );
+        let (plain, plain_role) = settings_fixture();
+        assert!(!settings_block(&plain, Some(&plain_role), None).contains("You are the"));
+    }
+
+    /// The fixture log with `extra` events (seq from 17) appended.
+    fn with_extra(extra: Vec<EventKind>) -> (RunState, Vec<Event>) {
+        let mut events = fixture::events();
+        for (i, kind) in extra.into_iter().enumerate() {
+            events.push(Event {
+                seq: 17 + i as u64,
+                at_ms: 1_000_000 + i as u64,
+                actor: shprd_core::event::Actor::Engine,
+                kind,
+            });
+        }
+        let state = RunState::fold(&events).unwrap_or_else(|err| panic!("{err}"));
+        (state, events)
+    }
+
+    fn escalated(task: &str, body: &str) -> EventKind {
+        EventKind::Escalated {
+            task: Some(task.to_string()),
+            body: body.to_string(),
+            default_action: "hold".to_string(),
+        }
+    }
+
+    #[test]
+    fn a_landed_tasks_old_escalations_are_resolved_with_the_landing_seq() {
+        // The sweatbrain shape (seq 27, 34, 36): ready-to-land and land-failure cards, then the landing.
+        let (state, events) = with_extra(vec![
+            escalated(
+                "M1.1",
+                "M1.1 is ready to land: Review and Accept it in the Tasks pane",
+            ),
+            escalated(
+                "M1.1",
+                "landing M1.1 failed: 'prototype' is already checked out",
+            ),
+            EventKind::TaskLanded {
+                task: "M1.1".to_string(),
+                base: "main".to_string(),
+                head: "abc".to_string(),
+                number: Some(1),
+                outcome: shprd_core::event::LandOutcome::Merged,
+            },
+        ]);
+        let text = brief(&state, &events);
+        assert!(text.contains("\n  2 open"), "{text}");
+        assert!(!text.contains("ready to land"), "{text}");
+        assert!(!text.contains("landing M1.1 failed"), "{text}");
+        assert!(
+            text.contains("2 resolved: #17 by #19, #18 by #19"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_kickoff_card_is_resolved_by_the_review_gate_that_followed() {
+        // sweatbrain seq 206-211: the review passed after the kickoff card was raised.
+        let (state, events) = with_extra(vec![
+            escalated("M1.2", "review kickoff not delivered"),
+            EventKind::GatePassed {
+                task: "M1.2".to_string(),
+                attempt: 1,
+                gate: "review".to_string(),
+                findings: vec![],
+                source: None,
+            },
+        ]);
+        let text = brief(&state, &events);
+        assert!(!text.contains("kickoff"), "{text}");
+        assert!(text.contains("1 resolved: #17 by #18"), "{text}");
     }
 }

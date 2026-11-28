@@ -11,7 +11,7 @@
 //! answering [`MuxError::Unsupported`] naming it. A caller's degraded path is
 //! therefore testable without a host that really is old.
 
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
@@ -20,7 +20,7 @@ use crate::types::{
     AgentState, Capabilities, Direction, Key, MuxError, MuxEvent, Outcome, PaneId, Tab, TabId,
     Waited, Workspace, WorkspaceId,
 };
-use crate::{Host, Result};
+use crate::{AgentLaunch, AgentRole, Host, LiveAgent, Result};
 
 /// One call the fake recorded, in the order it was made.
 ///
@@ -58,10 +58,16 @@ pub enum Call {
         Vec<(String, Option<String>)>,
         PathBuf,
     ),
+    /// `spawn_agent(...)`: the role, the task and the parent pane it named.
+    SpawnAgent(AgentRole, Option<String>, Option<PaneId>),
+    /// `list_agents()`.
+    ListAgents,
     /// `split(pane, direction, ratio, cwd)`.
     Split(PaneId, Direction, f32, PathBuf),
     /// `close_pane(pane)`.
     ClosePane(PaneId),
+    /// `show_chat(pane, chat_space)`.
+    ShowChat(PaneId, String),
     /// `write(pane, text, submit)`.
     Write(PaneId, String, bool),
     /// `keys(pane, keys)`.
@@ -100,9 +106,17 @@ enum TabClosePolicy {
 #[derive(Debug)]
 struct Inner {
     calls: Vec<Call>,
+    /// shprd's marks on spaces: mark -> space id.
+    marks: HashMap<String, WorkspaceId>,
     spaces: Vec<Workspace>,
+    /// The folder each space was made for.
+    folders: HashMap<WorkspaceId, PathBuf>,
+    /// Coordinators, which keep a tab: listed by [`Host::list_coordinators`].
+    coordinators: Vec<(Tab, AgentMeta)>,
     /// Tabs with the space that owns each, so listing stays scoped.
     tabs: Vec<(WorkspaceId, Tab)>,
+    /// Headless agents: terminals with no tab and no space, by handle.
+    agents: Vec<(Tab, AgentMeta)>,
     panes: BTreeSet<PaneId>,
     /// What each pane's screen holds, and what a wait for output matches on.
     screens: HashMap<PaneId, String>,
@@ -122,6 +136,13 @@ struct Inner {
     read_failures: HashMap<PaneId, String>,
     /// Programs a test scripted to end, and with what code.
     exits: HashMap<PaneId, Option<i32>>,
+    /// When set, a coordinator spawned from now on has already ended with this
+    /// code and left this on its screen: a program that dies as it starts.
+    exit_at_start: Option<(Option<i32>, String)>,
+    /// Panes that run another product's agent.
+    foreign: HashSet<PaneId>,
+    foreign_tabs: Vec<TabId>,
+    mod_tabs: Vec<(WorkspaceId, TabId, String)>,
     /// Spaces a test scripted `close_space` to refuse, with the reason.
     space_close_failures: HashMap<WorkspaceId, String>,
     /// The answer a scripted `exec` gives.
@@ -132,14 +153,28 @@ struct Inner {
     next_space: usize,
     next_tab: usize,
     next_pane: usize,
+    next_agent: usize,
+}
+
+/// What a headless agent was started as, for [`Host::list_agents`].
+#[derive(Debug, Clone)]
+struct AgentMeta {
+    task: Option<String>,
+    role: AgentRole,
+    program: String,
+    space: WorkspaceId,
 }
 
 impl Inner {
     fn fresh() -> Self {
         Self {
             calls: Vec::new(),
+            marks: HashMap::new(),
             spaces: Vec::new(),
+            folders: HashMap::new(),
+            coordinators: Vec::new(),
             tabs: Vec::new(),
+            agents: Vec::new(),
             panes: BTreeSet::new(),
             screens: HashMap::new(),
             states: HashMap::new(),
@@ -149,6 +184,10 @@ impl Inner {
             close_failures: HashMap::new(),
             read_failures: HashMap::new(),
             exits: HashMap::new(),
+            exit_at_start: None,
+            foreign: HashSet::new(),
+            foreign_tabs: Vec::new(),
+            mod_tabs: Vec::new(),
             space_close_failures: HashMap::new(),
             exec_answer: None,
             doc_answer: None,
@@ -156,6 +195,7 @@ impl Inner {
             next_space: 0,
             next_tab: 0,
             next_pane: 0,
+            next_agent: 0,
         }
     }
 
@@ -178,6 +218,15 @@ impl Inner {
         };
         self.tabs.push((space.clone(), tab.clone()));
         tab
+    }
+
+    /// Drop everything the fake remembers about a pane.
+    fn forget_pane(&mut self, pane: &PaneId) {
+        self.panes.remove(pane);
+        self.screens.remove(pane);
+        self.states.remove(pane);
+        self.read_failures.remove(pane);
+        self.exits.remove(pane);
     }
 
     /// Fail the way a real host does when the id is gone.
@@ -423,6 +472,41 @@ impl FakeMux {
         self
     }
 
+    /// From now on, a coordinator the host starts ends at once with `code`,
+    /// leaving `screen` behind (`None`: starts normally again).
+    pub fn exit_coordinators_at_start(&self, ended: Option<(Option<i32>, String)>) {
+        if let Ok(mut inner) = self.lock() {
+            inner.exit_at_start = ended;
+        }
+    }
+
+    /// Mark `pane` as running another product's agent
+    /// ([`Host::is_foreign_agent`]).
+    pub fn mark_foreign(&self, pane: &PaneId) {
+        if let Ok(mut inner) = self.lock() {
+            inner.foreign.insert(pane.clone());
+        }
+    }
+
+    /// A tab the window draws a mod in and no terminal: another product's chat
+    /// tab. [`Host::list_tabs`] does not list it, [`Host::tab_names`] does.
+    pub fn with_mod_tab(&self, space: &WorkspaceId, id: &str, title: &str) -> TabId {
+        if let Ok(mut inner) = self.lock() {
+            inner
+                .mod_tabs
+                .push((space.clone(), TabId::new(id), title.to_string()));
+        }
+        TabId::new(id)
+    }
+
+    /// Say another product's agent claims `tab` as its own
+    /// ([`Host::foreign_agent_tabs`]).
+    pub fn mark_foreign_tab(&self, tab: &TabId) {
+        if let Ok(mut inner) = self.lock() {
+            inner.foreign_tabs.push(tab.clone());
+        }
+    }
+
     /// Script the program in `pane` to have ended with `code`, which is what
     /// `wait(.., Waited::Exit, ..)` and `exit_of` see.
     pub fn set_exited(&self, pane: &PaneId, code: Option<i32>) {
@@ -444,6 +528,26 @@ impl FakeMux {
                 root_pane: PaneId::new("pane-unavailable"),
             },
         }
+    }
+
+    /// Script a tab with a chosen id, as a window gives a tab made from a label.
+    pub fn with_tab_id(&self, space: &WorkspaceId, id: &str, title: &str) -> Tab {
+        let Ok(mut inner) = self.lock() else {
+            return Tab {
+                id: TabId::new(id),
+                title: title.to_string(),
+                root_pane: PaneId::new("pane-unavailable"),
+            };
+        };
+        let mut tab = inner.new_tab(space, title);
+        let old = tab.id.clone();
+        tab.id = TabId::new(id);
+        for (_, existing) in inner.tabs.iter_mut() {
+            if existing.id == old {
+                existing.id = tab.id.clone();
+            }
+        }
+        tab
     }
 
     /// Every call made so far, oldest first.
@@ -523,6 +627,25 @@ impl FakeMux {
         }
     }
 
+    /// Rename a space the way a person does in the window: the id and the mark
+    /// stay, the display name changes.
+    pub fn rename_space(&self, space: &WorkspaceId, name: &str) {
+        if let Ok(mut inner) = self.lock()
+            && let Some(found) = inner.spaces.iter_mut().find(|found| &found.id == space)
+        {
+            found.name = name.to_string();
+        }
+    }
+
+    /// A space a person or an older shprd made: `name`, open on `folder`, with
+    /// no mark.
+    pub fn add_space(&self, name: &str, folder: &Path) -> WorkspaceId {
+        let space = self.create_space(name, folder).ok();
+        space
+            .map(|space| space.id)
+            .unwrap_or_else(|| WorkspaceId::new("none"))
+    }
+
     /// Queue an event for the next `subscribe` call.
     pub fn push_event(&self, event: MuxEvent) {
         if let Ok(mut inner) = self.lock() {
@@ -554,6 +677,75 @@ impl Host for FakeMux {
             .iter()
             .find(|space| space.name == name)
             .cloned())
+    }
+
+    fn marked_space(&self, mark: &str) -> Result<Option<Workspace>> {
+        let inner = self.lock()?;
+        Ok(inner
+            .marks
+            .get(mark)
+            .and_then(|id| inner.spaces.iter().find(|space| &space.id == id))
+            .cloned())
+    }
+
+    fn mark_space(&self, space: &WorkspaceId, mark: &str) -> Result<()> {
+        let mut inner = self.lock()?;
+        if inner.space(space).is_none() {
+            return Err(MuxError::not_found("space", space));
+        }
+        inner.marks.insert(mark.to_string(), space.clone());
+        Ok(())
+    }
+
+    fn rename_space(&self, space: &WorkspaceId, name: &str) -> Result<()> {
+        let mut inner = self.lock()?;
+        match inner.spaces.iter_mut().find(|found| &found.id == space) {
+            Some(found) => {
+                found.name = name.to_string();
+                Ok(())
+            }
+            None => Err(MuxError::not_found("space", space)),
+        }
+    }
+
+    fn spaces_in_folder(&self, folder: &Path) -> Result<Vec<Workspace>> {
+        let inner = self.lock()?;
+        Ok(inner
+            .spaces
+            .iter()
+            .filter(|space| inner.folders.get(&space.id).is_some_and(|at| at == folder))
+            .cloned()
+            .collect())
+    }
+
+    fn list_coordinators(&self) -> Result<Vec<LiveAgent>> {
+        let inner = self.lock()?;
+        Ok(inner
+            .coordinators
+            .iter()
+            .enumerate()
+            .filter(|(_, (tab, _))| inner.tabs.iter().any(|(_, kept)| kept.id == tab.id))
+            // As the real host does, another product's agent is not listed.
+            .filter(|(_, (tab, _))| !inner.foreign.contains(&tab.root_pane))
+            .map(|(order, (tab, meta))| {
+                let state = inner
+                    .states
+                    .get(&tab.root_pane)
+                    .copied()
+                    .unwrap_or(AgentState::Idle);
+                LiveAgent {
+                    live: state != AgentState::Done,
+                    state,
+                    tab: tab.clone(),
+                    task: None,
+                    role: AgentRole::Coordinator,
+                    program: meta.program.clone(),
+                    space: meta.space.clone(),
+                    started_ms: Some(order as u64 + 1),
+                    ended_ms: None,
+                }
+            })
+            .collect())
     }
 
     fn list_spaces(&self) -> Result<Vec<Workspace>> {
@@ -597,6 +789,7 @@ impl Host for FakeMux {
             name: name.to_string(),
         };
         inner.spaces.push(space.clone());
+        inner.folders.insert(space.id.clone(), cwd.to_path_buf());
         if self.starter_tab {
             inner.new_tab(&space.id, "1");
         }
@@ -682,9 +875,30 @@ impl Host for FakeMux {
         Ok(())
     }
 
+    fn tab_names(&self, space: &WorkspaceId) -> Result<Vec<(TabId, String)>> {
+        let mut names: Vec<(TabId, String)> = self
+            .list_tabs(space)?
+            .into_iter()
+            .map(|tab| (tab.id, tab.title))
+            .collect();
+        let inner = self.lock()?;
+        names.extend(
+            inner
+                .mod_tabs
+                .iter()
+                .filter(|(owner, _, _)| owner == space)
+                .map(|(_, id, title)| (id.clone(), title.clone())),
+        );
+        Ok(names)
+    }
+
     fn close_tab(&self, tab: &TabId) -> Result<()> {
         let mut inner = self.lock()?;
         inner.calls.push(Call::CloseTab(tab.clone()));
+        if let Some(at) = inner.mod_tabs.iter().position(|(_, id, _)| id == tab) {
+            inner.mod_tabs.remove(at);
+            return Ok(());
+        }
         let kept = self.tab_keep.as_ref() == Some(tab);
         if !kept {
             match &self.tab_close {
@@ -696,6 +910,15 @@ impl Host for FakeMux {
                 }
                 None => {}
             }
+        }
+        if let Some(at) = inner
+            .agents
+            .iter()
+            .position(|(handle, _)| &handle.id == tab)
+        {
+            let (found, _) = inner.agents.remove(at);
+            inner.forget_pane(&found.root_pane);
+            return Ok(());
         }
         let Some(found) = inner.tab(tab).cloned() else {
             return Err(MuxError::not_found("tab", tab));
@@ -740,6 +963,114 @@ impl Host for FakeMux {
         Ok(inner.new_tab(space, title))
     }
 
+    fn spawn_agent(&self, launch: &AgentLaunch<'_>) -> Result<Tab> {
+        // A coordinator keeps its tab, and a host with no headless agents keeps
+        // every agent's: both are the ordinary spawn.
+        if !self.caps.headless_agents || launch.role == AgentRole::Coordinator {
+            {
+                let mut inner = self.lock()?;
+                inner.calls.push(Call::SpawnAgent(
+                    launch.role,
+                    launch.task.map(str::to_string),
+                    launch.parent.cloned(),
+                ));
+            }
+            let tab = self.spawn(
+                launch.space,
+                launch.title,
+                launch.argv,
+                launch.env,
+                launch.cwd,
+            )?;
+            if launch.role == AgentRole::Coordinator {
+                let mut inner = self.lock()?;
+                inner.coordinators.push((
+                    tab.clone(),
+                    AgentMeta {
+                        task: None,
+                        role: launch.role,
+                        program: launch.program.to_string(),
+                        space: launch.space.clone(),
+                    },
+                ));
+                if let Some((code, screen)) = inner.exit_at_start.clone() {
+                    inner.panes.insert(tab.root_pane.clone());
+                    inner.exits.insert(tab.root_pane.clone(), code);
+                    inner.states.insert(tab.root_pane.clone(), AgentState::Done);
+                    inner.screens.insert(tab.root_pane.clone(), screen);
+                }
+            }
+            return Ok(tab);
+        }
+        let mut inner = self.lock()?;
+        inner.calls.push(Call::SpawnAgent(
+            launch.role,
+            launch.task.map(str::to_string),
+            launch.parent.cloned(),
+        ));
+        inner.calls.push(Call::Spawn(
+            launch.space.clone(),
+            launch.title.to_string(),
+            launch.argv.to_vec(),
+            launch.env.to_vec(),
+            launch.cwd.into(),
+        ));
+        if let Some(reason) = &self.spawn_forbidden {
+            return Err(MuxError::forbidden("spawn", reason.clone()));
+        }
+        if let Some(reason) = &self.spawn_failure {
+            return Err(MuxError::command("spawn", reason.clone()));
+        }
+        let root_pane = inner.new_pane();
+        inner.next_agent += 1;
+        let tab = Tab {
+            id: TabId::new(format!("agent-{}", inner.next_agent)),
+            title: launch.title.to_string(),
+            root_pane,
+        };
+        inner.agents.push((
+            tab.clone(),
+            AgentMeta {
+                task: launch.task.map(str::to_string),
+                role: launch.role,
+                program: launch.program.to_string(),
+                space: launch.space.clone(),
+            },
+        ));
+        Ok(tab)
+    }
+
+    fn list_agents(&self) -> Result<Vec<LiveAgent>> {
+        let mut inner = self.lock()?;
+        inner.calls.push(Call::ListAgents);
+        let agents = inner.agents.clone();
+        Ok(agents
+            .into_iter()
+            .map(|(tab, meta)| {
+                let state = inner
+                    .states
+                    .get(&tab.root_pane)
+                    .copied()
+                    .unwrap_or(if self.ready {
+                        AgentState::Idle
+                    } else {
+                        AgentState::Unknown
+                    });
+                LiveAgent {
+                    live: state != AgentState::Done,
+                    state,
+                    tab,
+                    task: meta.task,
+                    role: meta.role,
+                    program: meta.program,
+                    space: meta.space,
+                    started_ms: None,
+                    ended_ms: None,
+                }
+            })
+            .collect())
+    }
+
     fn split(&self, pane: &PaneId, direction: Direction, ratio: f32, cwd: &Path) -> Result<PaneId> {
         let mut inner = self.lock()?;
         inner
@@ -750,6 +1081,14 @@ impl Host for FakeMux {
         }
         inner.require_pane(pane)?;
         Ok(inner.new_pane())
+    }
+
+    fn show_chat(&self, pane: &PaneId, chat_space: &str) -> Result<()> {
+        let mut inner = self.lock()?;
+        inner
+            .calls
+            .push(Call::ShowChat(pane.clone(), chat_space.to_string()));
+        inner.require_pane(pane)
     }
 
     fn close_pane(&self, pane: &PaneId) -> Result<()> {
@@ -850,6 +1189,18 @@ impl Host for FakeMux {
         Ok(())
     }
 
+    fn foreign_agent_tabs(&self) -> Vec<TabId> {
+        self.lock()
+            .map(|inner| inner.foreign_tabs.clone())
+            .unwrap_or_default()
+    }
+
+    fn is_foreign_agent(&self, pane: &PaneId) -> bool {
+        self.lock()
+            .map(|inner| inner.foreign.contains(pane))
+            .unwrap_or(false)
+    }
+
     fn exit_of(&self, pane: &PaneId) -> Result<Option<Outcome>> {
         let inner = self.lock()?;
         inner.require_pane(pane)?;
@@ -934,11 +1285,11 @@ impl Inner {
 #[cfg(test)]
 mod tests {
     use super::{Call, FakeMux};
-    use crate::Host;
     use crate::types::{
         AgentState, Capabilities, Direction, Key, MuxError, MuxEvent, Outcome, PaneId, TabId,
         Waited, WorkspaceId,
     };
+    use crate::{AgentLaunch, AgentRole, Host};
     use std::fmt::Display;
     use std::path::Path;
     use std::time::Duration;
@@ -1238,6 +1589,127 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_renamed_space_is_found_by_its_mark_and_not_made_twice() {
+        let mux = FakeMux::default();
+        let (first, created) = ok(crate::ensure_marked_space(
+            &mux,
+            "shprd · repo",
+            Path::new("/tmp"),
+        ));
+        assert!(created);
+        mux.rename_space(&first.id, "my favourite place");
+        let (again, created) = ok(crate::ensure_marked_space(
+            &mux,
+            "shprd · repo",
+            Path::new("/tmp"),
+        ));
+        assert!(!created);
+        assert_eq!(again.id, first.id);
+        assert_eq!(ok(mux.list_spaces()).len(), 1, "no second space was made");
+        let found = ok(crate::find_marked_space(&mux, "shprd · repo"));
+        assert_eq!(found.map(|space| space.id), Some(first.id));
+    }
+
+    #[test]
+    fn an_unmarked_space_is_found_by_its_old_name_once_and_then_marked() {
+        let mux = FakeMux::default();
+        let old = ok(mux.create_space("shprd · repo", Path::new("/tmp")));
+        assert!(ok(mux.marked_space("shprd · repo")).is_none());
+        let (found, created) = ok(crate::ensure_marked_space(
+            &mux,
+            "shprd · repo",
+            Path::new("/tmp"),
+        ));
+        assert!(!created);
+        assert_eq!(found.id, old.id);
+        // Marked now: a rename no longer loses it.
+        mux.rename_space(&old.id, "renamed");
+        let marked = ok(mux.marked_space("shprd · repo"));
+        assert_eq!(marked.map(|space| space.id), Some(old.id));
+    }
+
+    #[test]
+    fn a_space_already_open_on_the_folder_is_the_repo_space_not_a_second_one() {
+        let mux = FakeMux::default();
+        // What the person's window held: a space for the folder, named after it.
+        let old = mux.add_space("scratchpad", Path::new("/work/scratchpad"));
+        let (found, created) = ok(crate::ensure_marked_space(
+            &mux,
+            "shprd · scratchpad",
+            Path::new("/work/scratchpad"),
+        ));
+        assert!(!created, "reused, not created");
+        assert_eq!(found.id, old);
+        assert_eq!(found.name, "shprd · scratchpad");
+        let spaces = ok(mux.list_spaces());
+        assert_eq!(spaces.len(), 1, "one repo, one space: {spaces:?}");
+        assert_eq!(spaces[0].name, "shprd · scratchpad");
+        // And it is marked: a restart finds it by the mark.
+        let marked = ok(mux.marked_space("shprd · scratchpad"));
+        assert_eq!(marked.map(|space| space.id), Some(old));
+    }
+
+    #[test]
+    fn a_space_the_host_shows_by_its_raw_id_or_no_name_gets_the_label() {
+        for shown in ["", "space-1"] {
+            let mux = FakeMux::default();
+            let old = ok(mux.create_space("tmp-name", Path::new("/work/repo")));
+            mux.rename_space(&old.id, shown);
+            let (found, created) = ok(crate::ensure_marked_space(
+                &mux,
+                "shprd · repo",
+                Path::new("/work/repo"),
+            ));
+            assert!(!created);
+            assert_eq!(found.name, "shprd · repo", "shown as {shown:?}");
+            assert_eq!(ok(mux.list_spaces())[0].name, "shprd · repo");
+        }
+    }
+
+    #[test]
+    fn a_name_the_person_chose_is_kept_and_another_folders_space_is_left_alone() {
+        let mux = FakeMux::default();
+        let (space, _) = ok(crate::ensure_marked_space(
+            &mux,
+            "shprd · repo",
+            Path::new("/work/repo"),
+        ));
+        mux.rename_space(&space.id, "my favourite place");
+        let (again, created) = ok(crate::ensure_marked_space(
+            &mux,
+            "shprd · repo",
+            Path::new("/work/repo"),
+        ));
+        assert!(!created);
+        assert_eq!(again.id, space.id);
+        assert_eq!(ok(mux.list_spaces())[0].name, "my favourite place");
+        // A space for another folder is never adopted.
+        let other = mux.add_space("repo2", Path::new("/work/repo2"));
+        let (third, created) = ok(crate::ensure_marked_space(
+            &mux,
+            "shprd · other",
+            Path::new("/work/other"),
+        ));
+        assert!(created);
+        assert_ne!(third.id, other);
+    }
+
+    #[test]
+    fn a_space_with_no_terminals_keeps_its_mark() {
+        // `without_starter_tab` is the default: the space holds nothing.
+        let mux = FakeMux::default();
+        let (space, _) = ok(crate::ensure_marked_space(
+            &mux,
+            "shprd · empty",
+            Path::new("/tmp"),
+        ));
+        assert!(ok(mux.list_tabs(&space.id)).is_empty());
+        mux.rename_space(&space.id, "renamed");
+        let marked = ok(mux.marked_space("shprd · empty"));
+        assert_eq!(marked.map(|found| found.id), Some(space.id));
+    }
+
     // ---- capability degradation, one test per missing verb ----
 
     #[test]
@@ -1363,6 +1835,34 @@ mod tests {
             .unwrap_or_else(|| panic!("a forbidden spawn must be refused"));
         assert!(matches!(err, MuxError::Forbidden { verb: "spawn", .. }));
         assert!(err.to_string().contains("admin grant"));
+    }
+
+    #[test]
+    fn a_headless_agent_has_no_tab_and_stops_on_close() {
+        let (mux, space, _) = fixture();
+        let argv = vec!["agent".to_string()];
+        let launch = AgentLaunch {
+            space: &space,
+            title: "claude·T1",
+            argv: &argv,
+            env: &[],
+            cwd: Path::new("/r"),
+            role: AgentRole::Worker,
+            task: Some("T1"),
+            program: "claude",
+            parent: None,
+        };
+        let before = ok(mux.list_tabs(&space)).len();
+        let handle = ok(mux.spawn_agent(&launch));
+        assert_eq!(ok(mux.list_tabs(&space)).len(), before, "no tab was made");
+        let agents = ok(mux.list_agents());
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].task.as_deref(), Some("T1"));
+        assert_eq!(agents[0].tab.root_pane, handle.root_pane);
+        ok(mux.read(&handle.root_pane, 5));
+        ok(mux.close_tab(&handle.id));
+        assert!(ok(mux.list_agents()).is_empty());
+        assert!(mux.read(&handle.root_pane, 5).is_err());
     }
 
     #[test]

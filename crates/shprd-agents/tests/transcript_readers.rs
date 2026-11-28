@@ -255,6 +255,30 @@ fn a_half_written_last_line_is_read_once_it_is_complete() {
 }
 
 #[test]
+fn a_half_written_last_line_is_not_lost_by_the_tail_read() {
+    let (_dir, home) = recorded("claude");
+    let transcript = locate("claude", &home);
+    let path = transcript.path().expect("a file format").to_path_buf();
+    let text = fs::read_to_string(&path).unwrap();
+    let start = text.rfind('\n').map(|at| at + 1).unwrap_or(0);
+    let last = &text[start..];
+    let half = last.len() / 2;
+    fs::write(&path, format!("{}{}", &text[..start], &last[..half])).unwrap();
+    // The tail read leaves the partial line out, and its cursor stops before it.
+    let tail = transcript.read_tail().expect("the tail reads");
+    assert_eq!(tail.messages.len(), 3, "the half-written line is not read");
+    let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+    file.write_all(format!("{}\n", &last[half..]).as_bytes())
+        .unwrap();
+    let next = transcript.read(&tail.cursor).expect("reads on");
+    assert_eq!(next.messages.len(), 1, "the finished line arrives once");
+    assert_eq!(
+        next.messages[0].text,
+        "The last pass started T2 and landed T1."
+    );
+}
+
+#[test]
 fn a_resumed_offset_reads_only_what_the_record_gained() {
     let (_dir, home) = recorded("claude");
     let transcript = locate("claude", &home);
@@ -503,6 +527,87 @@ fn a_claude_session_is_found_through_a_symlinked_directory() {
     assert_eq!(transcript.session(), "5f0c-session");
     let page = transcript.read("").expect("the fixture reads");
     assert_eq!(page.messages.len(), 4);
+}
+
+/// SHPR-65 bug 5: the chat of an agent that started at a given moment shows the
+/// first session begun after it, never an earlier one in the same directory (the
+/// person's own, or the last coordinator's).
+#[test]
+fn an_agent_reads_the_session_begun_after_it_started_not_an_older_one_in_the_folder() {
+    let dir = tempfile::tempdir().expect("a temp home");
+    let folder = dir
+        .path()
+        .join(".claude")
+        .join("projects")
+        .join("-work-repo");
+    fs::create_dir_all(&folder).unwrap();
+    let user = |text: &str| {
+        format!(
+            "{}\n",
+            serde_json::json!({"type": "user", "message": {"role": "user", "content": text}})
+        )
+    };
+    fs::write(folder.join("older.jsonl"), user("an earlier conversation")).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1_600));
+    let started = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let roots = shprd_agents::transcript::Roots::at(dir.path());
+    let spec = harness("claude");
+    // Nothing has been said since the agent started: no conversation is its.
+    assert!(
+        Transcript::locate_since(spec.transcript(), &roots, Path::new(CWD), Some(started))
+            .is_none(),
+        "the older session is not this agent's"
+    );
+    // The old rule still shows the newest one, whoever's it is.
+    assert_eq!(
+        Transcript::locate_in(spec.transcript(), &roots, Path::new(CWD))
+            .unwrap()
+            .session(),
+        "older"
+    );
+    fs::write(folder.join("mine.jsonl"), user("hello")).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    fs::write(folder.join("someone-elses-later.jsonl"), user("another")).unwrap();
+    let found = Transcript::locate_since(spec.transcript(), &roots, Path::new(CWD), Some(started))
+        .expect("the agent's session is found");
+    assert_eq!(
+        found.session(),
+        "mine",
+        "the first one begun after it started"
+    );
+}
+
+/// OpenCode (both stores): an agent's session is one *created* after it started.
+/// A session that began earlier and was merely touched since is somebody else's.
+#[test]
+fn opencode_pins_a_session_by_its_creation_not_its_last_update() {
+    // The fixture session was created at 1768956000000 and updated at 1768956700000.
+    for program in ["opencode", "opencode-store"] {
+        let (_dir, home) = recorded(program);
+        let roots = shprd_agents::transcript::Roots::at(&home);
+        let spec = if program == "opencode" {
+            harness("opencode").transcript().clone()
+        } else {
+            shprd_agents::spec::TranscriptSpec {
+                format: Some(TranscriptFormat::OpencodeStorage),
+                location: Some("{data_home}/opencode/storage".to_string()),
+            }
+        };
+        let spec = &spec;
+        let after_creation = Some(1_768_956_100_000);
+        assert!(
+            Transcript::locate_since(spec, &roots, Path::new(CWD), after_creation).is_none(),
+            "{program}: begun before the agent started, only updated since"
+        );
+        let before_creation = Some(1_768_955_000_000);
+        assert!(
+            Transcript::locate_since(spec, &roots, Path::new(CWD), before_creation).is_some(),
+            "{program}: begun after the agent started"
+        );
+    }
 }
 
 #[test]
@@ -933,4 +1038,240 @@ fn the_roots_of_a_launch_come_from_its_environment() {
     let roots = Roots::for_launch(&base);
     assert_eq!(roots.home, PathBuf::new());
     assert_eq!(roots.data_home, PathBuf::new());
+}
+
+/// Rewrite the claude fixture's record as `count` numbered user lines, with a
+/// padded body so the file is large; returns the transcript and its size.
+fn big_record(home: &Path, count: usize) -> (Transcript, u64) {
+    let transcript = locate("claude", home);
+    let path = transcript.path().unwrap().to_path_buf();
+    let pad = "x".repeat(180);
+    let mut body = String::new();
+    for n in 0..count {
+        // Every tenth line is bookkeeping, which is not a message.
+        if n % 10 == 9 {
+            body.push_str("{\"type\":\"queue-operation\"}\n");
+        }
+        body.push_str(&format!(
+            "{{\"type\":\"user\",\"isSidechain\":false,\"timestamp\":\"2026-11-04T10:00:00.000Z\",\"message\":{{\"role\":\"user\",\"content\":\"m{n} {pad}\"}}}}\n"
+        ));
+    }
+    fs::write(&path, &body).unwrap();
+    (transcript, body.len() as u64)
+}
+
+fn number_of(text: &str) -> usize {
+    text.trim_start_matches('m')
+        .split(' ')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+#[test]
+fn the_tail_of_a_large_record_is_the_newest_page_and_opens_fast() {
+    let (_dir, home) = recorded("claude");
+    // 80,000 lines of ~280 bytes is a record of about 22 MB.
+    let (transcript, size) = big_record(&home, 80_000);
+    assert!(size > 20 * 1024 * 1024, "{size}");
+    let started = std::time::Instant::now();
+    let tail = transcript.read_tail().expect("the tail reads");
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(500),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(tail.messages.len(), shprd_agents::transcript::MAX_MESSAGES);
+    assert_eq!(number_of(&tail.messages.last().unwrap().text), 79_999);
+    assert!(tail.older.is_some());
+    // Nothing is newer than the tail: a forward read from its cursor is empty.
+    let after = transcript.read(&tail.cursor).expect("the fixture reads");
+    assert!(after.messages.is_empty());
+}
+
+#[test]
+fn backward_pages_join_the_tail_with_nothing_lost_or_repeated() {
+    let (_dir, home) = recorded("claude");
+    let (transcript, _) = big_record(&home, 1_234);
+    let mut numbers = Vec::new();
+    let tail = transcript.read_tail().unwrap();
+    let mut pages = vec![tail.messages.clone()];
+    let mut older = tail.older.clone();
+    while let Some(cursor) = older {
+        let page = transcript.read_before(&cursor).unwrap();
+        older = page.older.clone();
+        pages.push(page.messages);
+    }
+    // Oldest page first.
+    for page in pages.iter().rev() {
+        for message in page {
+            numbers.push(number_of(&message.text));
+        }
+    }
+    assert_eq!(numbers, (0..1_234).collect::<Vec<_>>());
+    // A tail then a forward read of what is appended afterwards.
+    append_line(
+        transcript.path().unwrap(),
+        r#"{"type":"user","isSidechain":false,"timestamp":"2026-11-04T10:01:00.000Z","message":{"role":"user","content":"m1234 new"}}"#,
+    );
+    let page = transcript.read(&tail.cursor).unwrap();
+    assert_eq!(page.messages.len(), 1);
+    assert_eq!(page.messages[0].text, "m1234 new");
+}
+
+#[test]
+fn a_small_record_is_one_tail_page_with_nothing_older() {
+    let (_dir, home) = recorded("claude");
+    let transcript = locate("claude", &home);
+    let tail = transcript.read_tail().unwrap();
+    assert_eq!(tail.messages.len(), 4);
+    assert!(tail.older.is_none());
+    let whole = transcript.read("").unwrap();
+    assert_eq!(tail.messages, whole.messages);
+    assert_eq!(tail.cursor, whole.cursor);
+}
+
+/// The recorded mid-turn session, placed where Claude Code writes `session`.
+fn midturn(home: &Path) -> PathBuf {
+    let folder = home.join(".claude/projects/-work-repo");
+    fs::create_dir_all(&folder).unwrap();
+    let path = folder.join("mid-session.jsonl");
+    fs::copy(
+        fixtures().join("claude-midturn").join("session.jsonl"),
+        &path,
+    )
+    .unwrap();
+    path
+}
+
+#[test]
+fn a_message_sent_mid_turn_and_its_answer_are_read_in_order() {
+    let home = tempfile::tempdir().unwrap();
+    midturn(home.path());
+    let transcript = locate("claude", home.path());
+    let page = transcript.read("").expect("the fixture reads");
+    let got: Vec<(Role, &str)> = page
+        .messages
+        .iter()
+        .map(|m| (m.role, m.text.as_str()))
+        .collect();
+    // The queue-operation records are bookkeeping; the queued command is the
+    // person's own message once; shprd's news stays news.
+    assert_eq!(got.len(), 3, "{got:?}");
+    assert_eq!(
+        got[0],
+        (
+            Role::User,
+            "side question, why does shprd service shut down when idle?"
+        )
+    );
+    assert_eq!(got[1].0, Role::News);
+    assert!(got[1].1.contains("fb-preflight is done"));
+    assert_eq!(got[2].0, Role::Assistant);
+    assert!(
+        got[2]
+            .1
+            .contains("I don't think shprd has an idle shutdown")
+    );
+    // A reload (the newest page) shows the same three.
+    let tail = transcript.read_tail().expect("the tail reads");
+    assert_eq!(tail.messages, page.messages);
+}
+
+#[test]
+fn a_queued_message_also_recorded_as_a_user_line_shows_once() {
+    let home = tempfile::tempdir().unwrap();
+    let path = midturn(home.path());
+    let twice = serde_json::json!({
+        "type": "user",
+        "isSidechain": false,
+        "timestamp": "2026-11-26T07:52:52.900Z",
+        "message": {"role": "user", "content": "side question, why does shprd service shut down when idle?"},
+    });
+    append_line(&path, &twice.to_string());
+    let transcript = locate("claude", home.path());
+    let page = transcript.read("").unwrap();
+    let asked = page
+        .messages
+        .iter()
+        .filter(|m| m.role == Role::User)
+        .count();
+    assert_eq!(asked, 1, "{:?}", page.messages);
+}
+
+#[test]
+fn a_record_longer_than_one_read_does_not_hide_what_follows() {
+    // The cause of the missing reply: a program's request dump can be a line of
+    // megabytes, bigger than one read, so the cursor never passed it and
+    // nothing after it showed live.
+    let home = tempfile::tempdir().unwrap();
+    let path = midturn(home.path());
+    let fixture = fs::read_to_string(&path).unwrap();
+    let huge = serde_json::json!({
+        "type": "api-request-blob",
+        "blob": "x".repeat(shprd_agents::transcript::MAX_BYTES * 2),
+    });
+    fs::write(&path, format!("{huge}\n{fixture}")).unwrap();
+    let transcript = locate("claude", home.path());
+    let page = transcript.read("").unwrap();
+    assert_eq!(page.messages.len(), 3, "{:?}", page.messages);
+    assert_eq!(page.messages[2].role, Role::Assistant);
+    assert!(!page.more);
+}
+
+/// A Claude record whose last tool call is a question nobody answered yet.
+#[test]
+fn claude_names_the_question_its_terminal_is_waiting_on() {
+    let bytes = fs::read(fixtures().join("claude-question/pending.jsonl")).unwrap();
+    let ask = shprd_agents::transcript::claude_pending_question(&bytes).expect("a question waits");
+    assert_eq!(ask.id, "toolu_host");
+    assert_eq!(ask.questions.len(), 1);
+    let question = &ask.questions[0];
+    assert_eq!(question.header, "Host");
+    assert!(question.question.starts_with("Can I set this repo's host"));
+    assert!(!question.multi_select);
+    let labels: Vec<&str> = question.options.iter().map(|o| o.label.as_str()).collect();
+    assert_eq!(labels, ["Yes, set it (Recommended)", "No"]);
+    assert_eq!(question.options[1].description, "Leave it on auto.");
+}
+
+/// Once the answer is recorded (or the agent went on) nothing waits.
+#[test]
+fn claude_has_no_question_once_it_is_answered() {
+    let bytes = fs::read(fixtures().join("claude-question/answered.jsonl")).unwrap();
+    assert_eq!(
+        shprd_agents::transcript::claude_pending_question(&bytes),
+        None
+    );
+    let mut more = fs::read(fixtures().join("claude-question/pending.jsonl")).unwrap();
+    more.extend_from_slice(br#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"ok"}]}}"#);
+    assert_eq!(
+        shprd_agents::transcript::claude_pending_question(&more),
+        None
+    );
+}
+
+#[test]
+fn the_same_words_sent_twice_both_show() {
+    let home = tempfile::tempdir().unwrap();
+    let path = midturn(home.path());
+    // A second queued command of the same words, moments later, is the person
+    // asking again, not a record twice.
+    let again = serde_json::json!({
+        "type": "attachment",
+        "isSidechain": false,
+        "timestamp": "2026-11-26T07:52:58.000Z",
+        "attachment": {"type": "queued_command", "prompt": "side question, why does shprd service shut down when idle?"},
+    });
+    append_line(&path, &again.to_string());
+    let transcript = locate("claude", home.path());
+    let asked = |page: &shprd_agents::transcript::Page| {
+        page.messages
+            .iter()
+            .filter(|m| m.role == Role::User)
+            .count()
+    };
+    assert_eq!(asked(&transcript.read("").unwrap()), 2);
+    assert_eq!(asked(&transcript.read_tail().unwrap()), 2);
 }

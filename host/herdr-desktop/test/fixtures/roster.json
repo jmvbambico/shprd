@@ -3,13 +3,14 @@
     {
       "id": "claude",
       "name": "Claude Code",
+      "installed": true,
       "vendor": "anthropic",
       "multi_model": false,
       "needs_provider": false,
       "models": [
         {
           "id": "fable",
-          "name": "Fable",
+          "name": "Fable 5.2",
           "efforts": [
             "low",
             "medium",
@@ -22,7 +23,33 @@
         },
         {
           "id": "opus",
-          "name": "Opus",
+          "name": "Opus 5.5",
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "default_effort": "medium",
+          "fast": true
+        },
+        {
+          "id": "opus[1m]",
+          "name": "Opus 5.5 · 1M",
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "default_effort": "medium",
+          "fast": true
+        },
+        {
+          "id": "sonnet",
+          "name": "Sonnet 5.5",
           "efforts": [
             "low",
             "medium",
@@ -34,8 +61,8 @@
           "fast": false
         },
         {
-          "id": "sonnet",
-          "name": "Sonnet",
+          "id": "haiku",
+          "name": "Haiku 5.5",
           "efforts": [
             "low",
             "medium",
@@ -83,6 +110,7 @@
     {
       "id": "codex",
       "name": "Codex",
+      "installed": true,
       "vendor": "openai",
       "multi_model": false,
       "needs_provider": false,
@@ -117,6 +145,7 @@
     {
       "id": "kilo",
       "name": "Kilo",
+      "installed": true,
       "vendor": "kilo",
       "multi_model": true,
       "needs_provider": false,
@@ -158,6 +187,7 @@
     {
       "id": "opencode",
       "name": "OpenCode",
+      "installed": true,
       "vendor": "opencode",
       "multi_model": true,
       "needs_provider": false,
@@ -199,6 +229,7 @@
     {
       "id": "pi",
       "name": "Pi",
+      "installed": true,
       "vendor": "pi",
       "multi_model": true,
       "needs_provider": true,

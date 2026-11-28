@@ -22,11 +22,10 @@
 //! nothing and exits 2.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
 use anyhow::anyhow;
 use shprd_core::config::{self, Config, MergePolicy};
-use shprd_core::event::{Event, EventKind, Finding, ResourceAction, ResourceKind, Severity};
+use shprd_core::event::{Event, EventKind, ResourceAction, ResourceKind};
 use shprd_core::gate::REVIEW_GATE;
 use shprd_core::rules;
 use shprd_core::state::{RunState, Task, TaskStatus};
@@ -88,7 +87,7 @@ pub fn land_verb(ctx: &Ctx, args: &LandArgs, home: Option<&Path>) -> Result<(), 
         )));
     }
     let home = resolve_home(home)?;
-    let layout = resolve_layout(Some(&home), &config.janitor.namespace)?;
+    let layout = resolve_layout(Some(&home), &ctx.root)?;
     let repo_name = repo_name(ctx)?;
     // Held from the head read to the push: a sync or a cherry-pick landing
     // meanwhile would move the head the gate is pinned to, and the branch would
@@ -107,9 +106,9 @@ pub fn land_verb(ctx: &Ctx, args: &LandArgs, home: Option<&Path>) -> Result<(), 
     check_full_gate(&state, &head)?;
 
     if args.merge {
-        return merge(ctx, &config, &worktree, &head);
+        return merge(ctx, &config, &home, &worktree, &head);
     }
-    open(ctx, &state, &events, &worktree, &integrated)
+    open(ctx, &home, &state, &events, &worktree, &integrated)
 }
 
 /// Lands one task through its own pull request, as `[land] merge` says.
@@ -207,19 +206,23 @@ fn land_task(
         || task.pr.is_some();
     // A repository with no remote, or with no forge to drive, lands locally:
     // the task's branch is merged into the run's integration branch in shprd's
-    // own worktree, and nothing is pushed anywhere.
-    if local_landing(&Git::new(&ctx.root)) {
+    // own worktree; a non-GitHub remote is then pushed to, best effort.
+    let local = local_landing(&Git::new(&ctx.root));
+    if local {
         return land_task_local(
             ctx, &events, task, task_id, run, &branch, approved, has_work, &base, &config, home,
         );
     }
     let title = format!("{task_id}: {}", task.title);
-    let body = render_task_body(task);
+    let body = render_task_body(ctx, &state, task);
     let home = resolve_home(home)?;
     let repo_name = repo_name(ctx)?;
     // Held from here to the merge: a spawn replacing the attempt meanwhile
     // would delete the branch under the push.
     let _lock = run_lock::lock_run(&home, &repo_name, &run_id)?;
+    // A landing goes through the forge, so the local copy of its target is
+    // brought back to origin's before anything lands.
+    integrate::realign_with_remote(&ctx.root, &base);
     let body_file = write_task_body(&home, &run_id, task_id, &body)?;
     let landing = land::Landing {
         task: task_id,
@@ -229,10 +232,21 @@ fn land_task(
         body: &body_file,
         has_work,
     };
-    let forge = forge(&worktree)?;
+    let forge = forge(&worktree, &gh_user(&home, &ctx.root))?;
     let policy = config.land.policy_for(&base);
     let landed = match land::land(forge.as_ref(), &git, &landing, policy, approved) {
         Ok(landed) => landed,
+        // A branch that clashes with what landed after it is closed out and
+        // sent back for a fresh attempt: the planner does the sending.
+        Err(err @ land::LandError::Conflict { pr, .. }) => {
+            if let Some(number) = pr {
+                // Best effort: a pull request that cannot be closed is left for
+                // a human, and the new attempt opens its own.
+                let _ = forge.close(number, &stale_pr_comment(task_id));
+            }
+            record_conflict(ctx, task, task_id, &base, &err)?;
+            return Err(CliError::Invalid(anyhow!(conflict_message(task_id, &err))));
+        }
         // These three leave the pull request where a human can look at it, and
         // the next landing can act: they are refusals (exit 2), not failures.
         Err(
@@ -240,13 +254,10 @@ fn land_task(
             | land::LandError::HeadMoved { .. }
             | land::LandError::NotMerged { .. }),
         ) => {
-            return Err(CliError::Invalid(anyhow!("task {task_id:?}: {err}")));
+            return Err(CliError::Invalid(anyhow!(err.plain(task_id))));
         }
         Err(err) => {
-            return Err(CliError::other(anyhow!(err).context(format!(
-                "landing task {task_id:?} from {}",
-                worktree.display()
-            ))));
+            return Err(CliError::other(anyhow!(err.plain(task_id))));
         }
     };
     record_landing(ctx, &events, task_id, &base, &landed)?;
@@ -282,7 +293,7 @@ fn land_task_local(
     // Held from the head read to the merge: a spawn replacing the attempt
     // meanwhile would move the branch under the merge.
     let _lock = run_lock::lock_run(&home, &repo_name, &run.run_id)?;
-    let layout = resolve_layout(Some(&home), &config.janitor.namespace)?;
+    let layout = resolve_layout(Some(&home), &ctx.root)?;
     let worktree = integrate::open_integration_branch(
         &ctx.root,
         &layout,
@@ -303,14 +314,11 @@ fn land_task_local(
     let landed = match land::land_local(&worktree, &landing, policy, approved, checks_passed) {
         Ok(landed) => landed,
         Err(err @ land::LandError::Conflict { .. }) => {
-            record_conflict(ctx, task, task_id, branch, &err)?;
-            return Err(CliError::Invalid(anyhow!("task {task_id:?}: {err}")));
+            record_conflict(ctx, task, task_id, &run.integration_branch, &err)?;
+            return Err(CliError::Invalid(anyhow!(conflict_message(task_id, &err))));
         }
         Err(err) => {
-            return Err(CliError::other(anyhow!(err).context(format!(
-                "landing task {task_id:?} in {}",
-                worktree.path.display()
-            ))));
+            return Err(CliError::other(anyhow!(err.plain(task_id))));
         }
     };
     record_local_landing(ctx, events, task_id, &run.integration_branch, &landed)?;
@@ -386,47 +394,70 @@ fn record_local_landing(
     Ok(())
 }
 
-/// Records a local merging conflict as a failed gate and an escalation.
+/// What the stale pull request is closed with.
+fn stale_pr_comment(task_id: &str) -> String {
+    format!(
+        "{task_id} clashed with work that landed after it was cut. It is being redone on top \
+         of the latest, and the new attempt opens its own pull request."
+    )
+}
+
+/// Records a landing that clashed with the integration branch as a failed
+/// `integrate` gate.
 ///
-/// The failed `integrate` gate takes the task out of `Passed`, so the next tick
-/// does not try the same conflicting merge again; the escalation is what a
-/// person sees and acts on.
-fn record_conflict(
+/// The failed gate takes the task out of `Passed`, so the next tick does not try
+/// the same conflicting merge again, and it is what the planner reads to send
+/// the task back as a new attempt: the finding is the part of the new brief that
+/// says to carry the earlier commits over and resolve these files. No card is
+/// raised, because nobody has to decide anything.
+pub(crate) fn record_conflict(
     ctx: &Ctx,
     task: &Task,
     task_id: &str,
-    branch: &str,
+    base: &str,
     err: &land::LandError,
 ) -> Result<(), CliError> {
     let land::LandError::Conflict { files, .. } = err else {
         return Ok(());
     };
     let attempt = task.attempts.last().map(|attempt| attempt.n).unwrap_or(1);
-    let finding = Finding {
-        severity: Severity::Major,
-        title: "conflicts with the integration branch".to_string(),
-        location: files.first().cloned(),
-        detail: format!("merging {branch} conflicts in {}", files.join(", ")),
+    let which = if files.is_empty() {
+        String::from("the files it touches")
+    } else {
+        files.join(", ")
     };
+    let finding = land::conflict_finding(base, files);
     let event = ctx.commit(EventKind::GateFailed {
         task: task_id.to_string(),
         attempt,
-        gate: "integrate".to_string(),
+        gate: rules::LANDING_CONFLICT_GATE.to_string(),
         findings: vec![finding],
         source: None,
     })?;
     crate::cmd::emit(ctx, &event)?;
-    let body = format!(
-        "{task_id}: its work conflicts with the integration branch ({}), so it needs a person",
-        files.join(", ")
-    );
+    // A note in the ledger, not a question: nothing is left to decide.
     let event = ctx.commit(EventKind::Escalated {
         task: Some(task_id.to_string()),
-        body,
-        default_action: String::from("send the task back to a worker"),
+        body: format!(
+            "{} (files in conflict: {which})",
+            land::conflict_words(task_id)
+        ),
+        default_action: String::from("redo the task on top of the latest"),
     })?;
     crate::cmd::emit(ctx, &event)?;
     Ok(())
+}
+
+/// What a clashing landing prints: the plain sentence, then the files.
+pub(crate) fn conflict_message(task_id: &str, err: &land::LandError) -> String {
+    match err {
+        land::LandError::Conflict { files, .. } if !files.is_empty() => format!(
+            "{} (files in conflict: {})",
+            err.plain(task_id),
+            files.join(", ")
+        ),
+        _ => err.plain(task_id),
+    }
 }
 
 /// The line a landing prints: what happened, and what a human does next.
@@ -510,8 +541,9 @@ fn record_landing(
 ///
 /// Landing refuses a task without an engine-recorded cross-vendor review, so
 /// the marker is a claim the log already proves by the time this runs.
-fn render_task_body(task: &Task) -> String {
-    shprd_views::pr::task_pr_body_marked(task)
+fn render_task_body(ctx: &Ctx, state: &RunState, task: &Task) -> String {
+    let protected = shprd_git::changed::protected_for_task(&ctx.root, state, task);
+    shprd_views::pr::task_pr_body_flagged(task, &protected)
 }
 
 /// Writes one task's pull request body under shprd's own home.
@@ -619,6 +651,7 @@ fn check_full_gate(state: &RunState, head: &str) -> Result<(), CliError> {
 /// Pushes the branch, refreshes or opens the pull request, records it.
 fn open(
     ctx: &Ctx,
+    home: &Path,
     state: &RunState,
     events: &[Event],
     worktree: &integrate::IntegrationWorktree,
@@ -628,14 +661,18 @@ fn open(
         .run
         .as_ref()
         .ok_or_else(|| CliError::other(anyhow!("no run to land")))?;
-    let body = render_body(state, events);
+    let body = render_body(
+        state,
+        events,
+        &shprd_git::changed::protected_for_run(&ctx.root, state),
+    );
     let body_file = write_body(worktree, &body)?;
     let title = match integrated.first() {
         Some(task) => format!("{}: {}", run.run_id, task.title),
         None => run.run_id.clone(),
     };
     push(worktree, state, ctx)?;
-    let forge = forge(&worktree.path)?;
+    let forge = forge(&worktree.path, &gh_user(home, &ctx.root))?;
     let branch = worktree.branch.clone();
     let pr = match forge.find_open(&branch).map_err(|err| {
         CliError::other(anyhow!(err).context("asking the forge for the pull request"))
@@ -708,8 +745,8 @@ fn write_body(worktree: &integrate::IntegrationWorktree, body: &str) -> Result<P
 }
 
 /// The pull request body: the run's facts, the review marker, the attribution.
-fn render_body(state: &RunState, events: &[Event]) -> String {
-    let mut body = shprd_views::pr::pr_body(state, events);
+fn render_body(state: &RunState, events: &[Event], protected: &[String]) -> String {
+    let mut body = shprd_views::pr::pr_body_flagged(state, events, protected);
     if !body.ends_with('\n') {
         body.push('\n');
     }
@@ -819,6 +856,7 @@ pub(crate) fn short(sha: &str) -> &str {
 fn merge(
     ctx: &Ctx,
     config: &Config,
+    home: &Path,
     worktree: &integrate::IntegrationWorktree,
     head: &str,
 ) -> Result<(), CliError> {
@@ -838,7 +876,7 @@ fn merge(
     // The ledger's head is the branch, not the sha: the janitor deletes a
     // remote branch only when the merged pull request names it as its head.
     let branch = worktree.branch.clone();
-    let forge = forge(&worktree.path)?;
+    let forge = forge(&worktree.path, &gh_user(home, &ctx.root))?;
     let status = forge.status(number).map_err(|err| {
         CliError::other(anyhow!(err).context("asking the forge for the pull request"))
     })?;
@@ -930,9 +968,20 @@ fn choose_forge(env_value: Option<String>, debug: bool) -> ForgeChoice {
     }
 }
 
+/// The `gh` account this repository pins (`tasks.gh_user`, also written
+/// `land.gh_user`), or an empty string for whichever account is active.
+///
+/// A settings file that cannot be read pins nothing: the forge then reports
+/// its own error rather than the landing failing on settings.
+pub(crate) fn gh_user(home: &Path, repo: &Path) -> String {
+    shprd_core::settings::Loaded::read(home, Some(repo))
+        .map(|loaded| loaded.resolve(None).tasks().gh_user)
+        .unwrap_or_default()
+}
+
 /// The forge to drive: `gh` here, or, in a debug build, the script
 /// `SHPRD_FAKE_FORGE` names.
-fn forge(dir: &Path) -> Result<Box<dyn Forge>, CliError> {
+fn forge(dir: &Path, gh_user: &str) -> Result<Box<dyn Forge>, CliError> {
     let env_value =
         std::env::var_os(FAKE_FORGE_ENV).map(|value| value.to_string_lossy().into_owned());
     match choose_forge(env_value, cfg!(debug_assertions)) {
@@ -943,47 +992,31 @@ fn forge(dir: &Path) -> Result<Box<dyn Forge>, CliError> {
             })?;
             Ok(Box::new(fake))
         }
-        ForgeChoice::Gh => Ok(Box::new(GhForge::new(dir))),
+        ForgeChoice::Gh => Ok(Box::new(GhForge::new(dir).with_user(gh_user))),
     }
 }
 
 /// Whether a landing must take the local path instead of a forge.
 ///
 /// A repository with no remote has nowhere to push and no pull request to open,
-/// so it lands locally. So does one with a remote but no usable forge: `gh` is
-/// missing or signed out, and a landing that would fail at the first forge call
-/// can still put the work on the run's integration branch. A scripted forge in a
+/// so it lands locally. So does one whose remote is not at GitHub and has no
+/// forge `gh` can drive. A GitHub remote never lands locally, even when `gh` is
+/// missing or signed out: the landing then fails at the forge, because a merge
+/// in shprd's own worktree would move the local integration ref apart from
+/// origin and never reach GitHub. A scripted forge in a
 /// debug build is always usable, so the tests that drive one never take this
 /// path by accident.
 pub(crate) fn local_landing(git: &Git) -> bool {
-    if !shprd_git::worktree::has_remote(git) {
-        return true;
-    }
     if cfg!(debug_assertions)
         && std::env::var_os(FAKE_FORGE_ENV).is_some_and(|value| !value.is_empty())
     {
-        return false;
+        return !shprd_git::worktree::has_remote(git);
     }
-    !gh_ready(git.dir())
+    !(land::forge_expected(git) || land::uses_forge(git, |host| gh_ready(git.dir(), host)))
 }
 
-/// Whether `gh` is installed and signed in, asked in the repository it would
-/// drive.
-///
-/// `gh auth status` answers from the local configuration, so this makes no
-/// network call; anything it cannot answer counts as "no forge", which is the
-/// safe answer because the local path writes to shprd's own worktree only.
-fn gh_ready(dir: &Path) -> bool {
-    Command::new("gh")
-        .args(["auth", "status"])
-        .current_dir(dir)
-        .env("GH_PROMPT_DISABLED", "1")
-        .env("LC_ALL", "C")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+fn gh_ready(dir: &Path, host: &str) -> bool {
+    land::gh_authed(dir, host)
 }
 
 /// The config's `[land]`, with the repo file winning over the global one.
@@ -1008,6 +1041,20 @@ mod tests {
     use super::*;
     use shprd_core::event::{Actor, Finding, ReportStatus, ReviewSource, Severity};
     use shprd_core::rules::INTEGRATE_AFTER_FAILED_GATE;
+
+    /// A landing in a repository whose remote is at GitHub goes through the
+    /// forge, whether or not `gh` is signed in: it never takes the local path
+    /// that merged an override landing in shprd's own worktree.
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn a_github_remote_never_lands_locally_even_without_gh() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let git = Git::new(dir.path());
+        git.run(&["init", "-b", "main"]).expect("init");
+        git.run(&["remote", "add", "origin", "https://github.com/acme/w.git"])
+            .expect("remote");
+        assert!(!local_landing(&git));
+    }
 
     /// An event with `kind` at position `seq`.
     fn ev(seq: u64, kind: EventKind) -> Event {
@@ -1084,6 +1131,7 @@ mod tests {
                 attempt: 1,
                 reviewer: reviewer.to_string(),
                 degraded,
+                note: None,
             },
         )
     }
@@ -1207,25 +1255,26 @@ mod tests {
         assert!(marker.contains("no review was requested"), "{marker}");
     }
 
+    /// The marker under the new rules: a task can no longer be Passed by a
+    /// worker gate with a review requested and no verdict (it stays Reported),
+    /// so the one pass with no review behind it is review being off, recorded as
+    /// `ReviewSkipped`. A run that landed such a task is `degraded-review`.
     #[test]
-    fn an_independent_review_without_a_passed_gate_is_degraded() {
+    fn a_task_passed_with_review_off_is_degraded() {
         let mut log = reported_log("T1");
-        log.push(reviewed(5, "T1", "c1", false));
-        // Its own gates passed; only the review gate is missing.
         log.push(ev(
-            6,
-            EventKind::GatePassed {
+            5,
+            EventKind::ReviewSkipped {
                 task: "T1".to_string(),
                 attempt: 1,
-                gate: "lint".to_string(),
-                findings: Vec::new(),
-                source: None,
             },
         ));
-        log.push(integrated(7, "T1"));
-        let marker = review_marker(&folded(&log));
+        log.push(integrated(6, "T1"));
+        let state = folded(&log);
+        assert_eq!(state.tasks["T1"].status, TaskStatus::Integrated);
+        let marker = review_marker(&state);
         assert!(marker.starts_with(REVIEW_DEGRADED), "{marker}");
-        assert!(marker.contains("no passed review gate"), "{marker}");
+        assert!(marker.contains("T1: no review was requested"), "{marker}");
     }
 
     #[test]

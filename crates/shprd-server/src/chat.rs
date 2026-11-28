@@ -28,14 +28,19 @@
 use std::path::PathBuf;
 
 use shprd_agents::spec::{HarnessSpec, TranscriptFormat};
-use shprd_agents::transcript::Transcript;
+use shprd_agents::transcript::{PendingQuestion, Transcript};
 use shprd_core::settings::{Loaded, RoleKind};
 use shprd_core::state::{RunState, Task};
 
 use crate::api::AppState;
-use crate::dto::{ChatDto, ChatMessageDto, ChatSendDto, ChatSendReply, ChatToolDto};
+use crate::attachments;
+use crate::dto::{
+    ChatAnswerDto, ChatAnswerReply, ChatDto, ChatMessageDto, ChatOptionDto, ChatQuestionDto,
+    ChatSendDto, ChatSendReply, ChatStopDto, ChatStopReply, ChatToolDto,
+};
 use crate::error::ApiReject;
 use crate::ledger;
+use crate::terminal::TermKey;
 
 /// The word a client uses for the coordinator's space.
 pub const COORDINATOR: &str = "coordinator";
@@ -45,6 +50,15 @@ pub const COORDINATOR: &str = "coordinator";
 /// (a custom role may be one too, and then it is the one the settings order
 /// puts first).
 const COORDINATOR_ID: &str = "coordinator";
+
+/// One thing pressed or typed to answer a dialog in a terminal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AnswerStep {
+    /// One key press.
+    Key(TermKey),
+    /// Words typed at the cursor, without a newline.
+    Text(String),
+}
 
 /// What the service needs to type a chat line into a space.
 ///
@@ -61,6 +75,45 @@ pub trait ChatWriter: Send + Sync {
     /// open; the caller tells the person and nothing is retried, because
     /// retyping a message the agent may have read already is worse than not.
     fn send(&self, space: Option<&str>, text: &str) -> Result<(), String>;
+
+    /// Press Escape in `space`'s agent, which every supported program takes as
+    /// "stop what you are doing". A host that cannot press a key says so.
+    fn interrupt(&self, _space: Option<&str>) -> Result<(), String> {
+        Err(String::from(
+            "this service cannot press a key in a terminal",
+        ))
+    }
+
+    /// Press `steps` in `space`'s agent, one after the other, to answer the
+    /// dialog its terminal shows. A host that cannot press keys says so.
+    fn answer(&self, _space: Option<&str>, _steps: &[AnswerStep]) -> Result<(), String> {
+        Err(String::from(
+            "this service cannot press a key in a terminal",
+        ))
+    }
+
+    /// When the agent `send` types into for `space` started, in epoch
+    /// milliseconds, when the host says. The chat shows the conversation that
+    /// agent began, not the newest one in its folder (a person's own, or an
+    /// earlier coordinator's, can be newer). `None` is not knowing.
+    fn started_ms(&self, _space: Option<&str>) -> Option<u64> {
+        None
+    }
+
+    /// Whether shprd's own coordinator is running now, when the host can say:
+    /// `Some(false)` is "none is" (never another product's Assistant in the
+    /// same folder), `None` is not knowing. With no coordinator the chat shows
+    /// no conversation at all, because the newest one in the folder is not shprd's.
+    fn coordinator_running(&self) -> Option<bool> {
+        None
+    }
+
+    /// What the last `send` did on its own first, as one plain sentence, taken
+    /// once: the chat shows it with the answer and it is not said again. `None`
+    /// is nothing.
+    fn take_notice(&self) -> Option<String> {
+        None
+    }
 }
 
 /// The writer a service holds, with a `Debug` that never prints a host.
@@ -68,7 +121,34 @@ pub trait ChatWriter: Send + Sync {
 /// A host has no printable state and a service is logged with its state in tow,
 /// so the wrapper says only whether one is wired.
 #[derive(Clone, Default)]
-pub struct ChatHost(Option<std::sync::Arc<dyn ChatWriter>>);
+pub struct ChatHost {
+    writer: Option<std::sync::Arc<dyn ChatWriter>>,
+    /// What the background deliveries and transcript watchers share.
+    shared: std::sync::Arc<Shared>,
+}
+
+/// State the chat keeps between requests: deliveries that failed after the
+/// send had returned, and the transcripts a watcher is following.
+#[derive(Default)]
+struct Shared {
+    /// A delivery's failure, by space, until the next page says it once.
+    failures: std::sync::Mutex<std::collections::BTreeMap<String, String>>,
+    /// The transcript files a watcher thread is following now.
+    watched: std::sync::Mutex<std::collections::BTreeSet<PathBuf>>,
+    /// Epoch ms of the last page read, so an idle watcher ends.
+    last_read_ms: std::sync::atomic::AtomicU64,
+}
+
+/// How long a send waits for the host before answering "accepted" (ms): a
+/// failure the host reports at once still refuses the send; a slow delivery
+/// (the draft hold) goes on in the background.
+const ACCEPT_GRACE_MS: u64 = 150;
+
+/// How often a watcher looks at a transcript's size (ms).
+const WATCH_EVERY_MS: u64 = 100;
+
+/// How long a watcher outlives the last page read (ms).
+const WATCH_IDLE_MS: u64 = 120_000;
 
 impl ChatHost {
     /// A host with no writer: a send is refused rather than pretended.
@@ -78,19 +158,22 @@ impl ChatHost {
 
     /// The host that types chat lines through `writer`.
     pub fn with(writer: std::sync::Arc<dyn ChatWriter>) -> Self {
-        Self(Some(writer))
+        Self {
+            writer: Some(writer),
+            shared: std::sync::Arc::default(),
+        }
     }
 
     /// The writer, when one is wired.
     pub fn get(&self) -> Option<&std::sync::Arc<dyn ChatWriter>> {
-        self.0.as_ref()
+        self.writer.as_ref()
     }
 }
 
 impl std::fmt::Debug for ChatHost {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ChatHost")
-            .field("wired", &self.0.is_some())
+            .field("wired", &self.writer.is_some())
             .finish()
     }
 }
@@ -141,10 +224,18 @@ struct Place {
     cwd: PathBuf,
     /// What to say when there is nothing to read, if anything is already known.
     note: Option<String>,
+    /// When the agent started, when known: only a conversation begun then or
+    /// later is its own.
+    since_ms: Option<u64>,
 }
 
 /// `GET /api/chat`: the messages a space's agent record gained since `since`.
-pub(crate) fn page(state: &AppState, space: &Space, since: &str) -> Result<ChatDto, ApiReject> {
+pub(crate) fn page(
+    state: &AppState,
+    space: &Space,
+    since: &str,
+    before: &str,
+) -> Result<ChatDto, ApiReject> {
     let place = place_of(state, space)?;
     let mut answer = ChatDto {
         space: space.name().to_owned(),
@@ -153,11 +244,27 @@ pub(crate) fn page(state: &AppState, space: &Space, since: &str) -> Result<ChatD
         messages: Vec::new(),
         cursor: since.to_owned(),
         more: false,
+        older: None,
         note: place.note.clone(),
+        question: None,
     };
     let Some(program) = place.program.as_deref() else {
         return Ok(answer);
     };
+    // No shprd coordinator is running: the chat reads nothing from the folder.
+    // The newest conversation there can be another product's Assistant, which is
+    // never shown here.
+    if matches!(space, Space::Coordinator)
+        && state
+            .chat
+            .get()
+            .is_some_and(|writer| writer.coordinator_running() == Some(false))
+    {
+        answer.note = Some(String::from(
+            "shprd's coordinator isn't running yet: shprd starts it for this space",
+        ));
+        return Ok(answer);
+    }
     let Some(spec) = harness_spec(state, program)? else {
         answer.note = Some(format!(
             "no harness entry for {program:?}: the chat reads the programs in the data directory"
@@ -180,7 +287,15 @@ pub(crate) fn page(state: &AppState, space: &Space, since: &str) -> Result<ChatD
              transcript: start `shprd serve` from a build that passes $HOME in",
         )
     })?;
-    let Some(transcript) = Transcript::locate_in(&spec.transcript, roots, &place.cwd) else {
+    let Some(transcript) =
+        Transcript::locate_since(&spec.transcript, roots, &place.cwd, place.since_ms)
+    else {
+        if place.since_ms.is_some() {
+            answer.note = Some(format!(
+                "the coordinator ({program}) has not said anything yet: its conversation starts with its first turn"
+            ));
+            return Ok(answer);
+        }
         answer.note = Some(match spec.transcript.format {
             // OpenCode's store and database are session stores rather than one
             // file a session; a missing one is a program that has not run here.
@@ -194,12 +309,35 @@ pub(crate) fn page(state: &AppState, space: &Space, since: &str) -> Result<ChatD
         });
         return Ok(answer);
     };
-    let page = transcript
-        .read(since)
-        .map_err(|err| ApiReject::internal(err.to_string()))?;
+    watch_transcript(state, &transcript);
+    // A question the terminal waits on is the card at the bottom of the chat,
+    // whatever page of the conversation this is. A record that cannot be read for a
+    // moment (an agent restarting) leaves the card out; it does not fail the page.
+    answer.question = transcript
+        .pending_question()
+        .ok()
+        .flatten()
+        .as_ref()
+        .map(question_dto);
+    // No cursor of this session (a first read, a panel that reloaded, an agent
+    // that started a new session) opens at the newest messages; a cursor of this
+    // session follows forward; `before` goes back through history.
+    let page = if transcript.names(before) {
+        transcript.read_before(before)
+    } else if transcript.names(since) {
+        transcript.read(since)
+    } else {
+        transcript.read_tail()
+    }
+    .map_err(|err| ApiReject::internal(err.to_string()))?;
     answer.session = Some(transcript.session().to_owned());
-    answer.cursor = page.cursor;
+    answer.cursor = if transcript.names(before) {
+        since.to_owned()
+    } else {
+        page.cursor
+    };
     answer.more = page.more;
+    answer.older = page.older;
     answer.messages = page
         .messages
         .into_iter()
@@ -223,6 +361,138 @@ pub(crate) fn page(state: &AppState, space: &Space, since: &str) -> Result<ChatD
     Ok(answer)
 }
 
+/// The card a pending question is, as a client draws it: the dialog's first
+/// question with its choices.
+fn question_dto(pending: &PendingQuestion) -> ChatQuestionDto {
+    let first = &pending.questions[0];
+    ChatQuestionDto {
+        id: pending.id.clone(),
+        header: first.header.clone(),
+        question: first.question.clone(),
+        options: first
+            .options
+            .iter()
+            .map(|option| ChatOptionDto {
+                label: option.label.clone(),
+                description: option.description.clone(),
+            })
+            .collect(),
+        multi_select: first.multi_select,
+        more: (pending.questions.len() - 1) as u32,
+        answerable: pending.questions.len() == 1 && !first.multi_select,
+    }
+}
+
+/// The keys that answer a one-question, one-choice dialog, the same a person
+/// presses: Down to the row, Enter. `choice` is 0-based; the row after the last
+/// option is "Type something", an inline text row: once the cursor is on it the
+/// answer is typed straight in and Enter sends. A leading Enter there would
+/// submit it empty, and claude declines the question (checked against a real
+/// claude dialog, claude 2.1.332).
+pub fn answer_steps(choice: usize, text: Option<&str>) -> Vec<AnswerStep> {
+    let mut steps: Vec<AnswerStep> = (0..choice)
+        .map(|_| AnswerStep::Key(TermKey::Down))
+        .collect();
+    if let Some(text) = text {
+        let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        steps.push(AnswerStep::Text(one_line));
+    }
+    steps.push(AnswerStep::Key(TermKey::Enter));
+    steps
+}
+
+/// The question `space`'s terminal waits on, read from its agent's record.
+///
+/// `None` is nothing waiting, or a record this service cannot read: a send that
+/// cannot tell is not stopped by it.
+pub(crate) fn pending_question(state: &AppState, space: &Space) -> Option<PendingQuestion> {
+    let place = place_of(state, space).ok()?;
+    let program = place.program.as_deref()?;
+    let spec = harness_spec(state, program).ok()??;
+    let roots = state.transcript_roots.as_ref()?;
+    let transcript = Transcript::locate_since(&spec.transcript, roots, &place.cwd, place.since_ms)?;
+    transcript.pending_question().ok()?
+}
+
+/// `GET /api/chat`'s answer, with a delivery failure the person has not heard
+/// of yet said once in its note.
+pub(crate) fn page_with_failure(
+    state: &AppState,
+    space: &Space,
+    since: &str,
+    before: &str,
+) -> Result<ChatDto, ApiReject> {
+    state
+        .chat
+        .shared
+        .last_read_ms
+        .store(now_ms(), std::sync::atomic::Ordering::Relaxed);
+    let mut answer = page(state, space, since, before)?;
+    let failed = state
+        .chat
+        .shared
+        .failures
+        .lock()
+        .ok()
+        .and_then(|mut held| held.remove(space.name()));
+    if let Some(reason) = failed {
+        answer.note = Some(format!(
+            "Your last message was not delivered: {reason}. Nothing was sent"
+        ));
+    }
+    Ok(answer)
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Follows a transcript file's size and publishes a change when it grows, so a
+/// client's chat refreshes within ~`WATCH_EVERY_MS` of a reply chunk instead of
+/// waiting for its poll. One thread per file; it ends when nobody reads the
+/// chat for [`WATCH_IDLE_MS`].
+fn watch_transcript(state: &AppState, transcript: &Transcript) {
+    let Some(path) = transcript.path().map(std::path::Path::to_path_buf) else {
+        return;
+    };
+    let shared = std::sync::Arc::clone(&state.chat.shared);
+    let started = shared
+        .watched
+        .lock()
+        .map(|mut held| held.insert(path.clone()))
+        .unwrap_or(false);
+    if !started {
+        return;
+    }
+    let hub = state.hub.clone();
+    std::thread::spawn(move || {
+        let size = |p: &std::path::Path| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+        let mut last = size(&path);
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(WATCH_EVERY_MS));
+            let idle = now_ms().saturating_sub(
+                shared
+                    .last_read_ms
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            );
+            if idle > WATCH_IDLE_MS {
+                break;
+            }
+            let now = size(&path);
+            if now != last {
+                last = now;
+                hub.poke();
+            }
+        }
+        if let Ok(mut held) = shared.watched.lock() {
+            held.remove(&path);
+        }
+    });
+}
+
 /// `POST /api/chat`: type one turn into a space's agent, as the person.
 pub(crate) fn send(state: &AppState, body: &[u8]) -> Result<ChatSendReply, ApiReject> {
     let request: ChatSendDto = serde_json::from_slice(body).map_err(|err| {
@@ -231,9 +501,10 @@ pub(crate) fn send(state: &AppState, body: &[u8]) -> Result<ChatSendReply, ApiRe
         ))
     })?;
     let text = request.text.trim();
-    if text.is_empty() {
+    let attachments = request.attachments.unwrap_or_default();
+    if text.is_empty() && attachments.is_empty() {
         return Err(ApiReject::bad_request(
-            "a chat message needs some words: `text` was empty, so nothing was typed",
+            "a chat message needs some words or a file: `text` was empty, so nothing was typed",
         ));
     }
     let space = Space::parse(Some(&request.space));
@@ -243,15 +514,170 @@ pub(crate) fn send(state: &AppState, body: &[u8]) -> Result<ChatSendReply, ApiRe
              with the host wired. Nothing was sent",
         )
     })?;
+    // A terminal on a question refuses a typed line (or takes it into the
+    // dialog): say so, typed, before anything is stored or typed.
+    if pending_question(state, &space).is_some() {
+        return Err(ApiReject::question_waiting());
+    }
     // Resolving the space first means a task that does not exist is refused
     // before anything is typed anywhere.
-    place_of(state, &space)?;
-    writer
-        .send(space.target(), text)
-        .map_err(|reason| ApiReject::refused(format!("{reason}. Nothing was sent")))?;
+    let began = std::time::Instant::now();
+    let place = place_of(state, &space)?;
+    let resolved = began.elapsed();
+    // Files go where the agent reads without asking (its own working
+    // directory), and the message names the copies.
+    let stored = attachments::store(&place.cwd, &attachments)?;
+    let message = attachments::compose(text, &stored);
+    let stored_at = began.elapsed();
+    // Delivery (which may hold a draft for seconds) runs off the request: the
+    // person's send returns once the host has had a moment to refuse it.
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<Result<(), String>>();
+    let background = BackgroundSend {
+        writer: std::sync::Arc::clone(writer),
+        shared: std::sync::Arc::clone(&state.chat.shared),
+        hub: state.hub.clone(),
+        space: space.clone(),
+        message,
+        stored,
+        began,
+    };
+    let delivered_after = stored_at;
+    std::thread::spawn(move || background.run(done_tx, resolved, delivered_after));
+    if let Ok(Err(reason)) = done_rx.recv_timeout(std::time::Duration::from_millis(ACCEPT_GRACE_MS))
+    {
+        // The host's own refusal of a line typed at a dialog, when the record
+        // could not say so first.
+        if reason.contains("blocked (question)") {
+            return Err(ApiReject::question_waiting());
+        }
+        return Err(ApiReject::refused(format!("{reason}. Nothing was sent")));
+    }
+    tracing::debug!(
+        returned_ms = began.elapsed().as_millis() as u64,
+        "chat send returned"
+    );
     Ok(ChatSendReply {
         space: space.name().to_owned(),
         sent: true,
+        notice: writer.take_notice(),
+    })
+}
+
+/// One accepted message, on its way to the agent's pane.
+struct BackgroundSend {
+    writer: std::sync::Arc<dyn ChatWriter>,
+    shared: std::sync::Arc<Shared>,
+    hub: crate::hub::Hub,
+    space: Space,
+    message: String,
+    stored: Vec<PathBuf>,
+    began: std::time::Instant,
+}
+
+impl BackgroundSend {
+    fn run(
+        self,
+        done: std::sync::mpsc::Sender<Result<(), String>>,
+        resolved: std::time::Duration,
+        stored_at: std::time::Duration,
+    ) {
+        let typed = self.writer.send(self.space.target(), &self.message);
+        tracing::debug!(
+            resolve_ms = resolved.as_millis() as u64,
+            attachments_ms = (stored_at - resolved).as_millis() as u64,
+            deliver_ms = (self.began.elapsed() - stored_at).as_millis() as u64,
+            ok = typed.is_ok(),
+            "chat send hops"
+        );
+        match &typed {
+            Ok(()) => {}
+            Err(reason) => {
+                // Nothing reached the agent, so the copies are not left behind for a retry to repeat.
+                attachments::discard(&self.stored);
+                if let Ok(mut held) = self.shared.failures.lock() {
+                    held.insert(self.space.name().to_owned(), reason.clone());
+                }
+            }
+        }
+        // The line is in the pane (or the failure is waiting): tell every
+        // watching client now rather than at its next poll.
+        self.hub.poke();
+        let _ = done.send(typed);
+    }
+}
+
+/// `POST /api/chat/answer`: answer the question a space's terminal waits on,
+/// pressing the keys a person would.
+pub(crate) fn answer(state: &AppState, body: &[u8]) -> Result<ChatAnswerReply, ApiReject> {
+    let request: ChatAnswerDto = serde_json::from_slice(body).map_err(|err| {
+        ApiReject::bad_request(format!(
+            "the body is not an answer: {err}; send {{\"space\": \"coordinator\", \"id\": \"…\", \"option\": 1}} or \"text\""
+        ))
+    })?;
+    let space = Space::parse(Some(&request.space));
+    let writer = state.chat.get().ok_or_else(|| {
+        ApiReject::refused("this service cannot press a key in a terminal. Nothing was answered")
+    })?;
+    let waiting = pending_question(state, &space).filter(|pending| pending.id == request.id);
+    let Some(waiting) = waiting else {
+        return Err(ApiReject::refused(
+            "that question is not waiting any more. Nothing was answered",
+        ));
+    };
+    let dto = question_dto(&waiting);
+    if !dto.answerable {
+        return Err(ApiReject::refused(
+            "this dialog has several questions or several choices: answer it in the terminal",
+        ));
+    }
+    let steps = match (request.option, request.text.as_deref().map(str::trim)) {
+        (Some(option), _) => {
+            let at = (option as usize)
+                .checked_sub(1)
+                .filter(|at| *at < dto.options.len());
+            let Some(at) = at else {
+                return Err(ApiReject::bad_request(format!(
+                    "the question has {} choices: `option` counts from 1",
+                    dto.options.len()
+                )));
+            };
+            answer_steps(at, None)
+        }
+        (None, Some(text)) if !text.is_empty() => answer_steps(dto.options.len(), Some(text)),
+        _ => {
+            return Err(ApiReject::bad_request(
+                "an answer needs a choice (`option`) or some words (`text`)",
+            ));
+        }
+    };
+    writer
+        .answer(space.target(), &steps)
+        .map_err(|reason| ApiReject::refused(format!("{reason}. Nothing was answered")))?;
+    state.hub.poke();
+    Ok(ChatAnswerReply {
+        space: space.name().to_owned(),
+        answered: true,
+    })
+}
+
+/// `POST /api/chat/stop`: press Escape in a space's agent, as the person.
+pub(crate) fn stop(state: &AppState, body: &[u8]) -> Result<ChatStopReply, ApiReject> {
+    let request: ChatStopDto = serde_json::from_slice(body).map_err(|err| {
+        ApiReject::bad_request(format!(
+            "the body is not a stop request: {err}; send {{\"space\": \"coordinator\"}}"
+        ))
+    })?;
+    let space = Space::parse(Some(&request.space));
+    let writer = state.chat.get().ok_or_else(|| {
+        ApiReject::refused("this service cannot press a key in a terminal. Nothing was stopped")
+    })?;
+    place_of(state, &space)?;
+    writer
+        .interrupt(space.target())
+        .map_err(|reason| ApiReject::refused(format!("{reason}. Nothing was stopped")))?;
+    Ok(ChatStopReply {
+        space: space.name().to_owned(),
+        stopped: true,
     })
 }
 
@@ -270,6 +696,8 @@ fn coordinator_place(state: &AppState) -> Result<Place, ApiReject> {
         program: None,
         cwd: state.repo.clone(),
         note: None,
+        // The conversation shown is the one of the agent a chat line reaches.
+        since_ms: state.chat.get().and_then(|writer| writer.started_ms(None)),
     };
     let Some(home) = state.home.as_deref() else {
         place.note = Some(String::from(
@@ -330,12 +758,14 @@ fn task_place(state: &AppState, task: &str) -> Result<Place, ApiReject> {
             note: Some(format!(
                 "{task} has not started: there is no attempt to read a conversation from"
             )),
+            since_ms: None,
         });
     };
     Ok(Place {
         program: Some(attempt.agent.clone()),
         cwd: PathBuf::from(&attempt.worktree),
         note: None,
+        since_ms: None,
     })
 }
 

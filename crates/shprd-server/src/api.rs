@@ -19,11 +19,11 @@ use axum::Router;
 use axum::body::Bytes;
 use axum::extract::ws::rejection::WebSocketUpgradeRejection;
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade, close_code};
-use axum::extract::{Path as UrlPath, Query, State};
-use axum::http::StatusCode;
+use axum::extract::{DefaultBodyLimit, Path as UrlPath, Query, State};
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
-use axum::{Json, middleware};
+use axum::routing::{delete, get, post};
+use axum::{Extension, Json, middleware};
 use serde::Deserialize;
 use serde_json::Value;
 use shprd_agents::data::DataDir;
@@ -32,22 +32,33 @@ use shprd_core::log::{Clock, SystemClock};
 use tower_http::trace::TraceLayer;
 
 use crate::actions;
+use crate::agents::AgentOpener;
 use crate::auth;
 use crate::chat::{self, ChatHost, ChatWriter, Space};
 use crate::dto::{
-    Action, ActionReply, AnswerAsk, AskListDto, AskReply, ChangeDto, ChatDto, ChatSendReply,
-    ClientMessage, ErrorCode, GraphDto, HealthDto, PromptDto, PromptListDto, RosterDto,
-    SettingsDto, SettingsWriteDto, SnapshotDto, WsMessage,
+    Action, ActionReply, AgentTabDto, AnswerAsk, AskListDto, AskReply, ChangeDto, ChatAnswerReply,
+    ChatDto, ChatSendReply, ChatStopReply, ClientMessage, ErrorCode, GraphDto, HealthDto,
+    PromptDto, PromptListDto, RosterDto, SettingsDto, SettingsWriteDto, SnapshotDto, WsMessage,
 };
 use crate::engine::Engine;
 use crate::error::{ApiReject, ServerError};
 use crate::hub::Hub;
 use crate::ledger::{self, Stamp};
 use crate::prompts as prompts_api;
+use crate::remote as login;
 use crate::roster as roster_api;
 use crate::service::{AfterWrite, ServiceFiles, ServiceInfo, VERSION};
 use crate::settings as settings_api;
 use crate::tasks;
+use crate::tunnels;
+
+/// The largest body any route accepts, in bytes.
+///
+/// A JSON request is small; a file upload will get its own, larger limit when it
+/// exists. The bound is here because the same listener may be on a tunnel: a
+/// request with no limit is a request that can fill memory (M7d §4.4, "body
+/// size").
+pub const BODY_LIMIT: usize = 1024 * 1024;
 
 /// How long a change request waits when it does not say.
 const DEFAULT_WAIT: Duration = Duration::from_secs(10);
@@ -172,6 +183,26 @@ pub(crate) struct AppState {
     /// A service without one answers `POST /api/chat` with a refusal rather
     /// than pretending the line went somewhere.
     pub(crate) chat: ChatHost,
+    /// What watches and types into a pane for the terminal socket, when the
+    /// caller has a host ([`App::with_terminal_host`]).
+    pub(crate) terminal: crate::terminal::TerminalPort,
+    /// The login, the sessions and the gate that stands in front of a tunnel.
+    ///
+    /// It is always present: the gate is what decides whether a request has a
+    /// credential at all, and a service with no [`shprd_remote::Gateway`] would
+    /// be one with no rule. A test that wants a fake clock replaces it
+    /// ([`App::with_clock`]).
+    pub(crate) remote: Arc<shprd_remote::Gateway>,
+    /// What starts a program in a new tab, when the caller has a host.
+    ///
+    /// "Start an agent" in the tab bar's "+" menu is a host verb — a terminal is
+    /// opened and a CLI started in it — so the binary passes its adapter in
+    /// ([`App::with_agent_opener`]) exactly as it passes the chat writer and the
+    /// tick's spawn path. A service without one refuses `POST /api/agents`
+    /// rather than pretending a tab exists.
+    pub(crate) agents: crate::agents::Agents,
+    /// The agents the host lists, headless, for `live_agents`.
+    pub(crate) live: crate::live::LiveAgents,
     /// The home and data home the agent CLIs run with, when the caller resolved
     /// them.
     ///
@@ -182,6 +213,18 @@ pub(crate) struct AppState {
     /// it unset, and a chat then says it was not told rather than looking in a
     /// directory that can never hold a session.
     pub(crate) transcript_roots: Option<shprd_agents::transcript::Roots>,
+    /// Where the built web app's files come from.
+    ///
+    /// Production serves the build embedded in this binary ([`crate::web`]); a
+    /// test points this at a directory of its own ([`App::with_web_dir`]) so the
+    /// SPA fallback and the cache headers are proven without needing `web/dist`
+    /// to have been built.
+    pub(crate) web: crate::web::Source,
+    /// The one tunnel, if there is one: started, watched and stopped here.
+    pub(crate) tunnels: shprd_remote::tunnel::TunnelManager,
+    /// How a tunnel is built, kept so the manager can be rebuilt when the `PATH`
+    /// it looks for programs on is replaced.
+    pub(crate) tunnel_factory: Arc<dyn shprd_remote::tunnel::TunnelFactory>,
 }
 
 /// The directories the binary resolved for the service.
@@ -204,6 +247,94 @@ pub(crate) struct Paths {
     pub(crate) dagr: Option<crate::graph::Dagr>,
     /// The home and data home the agent CLIs run with, when there is one.
     pub(crate) transcript_roots: Option<shprd_agents::transcript::Roots>,
+    /// The hostnames this service answers to besides loopback.
+    ///
+    /// The binary passes the set a tunnel added; a test passes its own. The
+    /// empty set is loopback only, which is a service nobody put on the internet.
+    pub(crate) allowed_hosts: shprd_remote::AllowedHosts,
+}
+
+/// What every repository served by one service shares: the discovery files, the
+/// gate (one token, one password, one set of sessions), the tunnel and what the
+/// machine resolved. A repository's own slot is this state with its own repo,
+/// hub, host adapters and tick laid over it ([`crate::repos`]).
+pub(crate) struct Shared;
+
+impl Shared {
+    /// Takes the state directory's lock, prepares the gate and writes
+    /// `service.json` for `port`; answers the files and the base state, whose
+    /// `repo` is `root` or empty.
+    pub(crate) fn prepare(
+        state_dir: &Path,
+        port: u16,
+        actor: &Actor,
+        paths: Paths,
+        root: Option<&Path>,
+    ) -> Result<(ServiceFiles, AppState), ServerError> {
+        let files = match root {
+            Some(root) => ServiceFiles::prepare(state_dir)?.with_root(root),
+            None => ServiceFiles::prepare(state_dir)?,
+        };
+        // The gate is prepared before the record, so a client that finds the
+        // record finds a service that can already answer it.
+        let gateway = shprd_remote::Gateway::new(state_dir, Arc::new(SystemClock))
+            .with_token(files.token())
+            .with_hosts(paths.allowed_hosts.clone());
+        // A session that has expired is not found whatever happens, so this is
+        // tidying: the file a start leaves behind never holds dead rows.
+        if let Err(err) = gateway.sessions().purge() {
+            tracing::warn!(%err, "could not tidy the expired sessions");
+        }
+        // A new service has no tunnel, whatever a service that was killed left in
+        // `web.json`; the manager says so before anything can read it.
+        let tunnel_factory: Arc<dyn shprd_remote::tunnel::TunnelFactory> = Arc::new(
+            shprd_remote::tunnel::SystemTunnels::new(paths.path_env.clone().unwrap_or_default()),
+        );
+        let tunnels = shprd_remote::tunnel::TunnelManager::new(
+            state_dir,
+            &gateway,
+            Arc::new(SystemClock),
+            tunnel_factory.clone(),
+        );
+        tunnels.reset();
+        // The change file goes before the record, so a client that polls for
+        // `service.json` never finds a record whose change file is missing.
+        if let Some(root) = root {
+            let _ = crate::changes::touch(state_dir, ledger::last_seq(root).unwrap_or(0));
+        }
+        files.write_record(port)?;
+        let state = AppState {
+            repo: root.map(Path::to_path_buf).unwrap_or_default(),
+            port,
+            token: files.token().to_string(),
+            id: files.id().to_string(),
+            version: VERSION.to_string(),
+            actor: actor.clone(),
+            hub: Hub::new(),
+            after_write: None,
+            ws: WsLimits::default(),
+            // Everything the service reads from the machine is resolved by the
+            // binary and carried in ([`crate::service::Config`]); a service
+            // prepared by hand reads nothing of the process's environment.
+            remote: Arc::new(gateway),
+            home: paths.home,
+            state_dir: state_dir.to_path_buf(),
+            data: paths.data,
+            engine: None,
+            prompts_dir: paths.prompts_dir,
+            path_env: paths.path_env,
+            dagr: paths.dagr,
+            chat: ChatHost::new(),
+            terminal: crate::terminal::TerminalPort::new(),
+            agents: crate::agents::Agents::new(),
+            live: crate::live::LiveAgents::new(),
+            transcript_roots: paths.transcript_roots,
+            web: crate::web::Source::Embedded,
+            tunnels,
+            tunnel_factory,
+        };
+        Ok((files, state))
+    }
 }
 
 /// One prepared service: its state, its router and its discovery files.
@@ -273,36 +404,12 @@ impl App {
         hub: Hub,
         paths: Paths,
     ) -> Result<Self, ServerError> {
-        let files = ServiceFiles::prepare(state_dir)?;
-        // A mod that starts before the run moves has nothing to watch for: the
-        // change file is written once here, naming the log as it stands, so a
-        // panel's first look at it is a real answer rather than a missing file.
-        // It goes before the record, so a client that polls for `service.json`
-        // never finds a record whose change file is still missing.
-        let _ = crate::changes::touch(state_dir, ledger::last_seq(repo).unwrap_or(0));
-        files.write_record(port)?;
+        let (files, base) = Shared::prepare(state_dir, port, actor, paths, Some(repo))?;
         let state = AppState {
             repo: repo.to_path_buf(),
-            port,
-            token: files.token().to_string(),
-            id: files.id().to_string(),
-            version: VERSION.to_string(),
-            actor: actor.clone(),
             hub,
             after_write,
-            ws: WsLimits::default(),
-            // Everything the service reads from the machine is resolved by the
-            // binary and carried in ([`crate::service::Config`]); a service
-            // prepared by hand reads nothing of the process's environment.
-            home: paths.home,
-            state_dir: state_dir.to_path_buf(),
-            data: paths.data,
-            engine: None,
-            prompts_dir: paths.prompts_dir,
-            path_env: paths.path_env,
-            dagr: paths.dagr,
-            chat: ChatHost::new(),
-            transcript_roots: paths.transcript_roots,
+            ..base
         };
         let router = router(state.clone());
         Ok(Self {
@@ -417,6 +524,13 @@ impl App {
     /// A test passes a directory of its own — or nothing at all, which keeps
     /// every listing off the machine.
     pub fn with_path_env(mut self, path_env: Option<String>) -> Self {
+        // The tunnel programs are looked up on this same `PATH`, so the factory
+        // follows it. A service that has already started a tunnel is not
+        // re-pathed: this is a builder, used before the service serves.
+        self.state.tunnel_factory = Arc::new(shprd_remote::tunnel::SystemTunnels::new(
+            path_env.clone().unwrap_or_default(),
+        ));
+        self.state.tunnels = self.new_tunnels();
         self.state.path_env = path_env;
         self.router = router(self.state.clone());
         self
@@ -476,6 +590,140 @@ impl App {
         self
     }
 
+    /// Watch and type into panes through `host`, for `GET /api/terminal`.
+    ///
+    /// The binary passes the host it drives; a test passes a fake pane, so no
+    /// terminal is ever reached by a test.
+    pub fn with_terminal_host(self, host: Arc<dyn crate::terminal::TerminalHost>) -> Self {
+        self.with_terminal_opt(Some(host))
+    }
+
+    /// [`App::with_terminal_host`], for a caller that may not have one.
+    pub(crate) fn with_terminal_opt(
+        mut self,
+        host: Option<Arc<dyn crate::terminal::TerminalHost>>,
+    ) -> Self {
+        self.state.terminal = match host {
+            Some(host) => crate::terminal::TerminalPort::with(host),
+            None => crate::terminal::TerminalPort::new(),
+        };
+        self.router = router(self.state.clone());
+        self
+    }
+
+    /// Count the login's rate limits and session clocks against `clock`.
+    ///
+    /// A test moves time rather than waiting for it; the service itself always
+    /// uses [`shprd_core::log::SystemClock`]. The gateway is rebuilt, so the
+    /// password, sessions and hostnames this service already had are kept.
+    pub fn with_clock(mut self, clock: Arc<dyn Clock + Send + Sync>) -> Self {
+        let hosts = self.state.remote.hosts();
+        // The storm signal is carried over: the tunnel manager holds the same
+        // handle, and a rebuilt gateway that started its own would leave it
+        // watching a counter nothing moves.
+        let storm = self.state.remote.storm();
+        self.state.remote = Arc::new(
+            shprd_remote::Gateway::new(&self.state.state_dir, clock)
+                .with_token(self.state.token.clone())
+                .with_hosts(hosts)
+                .with_storm(storm),
+        );
+        self.router = router(self.state.clone());
+        self
+    }
+
+    /// Start programs in new tabs through `opener`.
+    ///
+    /// The binary passes the host it drives; a test passes a recorder, so the
+    /// route is proved without a terminal and a person's window is never opened
+    /// by a test.
+    pub fn with_agent_opener(self, opener: Arc<dyn crate::agents::AgentOpener>) -> Self {
+        self.with_agent_opener_opt(Some(opener))
+    }
+
+    /// [`App::with_agent_opener`], for a caller that may not have one.
+    ///
+    /// It is the same shape as [`App::with_chat_opt`]: a service started with no
+    /// host still answers every read, and refuses only the start.
+    pub(crate) fn with_agent_opener_opt(mut self, opener: Option<Arc<dyn AgentOpener>>) -> Self {
+        self.state.agents = match opener {
+            Some(opener) => crate::agents::Agents::with(opener),
+            None => crate::agents::Agents::new(),
+        };
+        self.router = router(self.state.clone());
+        self
+    }
+
+    /// List agents through `source`, for `live_agents` and the agent routes.
+    pub fn with_live_source(self, source: Arc<dyn crate::live::LiveSource>) -> Self {
+        self.with_live_opt(Some(source))
+    }
+
+    /// [`App::with_live_source`], for a caller that may not have one.
+    pub(crate) fn with_live_opt(
+        mut self,
+        source: Option<Arc<dyn crate::live::LiveSource>>,
+    ) -> Self {
+        self.state.live = match source {
+            Some(source) => crate::live::LiveAgents::with(source),
+            None => crate::live::LiveAgents::new(),
+        };
+        self.router = router(self.state.clone());
+        self
+    }
+
+    /// Serve the web app from `dir` instead of the build embedded in the binary.
+    ///
+    /// Production always embeds `web/dist`; a test passes a temp directory
+    /// holding its own `index.html` and assets, so the SPA fallback, the cache
+    /// headers and the `/api` split are proven in CI, which does not build the
+    /// web app before the cargo job.
+    pub fn with_web_dir(mut self, dir: PathBuf) -> Self {
+        self.state.web = crate::web::Source::Dir(dir);
+        self.router = router(self.state.clone());
+        self
+    }
+
+    /// Build tunnels with `factory` instead of the person's own programs.
+    ///
+    /// A test hands in a fake provider so the routes, the fail-closed rule and
+    /// the allowlist are proven without a network; production never calls it.
+    pub fn with_tunnel_factory(
+        mut self,
+        factory: Arc<dyn shprd_remote::tunnel::TunnelFactory>,
+    ) -> Self {
+        self.state.tunnel_factory = factory;
+        self.state.tunnels = self.new_tunnels();
+        self.router = router(self.state.clone());
+        self
+    }
+
+    /// A manager over this service's gate, with the factory it holds now.
+    fn new_tunnels(&self) -> shprd_remote::tunnel::TunnelManager {
+        let manager = shprd_remote::tunnel::TunnelManager::new(
+            &self.state.state_dir,
+            &self.state.remote,
+            Arc::new(SystemClock),
+            self.state.tunnel_factory.clone(),
+        );
+        manager.reset();
+        manager
+    }
+
+    /// The tunnel manager, so the service can stop the tunnel on its way out.
+    pub fn tunnels(&self) -> shprd_remote::tunnel::TunnelManager {
+        self.state.tunnels.clone()
+    }
+
+    /// The names this service answers to, as a shared handle.
+    ///
+    /// A tunnel task adds its hostname here when it starts and removes it when it
+    /// stops ([`shprd_remote::AllowedHosts`]); the gate sees the change at once,
+    /// and an unknown `Host` is a `421` either way.
+    pub fn allowed_hosts(&self) -> shprd_remote::AllowedHosts {
+        self.state.remote.hosts()
+    }
+
     /// Serve with no harness table at all, whatever the environment would find.
     ///
     /// A test uses it to prove what a machine without a data directory does,
@@ -487,7 +735,12 @@ impl App {
     }
 }
 
-/// The whole API, with the gate in front of everything but health.
+/// The whole API, with the gate in front of everything but health and login.
+///
+/// The layers, innermost first: the body limit every route shares, the trace,
+/// the `Host` allowlist, and the peer address the rate limits are keyed on. The
+/// gate itself is a layer on the guarded routes only, because a login is how a
+/// session comes to exist and health is the handshake.
 pub(crate) fn router(state: AppState) -> Router {
     let guarded = Router::new()
         .route("/api/state", get(snapshot_handler))
@@ -495,32 +748,76 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/api/asks", get(asks))
         .route("/api/asks/answer", post(answer))
         .route("/api/chat", get(chat_page).post(chat_send))
+        .route("/api/chat/stop", post(chat_stop))
+        .route("/api/chat/answer", post(chat_answer))
+        .route("/api/terminal", get(crate::terminal::socket))
         .route("/api/action", post(action))
         .route("/api/graph", get(graph))
+        .route("/api/graph/run", get(graph_run))
         .route("/api/tasks", post(add_task))
         .route("/api/tasks/{id}/changes", get(task_changes))
+        .route("/api/tasks/{id}/decisions", get(task_decisions))
+        .route("/api/tasks/{id}/remarks/answer", post(answer_remark))
         .route("/api/settings", get(settings).put(put_settings))
+        .route("/api/coordinator/restart", post(restart_coordinator))
         .route("/api/roster", get(roster))
+        .route("/api/agents", post(open_agent))
+        .route("/api/agents/{id}/output", get(agent_output))
+        .route("/api/agents/{id}/attach", post(agent_attach))
         .route("/api/prompts", get(list_prompts))
         .route(
             "/api/prompts/{id}",
             get(read_prompt).put(put_prompt).delete(reset_prompt),
         )
         .route("/api/ws", get(socket))
+        .route("/api/session", get(login::session))
+        .route("/api/logout", post(login::logout))
+        .route("/api/sessions", get(login::sessions))
+        .route("/api/sessions/{id}", delete(login::revoke))
+        .route("/api/tunnels", get(tunnels::list))
+        .route("/api/tunnels/start", post(tunnels::start))
+        .route("/api/tunnels/stop", post(tunnels::stop))
         .layer(middleware::from_fn_with_state(state.clone(), auth::require));
     Router::new()
         .route("/api/health", get(health))
+        .route("/api/login", post(login::login))
         .merge(guarded)
-        .fallback(not_found)
-        .layer(TraceLayer::new_for_http())
+        // Everything else is the built web app: an asset, an SPA route, or the
+        // page a binary without a web build serves. An `/api…` miss keeps the
+        // API's typed 404, which `web` asks `not_found` for.
+        .fallback(crate::web::serve)
+        .layer(DefaultBodyLimit::max(BODY_LIMIT))
+        // The path only, never the query: a socket's query carries the bearer
+        // token, because a browser cannot send one as a header, and a log is not
+        // a place for a secret (M7d §4.4, threat row 15).
+        .layer(
+            TraceLayer::new_for_http().make_span_with(|request: &axum::http::Request<_>| {
+                tracing::debug_span!(
+                    "request",
+                    method = %request.method(),
+                    path = %request.uri().path()
+                )
+            }),
+        )
+        .layer(middleware::from_fn_with_state(state.clone(), auth::host))
+        .layer(middleware::from_fn_with_state(state.clone(), auth::peer))
         .with_state(state)
 }
 
 /// `GET /api/health`: who this is, for the handshake.
-async fn health(State(state): State<AppState>) -> Json<HealthDto> {
+///
+/// The service's `id` is the local handshake's (the CLI and the desktop mods
+/// check it before they send the token), so it is answered to a loopback caller
+/// only: anyone reaching the service by its tunnel's name gets `ok` and the
+/// version.
+async fn health(
+    State(state): State<AppState>,
+    Extension(auth::Peer(peer)): Extension<auth::Peer>,
+    headers: HeaderMap,
+) -> Json<HealthDto> {
     Json(HealthDto {
         ok: true,
-        id: state.id.clone(),
+        id: auth::is_local_caller(peer, &headers).then(|| state.id.clone()),
         version: state.version.clone(),
     })
 }
@@ -543,6 +840,26 @@ async fn snapshot_handler(State(state): State<AppState>) -> Result<Json<Snapshot
     let (folded, _) = folded.map_err(|err| ApiReject::internal(err.to_string()))?;
     let mut snapshot = SnapshotDto::from_state(&folded, SystemClock.now_ms());
     snapshot.last_tick = last.as_ref().map(crate::dto::LastTickDto::from);
+    // A Ready task the engine lands by itself is Landing, never the person's.
+    let landing = {
+        let (repo, home) = (state.repo.clone(), state.home.clone());
+        blocking(move || crate::snapshot::auto_landing(&repo, home.as_deref(), &folded)).await?
+    };
+    crate::snapshot::apply_landing(&mut snapshot, &landing);
+    // The host is asked off the runtime: a host call blocks on its own.
+    let live = state.live.clone();
+    let repo = state.repo.clone();
+    let (rows, host_space, branch) = blocking(move || {
+        let branch = shprd_git::git::Git::new(&repo)
+            .current_branch()
+            .ok()
+            .flatten();
+        (live.rows(), live.space(), branch)
+    })
+    .await?;
+    crate::live::decorate(&mut snapshot, &state.repo, rows, host_space, branch);
+    let titles_state = state.clone();
+    snapshot.role_titles = blocking(move || settings_api::role_titles(&titles_state)).await?;
     Ok(Json(snapshot))
 }
 
@@ -567,6 +884,20 @@ async fn graph(State(state): State<AppState>) -> Result<Json<GraphDto>, ApiRejec
     )))
 }
 
+/// `GET /api/graph/run`: the run document the window's graph block draws.
+///
+/// The desktop's block is a terminal running `dagr view <repo>/.dagr/run.json`,
+/// which the service rewrites after every ledger write. The web cannot run dagr,
+/// so it draws that same file itself: this answers the file, verbatim, so a graph
+/// in a browser and a graph in the window can never show different runs. A run
+/// that has not written a document yet is a `404` with the words that say so,
+/// and a file that is not a run document is a `500`: the page draws neither.
+async fn graph_run(State(state): State<AppState>) -> Result<Json<Value>, ApiReject> {
+    let repo = state.repo.clone();
+    let document = blocking(move || crate::graph::read_document(&repo)).await?;
+    Ok(Json(document?))
+}
+
 /// `GET /api/asks`: every ask still waiting for the person.
 async fn asks(State(state): State<AppState>) -> Result<Json<AskListDto>, ApiReject> {
     let repo = state.repo.clone();
@@ -583,16 +914,73 @@ async fn answer(State(state): State<AppState>, body: Bytes) -> Result<Json<AskRe
     let actor = state.actor.clone();
     let hub = state.hub.clone();
     let after_write = state.after_write.clone();
+    // The answer route carries the service's engine like every other action
+    // does: a stuck review's `review again` runs its closure, and a proposal
+    // card's confirmation may be one of the run's own verbs (`run close`),
+    // which only the binary can run.
+    let engine = state.engine.clone();
     let reply = blocking(move || {
         let ctx = actions::Context {
             repo: &repo,
             actor: &actor,
             hub: &hub,
             after_write: after_write.as_ref(),
-            engine: None,
+            engine: engine.as_ref(),
             merge: None,
+            id_prefix: String::new(),
         };
         actions::answer_ask(&ctx, &body.task, &body.ask, &body.answer)
+    })
+    .await?;
+    Ok(Json(reply?))
+}
+
+/// The query `GET /api/tasks/{id}/decisions` takes.
+#[derive(Debug, Deserialize)]
+struct DecisionsQuery {
+    /// The attempt; absent means the task's latest.
+    attempt: Option<u32>,
+}
+
+/// `GET /api/tasks/{id}/decisions`: the choices the worker disclosed that the
+/// review lists for the person to confirm, with the answers so far.
+async fn task_decisions(
+    State(state): State<AppState>,
+    UrlPath(id): UrlPath<String>,
+    axum::extract::Query(query): axum::extract::Query<DecisionsQuery>,
+) -> Result<Json<crate::dto::DecisionsDto>, ApiReject> {
+    let repo = state.repo.clone();
+    let engine = state.engine.clone();
+    let list =
+        blocking(move || actions::decisions_of(&repo, engine.as_ref(), &id, query.attempt)).await?;
+    Ok(Json(list?))
+}
+
+/// `POST /api/tasks/{id}/remarks/answer`: answer one finding or decision of a
+/// task's review (accepted as is, fix it, follow-up task), as an event.
+async fn answer_remark(
+    State(state): State<AppState>,
+    UrlPath(id): UrlPath<String>,
+    body: Bytes,
+) -> Result<Json<AskReply>, ApiReject> {
+    let body: crate::dto::AnswerRemarkRequest = serde_json::from_slice(&body)
+        .map_err(|err| ApiReject::bad_request(format!("the body is not an answer: {err}")))?;
+    let repo = state.repo.clone();
+    let actor = state.actor.clone();
+    let hub = state.hub.clone();
+    let after_write = state.after_write.clone();
+    let engine = state.engine.clone();
+    let reply = blocking(move || {
+        let ctx = actions::Context {
+            repo: &repo,
+            actor: &actor,
+            hub: &hub,
+            after_write: after_write.as_ref(),
+            engine: engine.as_ref(),
+            merge: None,
+            id_prefix: String::new(),
+        };
+        actions::answer_remark(&ctx, &id, &body)
     })
     .await?;
     Ok(Json(reply?))
@@ -605,6 +993,8 @@ struct ChatQuery {
     space: Option<String>,
     /// The cursor the client already has.
     since: Option<String>,
+    /// An `older` cursor: answer the page of messages before it.
+    before: Option<String>,
 }
 
 /// `GET /api/chat`: what a space's agent record gained since `since`.
@@ -618,7 +1008,8 @@ async fn chat_page(
 ) -> Result<Json<ChatDto>, ApiReject> {
     let space = Space::parse(query.space.as_deref());
     let since = query.since.unwrap_or_default();
-    let answer = blocking(move || chat::page(&state, &space, &since)).await?;
+    let before = query.before.unwrap_or_default();
+    let answer = blocking(move || chat::page_with_failure(&state, &space, &since, &before)).await?;
     Ok(Json(answer?))
 }
 
@@ -631,6 +1022,24 @@ async fn chat_send(
     body: Bytes,
 ) -> Result<Json<ChatSendReply>, ApiReject> {
     let answer = blocking(move || chat::send(&state, &body)).await?;
+    Ok(Json(answer?))
+}
+
+/// `POST /api/chat/answer`: answer the question a space's terminal waits on.
+async fn chat_answer(
+    State(state): State<AppState>,
+    body: Bytes,
+) -> Result<Json<ChatAnswerReply>, ApiReject> {
+    let answer = blocking(move || chat::answer(&state, &body)).await?;
+    Ok(Json(answer?))
+}
+
+/// `POST /api/chat/stop`: press Escape in a space's agent, as the person.
+async fn chat_stop(
+    State(state): State<AppState>,
+    body: Bytes,
+) -> Result<Json<ChatStopReply>, ApiReject> {
+    let answer = blocking(move || chat::stop(&state, &body)).await?;
     Ok(Json(answer?))
 }
 
@@ -701,9 +1110,29 @@ async fn changes(
     }
 }
 
+/// A sentence for an action body serde could not read.
+///
+/// A missing field is the common slip, and serde's own text for it
+/// (`missing field `reason``) reads as an internal error to the person whose
+/// button sent it, so it is said in words; anything else keeps serde's detail.
+fn malformed_action(kind: &str, detail: &str) -> String {
+    let missing = detail
+        .strip_prefix("missing field `")
+        .and_then(|rest| rest.split_once('`'))
+        .map(|(field, _)| field);
+    match (kind, missing) {
+        ("task.drop" | "task_drop" | "task.drop_many" | "task_drop_many", Some("reason")) => {
+            "dropping a task needs a reason: say why it is not wanted".to_string()
+        }
+        (_, Some(field)) => format!("a {kind:?} action needs a {field:?}"),
+        (_, None) => format!("a {kind:?} action is malformed: {detail}"),
+    }
+}
+
 /// `POST /api/action`: one envelope, run against the same log the CLI writes.
 async fn action(
     State(state): State<AppState>,
+    Extension(door): Extension<shprd_remote::Door>,
     body: Bytes,
 ) -> Result<Json<ActionReply>, ApiReject> {
     let value: Value = serde_json::from_slice(&body)
@@ -722,7 +1151,14 @@ async fn action(
         return Err(ApiReject::unknown_action(&kind));
     }
     let action: Action = Action::from_value(value)
-        .map_err(|err| ApiReject::bad_request(format!("a {kind:?} action is malformed: {err}")))?;
+        .map_err(|err| ApiReject::bad_request(malformed_action(&kind, &err.to_string())))?;
+
+    // A destructive action needs a password entered in the last five minutes
+    // through a session. The loopback token door is exempt: the token is already
+    // local, and the researched design says so (M7d §4.4 rule 6).
+    if action.is_destructive() {
+        state.remote.require_fresh(&door).map_err(login::reject)?;
+    }
 
     // The context borrows the service, and the work runs on a blocking thread,
     // so the pieces it needs are moved in and rebuilt there.
@@ -732,6 +1168,7 @@ async fn action(
     let after_write = state.after_write.clone();
     let engine = state.engine.clone();
     let merge = settings_api::merge_policy(&state);
+    let id_prefix = shprd_core::settings::task_id_prefix(state.home.as_deref(), &state.repo);
     let reply = blocking(move || {
         let ctx = actions::Context {
             repo: &repo,
@@ -740,6 +1177,7 @@ async fn action(
             after_write: after_write.as_ref(),
             engine: engine.as_ref(),
             merge,
+            id_prefix,
         };
         actions::run(&ctx, action)
     })
@@ -788,6 +1226,54 @@ async fn put_settings(
 ) -> Result<Json<SettingsWriteDto>, ApiReject> {
     let answer = blocking(move || settings_api::write(&state, &body)).await?;
     answer.map(Json)
+}
+
+/// `POST /api/coordinator/restart`: end the coordinator and start it again from
+/// its role, in the same tab. It is how a new program or model reaches a
+/// coordinator that is already running.
+async fn restart_coordinator(State(state): State<AppState>) -> Result<StatusCode, ApiReject> {
+    let agents = state.agents.clone();
+    blocking(move || agents.restart_coordinator()).await??;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /api/agents`: start a program in a new tab, in the run's space.
+///
+/// It is the tab bar's "+" menu's *Start an agent*: a plain CLI in a tab, with
+/// nothing to work on — a task's agent is a spawn, and that is `POST /api/action`.
+/// The service holds no harness table and no host, so the work is the binary's
+/// ([`crate::agents::AgentOpener`]); this route parses the request and hands it
+/// over, and a service without one refuses rather than pretending.
+async fn open_agent(
+    State(state): State<AppState>,
+    body: Bytes,
+) -> Result<Json<AgentTabDto>, ApiReject> {
+    let agents = state.agents.clone();
+    let opened = blocking(move || agents.open(&body)).await?;
+    Ok(Json(AgentTabDto::from(opened?)))
+}
+
+/// `GET /api/agents/{id}/output?lines=N`: one agent's recent screen.
+async fn agent_output(
+    State(state): State<AppState>,
+    UrlPath(id): UrlPath<String>,
+    axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<crate::dto::AgentOutputDto>, ApiReject> {
+    let lines = query
+        .get("lines")
+        .and_then(|lines| lines.parse::<usize>().ok())
+        .unwrap_or(120);
+    let live = state.live.clone();
+    Ok(Json(blocking(move || live.output(&id, lines)).await??))
+}
+
+/// `POST /api/agents/{id}/attach`: what to bind a real terminal to.
+async fn agent_attach(
+    State(state): State<AppState>,
+    UrlPath(id): UrlPath<String>,
+) -> Result<Json<crate::dto::AgentAttachDto>, ApiReject> {
+    let live = state.live.clone();
+    Ok(Json(blocking(move || live.attach(&id)).await??))
 }
 
 /// `GET /api/roster`: the programs a role may run, with their models and levels.
@@ -989,7 +1475,7 @@ async fn send(socket: &mut WebSocket, message: &WsMessage) -> Result<(), ()> {
 
 /// Always a typed body, so a client never has to parse HTML to learn why a path
 /// it guessed did not exist.
-async fn not_found() -> impl IntoResponse {
+pub(crate) fn not_found() -> ApiReject {
     ApiReject::new(StatusCode::NOT_FOUND, ErrorCode::NotFound, "no such route")
 }
 
@@ -1000,4 +1486,23 @@ async fn blocking<T: Send + 'static>(
     tokio::task::spawn_blocking(work)
         .await
         .map_err(|err| ApiReject::internal(format!("the ledger task did not finish: {err}")))
+}
+
+#[cfg(test)]
+mod malformed_action_tests {
+    use super::malformed_action;
+
+    #[test]
+    fn a_missing_field_is_said_in_words() {
+        assert_eq!(
+            malformed_action("task.drop", "missing field `reason` at line 1 column 30"),
+            "dropping a task needs a reason: say why it is not wanted"
+        );
+        assert_eq!(
+            malformed_action("task.stop", "missing field `task` at line 1 column 9"),
+            "a \"task.stop\" action needs a \"task\""
+        );
+        let other = malformed_action("task.add", "invalid type: string, expected a sequence");
+        assert!(other.contains("is malformed"), "{other}");
+    }
 }

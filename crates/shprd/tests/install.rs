@@ -5,6 +5,11 @@
 //! nothing here can read or write the developer's own window (`~/.config/herdr-app`)
 //! and nothing depends on what that window currently holds.
 //!
+//! `install` drives no multiplexer, but it is still spawned through the shared
+//! isolation rule (`support/herdr.rs`, M10 fix X): a child of a test that runs
+//! inside a herdr pane must never see that pane's socket, whatever verb it runs.
+//! One rule for every spawn is one rule to keep honest.
+//!
 //! The acceptance the task asks for, one test each: a fresh install, a re-install
 //! that writes nothing, a merge that keeps a key the person bound, an uninstall
 //! that removes only the manifest's files, and a dry run that writes nothing.
@@ -18,6 +23,10 @@ use std::process::{Command, Output};
 
 use serde_json::Value;
 use tempfile::TempDir;
+
+mod support;
+
+use support::isolate;
 
 /// The binary under test, built by cargo for this integration test.
 const BIN: &str = env!("CARGO_BIN_EXE_shprd");
@@ -84,8 +93,11 @@ impl Fixture {
                 "XDG_STATE_HOME",
                 self.app.path().join(".local").join("state"),
             )
-            .env_remove("HERDR_APP_HOME")
             .env_remove("SHPRD_HOST_DIR");
+        // The rule first, this fixture's own folders after it: a test spawned
+        // from a herdr pane must not inherit the pane's socket, and a live test
+        // that wants a private one names it after this call.
+        isolate(&mut command, self.app.path());
         command
     }
 
@@ -322,7 +334,10 @@ fn a_merge_keeps_the_keys_the_person_bound_and_takes_the_rest() {
     // Their binding of a key shprd wanted is kept.
     assert_eq!(keys["layout:shprd"]["ctrl-shift-b"], "space.close");
     // The key they did not use is taken.
-    assert_eq!(keys["layout:shprd"]["ctrl-shift-a"], "layout.show:asks");
+    assert_eq!(
+        keys["layout:shprd"]["ctrl-shift-a"],
+        "shprd-tabs.show-tasks"
+    );
     // And the kept key is not recorded as ours, so uninstall leaves it alone.
     let manifest = fixture.manifest();
     assert!(
@@ -331,6 +346,166 @@ fn a_merge_keeps_the_keys_the_person_bound_and_takes_the_rest() {
             .is_none(),
         "a kept key must not be recorded as shprd's"
     );
+}
+
+#[test]
+fn an_m10_install_upgrades_to_the_new_keys_and_keeps_the_person_s_own() {
+    let fixture = Fixture::new();
+    // What M10 wrote (its two layout keys) beside a key the person bound for
+    // themselves: Shepherdr's own Ctrl+K, and Herdr's own F2 left alone.
+    fs::create_dir_all(fixture.app_path(".")).expect("the app home");
+    fs::write(
+        fixture.app_path("keys.json"),
+        r#"{
+  "global": {"ctrl-k": "mod.open:jump", "f2": "tab.rename"},
+  "layout:shprd": {"ctrl-shift-b": "layout.toggle:panel", "ctrl-shift-a": "layout.show:asks"}
+}
+"#,
+    )
+    .expect("their keys");
+
+    ok(&fixture.run(&[]));
+
+    let keys: Value = serde_json::from_str(
+        &fs::read_to_string(fixture.app_path("keys.json")).expect("keys.json"),
+    )
+    .expect("JSON keys");
+    // The new bindings arrive: the Alt keys globally, Jump and Keybinds inside
+    // the shprd layout, the layout's close and new-task keys.
+    assert_eq!(keys["layout:shprd"]["ctrl-shift-k"], "mod.open:shprd-jump");
+    assert_eq!(
+        keys["layout:shprd"]["ctrl-shift-/"],
+        "mod.open:shprd-keybinds"
+    );
+    assert_eq!(keys["global"]["alt-up"], "space.prev");
+    assert_eq!(keys["layout:shprd"]["ctrl-shift-w"], "tab.close");
+    assert_eq!(keys["layout:shprd"]["ctrl-shift-n"], "shprd-tabs.new-task");
+    // Theirs stay: their global Ctrl+K and Herdr's own F2 are never touched; the
+    // layout's own Ctrl+K and F2 win inside the shprd layout.
+    assert_eq!(keys["layout:shprd"]["ctrl-k"], "mod.open:shprd-jump");
+    assert_eq!(keys["layout:shprd"]["f2"], "shprd-tabs.rename-tab");
+    assert_eq!(keys["layout:shprd"]["shift-f2"], "shprd-tabs.rename-space");
+    assert_eq!(keys["global"]["ctrl-k"], "mod.open:jump");
+    assert_eq!(keys["global"]["f2"], "tab.rename");
+    // The two mods came with it.
+    assert!(fixture.app_path("mods/shprd-jump/main.js").is_file());
+    assert!(fixture.app_path("mods/shprd-keybinds/main.js").is_file());
+    // A second install is quiet.
+    let again = ok(&fixture.run(&["--dry-run"]));
+    assert!(!again.is_empty());
+}
+
+/// A copy of a real `keys.json` (Herdr's defaults, Shepherdr's section, and the
+/// global Ctrl+K / Ctrl+Shift+K / Ctrl+Shift+/ / F2 bindings that made shprd's
+/// keys do nothing) with the person's global bindings.
+const REAL_KEYS: &str = include_str!("fixtures/keys-herdr-defaults.json");
+
+#[test]
+fn the_shprd_keys_land_in_the_layout_and_no_global_key_changes() {
+    let fixture = Fixture::new();
+    fs::create_dir_all(fixture.app_path(".")).expect("the app home");
+    fs::write(fixture.app_path("keys.json"), REAL_KEYS).expect("their keys");
+
+    let dry = ok(&fixture.run(&["--dry-run"]));
+    assert!(
+        dry.contains("keys.json layout:shprd ctrl-k = mod.open:shprd-jump"),
+        "the dry run shows the layout keys: {dry}"
+    );
+    assert!(dry.contains("keys.json layout:shprd f2 = shprd-tabs.rename-tab"));
+    assert_eq!(
+        fs::read_to_string(fixture.app_path("keys.json")).expect("keys.json"),
+        REAL_KEYS,
+        "a dry run writes nothing"
+    );
+
+    ok(&fixture.run(&[]));
+    let before: Value = serde_json::from_str(REAL_KEYS).expect("fixture JSON");
+    let after: Value = serde_json::from_str(
+        &fs::read_to_string(fixture.app_path("keys.json")).expect("keys.json"),
+    )
+    .expect("JSON keys");
+    // Every global key the person had is exactly as it was.
+    for (key, command) in before["global"].as_object().expect("global") {
+        assert_eq!(after["global"][key], *command, "global {key} changed");
+    }
+    assert!(after["layout:shprd"]["ctrl-k"] == "mod.open:shprd-jump");
+    assert_eq!(after["layout:shprd"]["ctrl-shift-k"], "mod.open:shprd-jump");
+    assert_eq!(
+        after["layout:shprd"]["ctrl-shift-/"],
+        "mod.open:shprd-keybinds"
+    );
+    assert_eq!(
+        after["layout:shprd"]["ctrl-shift-?"],
+        "mod.open:shprd-keybinds"
+    );
+    assert_eq!(after["layout:shprd"]["f2"], "shprd-tabs.rename-tab");
+    assert_eq!(after["layout:shprd"]["shift-f2"], "shprd-tabs.rename-space");
+    // The sections that are not shprd's are untouched.
+    assert_eq!(after["layout:shepherdr"], before["layout:shepherdr"]);
+    assert_eq!(after["terminal"], before["terminal"]);
+    // Nothing shprd's is left in `global` that shadows nothing: the person's own
+    // Ctrl+K stays Herdr's outside this layout.
+    assert_eq!(after["global"]["ctrl-k"], "mod.open:jump");
+    // A second install is quiet.
+    assert!(ok(&fixture.run(&[])).contains("nothing to do"));
+}
+
+#[test]
+fn a_layout_key_the_person_bound_is_kept_and_reported() {
+    let fixture = Fixture::new();
+    fs::create_dir_all(fixture.app_path(".")).expect("the app home");
+    fs::write(
+        fixture.app_path("keys.json"),
+        r#"{"layout:shprd": {"ctrl-k": "app.palette", "f2": "tab.rename"}}"#,
+    )
+    .expect("their keys");
+
+    let report = ok(&fixture.run(&[]));
+    assert!(
+        report.contains("kept keys.json layout:shprd ctrl-k = app.palette"),
+        "{report}"
+    );
+    assert!(report.contains("kept keys.json layout:shprd f2 = tab.rename"));
+    let json = ok(&fixture.run(&["--dry-run", "--json"]));
+    assert!(json.contains("keys_kept"), "{json}");
+    let after: Value = serde_json::from_str(
+        &fs::read_to_string(fixture.app_path("keys.json")).expect("keys.json"),
+    )
+    .expect("JSON keys");
+    assert_eq!(after["layout:shprd"]["ctrl-k"], "app.palette");
+    assert_eq!(after["layout:shprd"]["f2"], "tab.rename");
+}
+
+#[test]
+fn an_older_install_gives_back_the_global_keys_it_wrote() {
+    let fixture = Fixture::new();
+    fs::create_dir_all(fixture.app_path("data/shprd-desktop")).expect("the manifest folder");
+    // What the earlier build wrote: Ctrl+K and Ctrl+Shift+K globally; the person
+    // has since bound Ctrl+Shift+K to something of their own.
+    fs::write(
+        fixture.app_path("keys.json"),
+        r#"{"global": {"ctrl-k": "mod.open:shprd-jump", "ctrl-shift-k": "app.palette", "alt-1": "tab.select:1"}}"#,
+    )
+    .expect("their keys");
+    fs::write(
+        fixture.app_path("data/shprd-desktop/manifest.json"),
+        r#"{"version": 1, "files": {}, "dirs": [], "keys": {"global": {"ctrl-k": "mod.open:shprd-jump", "ctrl-shift-k": "mod.open:shprd-jump", "alt-1": "tab.select:1"}}}"#,
+    )
+    .expect("the old manifest");
+
+    let report = ok(&fixture.run(&[]));
+    assert!(
+        report.contains("removed keys.json global ctrl-k"),
+        "{report}"
+    );
+    let after: Value = serde_json::from_str(
+        &fs::read_to_string(fixture.app_path("keys.json")).expect("keys.json"),
+    )
+    .expect("JSON keys");
+    assert!(after["global"].get("ctrl-k").is_none());
+    // The one the person rebound stays.
+    assert_eq!(after["global"]["ctrl-shift-k"], "app.palette");
+    assert_eq!(after["layout:shprd"]["ctrl-k"], "mod.open:shprd-jump");
 }
 
 #[test]
@@ -556,13 +731,22 @@ fn an_install_with_no_host_tree_installs_the_copy_in_the_binary() {
     // The host folder's own `test/` and `bin/` are not part of an install.
     assert!(!fixture.app_path("test").exists());
     assert!(!fixture.app_path("bin").exists());
-    // And the manifest owns everything it wrote, so it can take it back.
-    let files = fixture.manifest_files();
-    assert_eq!(files.len(), 95, "the same count a checkout installs");
+    // And the manifest owns everything the working tree has — no more, no fewer —
+    // so an install from the tree beside the checkout and one from the copy in
+    // the binary are the same desktop, file for file (a count the tree outgrows
+    // is a test that fails for the right reason but says less).
+    let from_tree = Fixture::new();
+    ok(&from_tree.run(&[]));
+    let embedded: Vec<String> = fixture.manifest_files().into_keys().collect();
+    let checkout: Vec<String> = from_tree.manifest_files().into_keys().collect();
+    assert_eq!(
+        embedded, checkout,
+        "the embedded copy is the working tree, file for file"
+    );
 }
 
 #[test]
-fn a_release_build_and_a_worktree_install_the_same_desktop() {
+fn the_working_directory_is_never_the_source_of_the_layout() {
     // The gate's own complaint: run from a worktree, an install found the
     // canonical checkout (or nothing). A tree named outright, the embedded copy,
     // and a worktree's `../host/herdr-desktop` must all produce the same files.
@@ -582,33 +766,66 @@ fn a_release_build_and_a_worktree_install_the_same_desktop() {
         "the embedded copy is the working tree"
     );
 
-    // The worktree's shape: a directory whose `../host/herdr-desktop` exists is
-    // found without any flag, so a worker in a worktree installs the worktree.
-    let worktree = TempDir::new().expect("a worktree");
-    copy_tree(
-        &host_path(),
-        &worktree.path().join("host").join("herdr-desktop"),
-    );
-    fs::create_dir_all(worktree.path().join("crates")).expect("the crate folder");
-    let from_worktree = Fixture::bare();
-    let output = from_worktree
-        .command(&[])
-        .current_dir(worktree.path().join("crates"))
+    // A working directory holding an OLD checkout (an old layout) is not read:
+    // the binary installs its own tree, and the old layout stays out.
+    let old = TempDir::new().expect("an old checkout");
+    copy_tree(&host_path(), &old.path().join("host").join("herdr-desktop"));
+    fs::write(
+        old.path().join("host/herdr-desktop/layouts/shprd.json"),
+        "{\"id\": \"root\", \"type\": \"row\", \"old\": true}\n",
+    )
+    .expect("old layout");
+    fs::create_dir_all(old.path().join("crates")).expect("the crate folder");
+    for cwd in [old.path().to_path_buf(), old.path().join("crates")] {
+        let from_old_cwd = Fixture::bare();
+        let output = from_old_cwd
+            .command(&[])
+            .current_dir(&cwd)
+            .output()
+            .expect("the binary runs");
+        ok(&output);
+        assert_eq!(
+            from_old_cwd.files(),
+            from_tree.files(),
+            "the working directory's tree is not what gets installed"
+        );
+    }
+    // `--repo` still names a checkout outright and wins over the binary's own.
+    let by_repo = Fixture::bare();
+    let output = by_repo
+        .command(&["--repo", old.path().to_str().unwrap()])
         .output()
         .expect("the binary runs");
     ok(&output);
     assert_eq!(
-        from_worktree.files(),
-        from_tree.files(),
-        "a worktree's host tree is what a worktree installs"
+        fs::read_to_string(by_repo.app_path("layouts/shprd.json")).expect("the layout"),
+        "{\"id\": \"root\", \"type\": \"row\", \"old\": true}\n"
     );
-    // And a dry run says what would happen with nothing named, from here.
-    let said = ok(&from_worktree
-        .command(&["--dry-run"])
-        .current_dir(worktree.path().join("crates"))
+}
+
+#[test]
+fn the_host_dir_variable_wins_over_repo() {
+    let fixture = Fixture::new();
+    let repo = TempDir::new().expect("a repo");
+    copy_tree(
+        &host_path(),
+        &repo.path().join("host").join("herdr-desktop"),
+    );
+    fs::write(
+        fixture.host.path().join("layouts/shprd.json"),
+        "{\"id\": \"root\", \"type\": \"row\", \"env\": true}\n",
+    )
+    .expect("their layout");
+    let output = fixture
+        .command(&["--repo", repo.path().to_str().unwrap()])
+        .env("SHPRD_HOST_DIR", fixture.host.path())
         .output()
-        .expect("the binary runs"));
-    assert!(said.contains("nothing to do"), "{said}");
+        .expect("the binary runs");
+    ok(&output);
+    assert_eq!(
+        fs::read_to_string(fixture.app_path("layouts/shprd.json")).expect("the layout"),
+        "{\"id\": \"root\", \"type\": \"row\", \"env\": true}\n"
+    );
 }
 
 #[test]
@@ -677,6 +894,268 @@ fn a_layout_the_person_changed_is_still_refused() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("layouts/shprd.json"), "{stderr}");
     assert_eq!(fs::read(&installed).expect("their layout"), mine);
+}
+
+/// One of the layouts earlier builds shipped, as those builds wrote it.
+///
+/// They are the installer's own record of what shprd used to install
+/// (`crates/shprd/src/cmd/previous-layouts/`), which is what the upgrade tests need
+/// to start from: a desktop a person already has.
+fn older_layout(name: &str) -> Vec<u8> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src")
+        .join("cmd")
+        .join("previous-layouts")
+        .join(name);
+    fs::read(&path).unwrap_or_else(|error| panic!("reading {}: {error}", path.display()))
+}
+
+/// This build's files with one earlier build's layout, as that install left them.
+fn tree_with_layout(name: &str) -> TempDir {
+    let tree = TempDir::new().expect("a temp host tree");
+    copy_tree(&host_path(), tree.path());
+    fs::write(tree.path().join("layouts/shprd.json"), older_layout(name)).expect("the old layout");
+    tree
+}
+
+/// Installs one tree into a fixture's app home.
+fn install_tree(fixture: &Fixture, tree: &TempDir) {
+    ok(&fixture
+        .command(&["--from", tree.path().to_str().unwrap()])
+        .output()
+        .expect("the binary runs"));
+}
+
+/// Asserts the upgrade landed: this build's layout, on disk and in the manifest,
+/// and the side panel keeps no settings block for a tab to switch to.
+fn assert_upgraded(fixture: &Fixture) {
+    let installed = fs::read(fixture.app_path("layouts/shprd.json")).expect("the layout");
+    let shipped = fs::read(host_path().join("layouts/shprd.json")).expect("the shipped layout");
+    assert_eq!(installed, shipped, "the layout is replaced, not merged");
+    let mut probe: Value = serde_json::from_slice(&installed).expect("JSON");
+    assert!(
+        find_node(&mut probe, "settings").is_none(),
+        "the side panel keeps no settings block"
+    );
+    let mut probe: Value = serde_json::from_slice(&installed).expect("JSON");
+    assert!(
+        find_node(&mut probe, "tasks-thread-accept").is_none(),
+        "the Accept card is a dialog, not a block of the task thread"
+    );
+    let mut probe: Value = serde_json::from_slice(&installed).expect("JSON");
+    let thread = find_node(&mut probe, "tasks-thread-body").expect("the thread's body");
+    assert_eq!(
+        thread["active"], "tasks-thread-chat",
+        "the thread opens on its chat"
+    );
+    let mut probe: Value = serde_json::from_slice(&installed).expect("JSON");
+    let panel = find_node(&mut probe, "panel-body").expect("the side panel");
+    let ids: Vec<&str> = panel["children"]
+        .as_array()
+        .expect("children")
+        .iter()
+        .filter_map(|child| child["id"].as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["files", "changes", "tasks"],
+        "the Asks stack went with the cards moving into the thread, and the graph is a view of the Tasks panel, not a stack of its own"
+    );
+    let mut probe: Value = serde_json::from_slice(&installed).expect("JSON");
+    assert!(
+        find_node(&mut probe, "coordinator").is_none(),
+        "the sidebar has no coordinator block: its chat is its pane's Chat view"
+    );
+    let text = String::from_utf8_lossy(&installed);
+    assert!(
+        !text.contains("\"terminal\"") && !text.contains("graph"),
+        "the layout holds no graph block or terminal block for Herdr to prune"
+    );
+}
+
+#[test]
+fn an_install_upgrades_the_desktop_it_wrote_before() {
+    // The M10 desktop had settings as a tab of the side panel: a `settings` block
+    // in the panel's stack, drawn by the settings mod. M11 fix S makes settings a
+    // dialog over the window, so the block is gone from the layout — and a person
+    // who already installed the M10 desktop must get the new one by running the
+    // install again, not by moving files aside.
+    let fixture = Fixture::new();
+    install_tree(&fixture, &tree_with_layout("shprd-m10.json"));
+    let before = fixture.manifest();
+    assert!(
+        before["files"]
+            .get("layouts/shprd.json")
+            .is_some_and(Value::is_string),
+        "the M10 install recorded the layout as its own"
+    );
+
+    let said = ok(&fixture.run(&[]));
+    assert!(
+        said.contains("layouts/shprd.json"),
+        "the upgrade says it wrote the layout: {said}"
+    );
+    assert_upgraded(&fixture);
+
+    // Everything else the install owns moved with it, and the manifest now names
+    // what is on disk: a second run has nothing left to do.
+    let mut hashes = BTreeMap::new();
+    for rel in fixture.files() {
+        if rel == "keys.json" {
+            continue;
+        }
+        let bytes = fs::read(fixture.app_path(&rel)).expect("an installed file");
+        hashes.insert(rel, sha_hex(&bytes));
+    }
+    assert_eq!(
+        fixture.manifest_files(),
+        hashes,
+        "the manifest names the files the upgrade left"
+    );
+    let again = ok(&fixture.run(&[]));
+    assert!(again.contains("nothing to do"), "{again}");
+}
+
+#[test]
+fn an_upgrade_puts_back_a_layout_herdr_pruned_from_the_build_before() {
+    // The harder half of the same upgrade: the M10 layout a person installed was
+    // then pruned by Herdr (the graph terminal did not exist when the window
+    // loaded it), so what is on disk is neither the file M10 wrote nor this
+    // build's. It is still the app's edit of a layout shprd shipped, so the
+    // upgrade replaces it rather than refusing and asking the person to move it.
+    let fixture = Fixture::new();
+    install_tree(&fixture, &tree_with_layout("shprd-m10.json"));
+    let installed = fixture.app_path("layouts/shprd.json");
+    let older = fs::read(&installed).expect("the M10 layout");
+    fs::write(&installed, prune_terminal_blocks(&older)).expect("the pruned layout");
+
+    let said = ok(&fixture.run(&[]));
+    assert!(
+        said.contains("put back after Herdr pruned it"),
+        "the upgrade says what it did: {said}"
+    );
+    assert_eq!(
+        fs::read(&installed).expect("the upgraded layout"),
+        fs::read(host_path().join("layouts/shprd.json")).expect("the shipped layout"),
+        "this build's layout is what is left"
+    );
+}
+
+#[test]
+fn an_upgrade_takes_back_a_mod_this_build_no_longer_ships() {
+    // M11 U4 removed the Asks panel's and the sidebar coordinator's mods, and
+    // SHPR-29 the graph mod (the Graph is a view of the Tasks panel). A desktop
+    // installed before that holds them in its manifest, so the upgrade
+    // takes them away — unless the person edited one, which is theirs now.
+    let fixture = Fixture::new();
+    let older = tree_with_layout("shprd-m11-accept.json");
+    for gone in ["shprd-asks", "shprd-coordinator", "shprd-graph"] {
+        let dir = older.path().join("mods").join(gone);
+        fs::create_dir_all(dir.join("lib")).expect("the old mod's folder");
+        fs::write(dir.join("main.js"), format!("// {gone}\n")).expect("the old mod");
+        fs::write(dir.join("mod.json"), "{\"place\": \"none\"}\n").expect("the old mod.json");
+        fs::write(dir.join("lib/tokens.js"), "// a copy\n").expect("the old mod's lib");
+    }
+    install_tree(&fixture, &older);
+    assert!(fixture.app_path("mods/shprd-asks/main.js").is_file());
+    let edited = fixture.app_path("mods/shprd-coordinator/main.js");
+    fs::write(&edited, "// mine now\n").expect("the person's edit");
+
+    let out = ok(&fixture.run(&[]));
+    assert!(
+        out.contains("removed"),
+        "the upgrade says what it took back: {out}"
+    );
+    assert!(
+        !fixture.app_path("mods/shprd-asks").exists(),
+        "an untouched stale mod goes, folder and all"
+    );
+    assert!(
+        !fixture.app_path("mods/shprd-graph").exists(),
+        "the graph mod goes with the separate graph panel"
+    );
+    assert_eq!(
+        fs::read_to_string(&edited).expect("their file"),
+        "// mine now\n",
+        "a file the person edited is left alone"
+    );
+    assert!(
+        fixture.app_path("mods/shprd-chat/main.js").is_file(),
+        "the mod that replaced them is there"
+    );
+    assert_upgraded(&fixture);
+    let again = ok(&fixture.run(&[]));
+    assert!(
+        again.contains("nothing to do"),
+        "and it is idempotent: {again}"
+    );
+}
+
+#[test]
+fn a_desktop_from_an_earlier_layout_upgrades_too() {
+    // The layout changed twice inside M10 and again in M11, so a person's last
+    // install may be the M10.3, M10.4 or M11 (before the Accept dialog) layout
+    // rather than M10's last one. Every version is carried,
+    // pruned or not, because that is what an upgrade may meet on disk.
+    for name in [
+        "shprd-m10.3.json",
+        "shprd-m10.4.json",
+        "shprd-m11.json",
+        "shprd-m11-menu.json",
+        "shprd-m11-accept.json",
+    ] {
+        // As the older install left it, and as Herdr leaves it after pruning the
+        // terminal block it could not resolve.
+        for prune in [false, true] {
+            let fixture = Fixture::new();
+            install_tree(&fixture, &tree_with_layout(name));
+            let installed = fixture.app_path("layouts/shprd.json");
+            if prune {
+                let older = fs::read(&installed).expect("the older layout");
+                fs::write(&installed, prune_terminal_blocks(&older)).expect("the pruned layout");
+            }
+            ok(&fixture.run(&[]));
+            assert_upgraded(&fixture);
+            let again = ok(&fixture.run(&[]));
+            assert!(
+                again.contains("nothing to do"),
+                "{name} pruned={prune}: {again}"
+            );
+        }
+    }
+}
+
+#[test]
+fn an_older_layout_the_person_changed_is_still_refused() {
+    // The recognition above is about the app's edit alone: a person who changed
+    // the older layout has a file that is not what any build shipped, and it stays
+    // exactly as they wrote it.
+    let fixture = Fixture::new();
+    install_tree(&fixture, &tree_with_layout("shprd-m10.json"));
+    let installed = fixture.app_path("layouts/shprd.json");
+    let pruned = prune_terminal_blocks(&fs::read(&installed).expect("the M10 layout"));
+    let mut document: Value = serde_json::from_slice(&pruned).expect("JSON");
+    document["children"][0]["children"][1]["size"]["px"] = Value::from(300);
+    let mine = serde_json::to_vec_pretty(&document).expect("JSON");
+    fs::write(&installed, &mine).expect("their change");
+
+    let output = fixture.run(&[]);
+    assert!(!output.status.success(), "a person's change is refused");
+    assert_eq!(fs::read(&installed).expect("their layout"), mine);
+}
+
+/// One layout node by id, mutably, or `None`.
+fn find_node<'a>(node: &'a mut Value, id: &str) -> Option<&'a mut Value> {
+    if node.get("id").and_then(Value::as_str) == Some(id) {
+        return Some(node);
+    }
+    let children = node.get_mut("children")?.as_array_mut()?;
+    for child in children.iter_mut() {
+        if let Some(found) = find_node(child, id) {
+            return Some(found);
+        }
+    }
+    None
 }
 
 /// Writes `bytes` back as Herdr does after pruning every terminal block: the

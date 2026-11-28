@@ -48,13 +48,83 @@ fi
 rm -rf "$gate"
 echo "ok: gate-env writes a private home and refuses the real one"
 
+echo "== isolate"
+# The wrapper is the rule every live check goes through, so what it does is
+# asserted here rather than trusted: a leaked socket is a workspace in the
+# person's own herdr, and no test can see that after the fact.
+isolated=$(HERDR_SOCKET_PATH=/Users/nobody/.config/herdr/herdr.sock \
+  HERDR_PANE_ID=wX:p1 HERDR_ENV=1 HC_SESSION=default HERDR_APP_HOME=/Users/nobody/app \
+  HERDR_PROJECTS_TASK_REPORTS=/Users/nobody/reports ./bin/isolate env)
+check_isolate() {
+  if ! printf '%s\n' "$isolated" | grep -qx "$1"; then
+    echo "isolate did not set $1" >&2
+    exit 1
+  fi
+}
+check_isolate "HERDR_SOCKET_PATH=/nonexistent/herdr.sock"
+# An unset HC_SESSION means the *default* session, which is the person's, so it
+# is set to a name nobody runs rather than left out.
+if printf '%s\n' "$isolated" | grep -q '^HC_SESSION=default$'; then
+  echo "isolate carried the person's HC_SESSION through" >&2
+  exit 1
+fi
+for leaked in HERDR_PANE_ID HERDR_ENV HERDR_PROJECTS_TASK_REPORTS; do
+  if printf '%s\n' "$isolated" | grep -q "^$leaked="; then
+    echo "isolate left $leaked in the child's environment" >&2
+    exit 1
+  fi
+done
+# The window's home is not removed but replaced: a check that calls `herdr-app`
+# must reach a folder of its own, never the window the person is looking at.
+if printf '%s\n' "$isolated" | grep -q '^HERDR_APP_HOME=/Users/nobody/app$'; then
+  echo "isolate kept the person's HERDR_APP_HOME" >&2
+  exit 1
+fi
+if ! printf '%s\n' "$isolated" | grep -q '^HERDR_APP_HOME=.*/app$'; then
+  echo "isolate left HERDR_APP_HOME unset: a check would open the person's window" >&2
+  exit 1
+fi
+# What the caller sets after it wins, which is how a live test points at its own
+# private server without losing the rest of the stripping.
+mine=$(HERDR_SOCKET_PATH=/Users/nobody/herdr.sock ./bin/isolate env HERDR_SOCKET_PATH=/tmp/mine.sock | grep '^HERDR_SOCKET_PATH=')
+if [ "$mine" != "HERDR_SOCKET_PATH=/tmp/mine.sock" ]; then
+  echo "isolate did not let a later assignment win: $mine" >&2
+  exit 1
+fi
+# The scratch folder goes with the run. An `exec` here would replace the wrapper
+# and leave one behind per live check, which is how this was found.
+scratch_before=$(ls -d "${TMPDIR:-/tmp}"/shprd-isolate.* 2>/dev/null | wc -l | tr -d ' ')
+./bin/isolate true >/dev/null 2>&1
+# `set -e` is inherited by a command substitution, so the failing command is
+# allowed to fail on purpose here and its status read back afterwards.
+exit_status=$(./bin/isolate sh -c 'exit 42' >/dev/null 2>&1 || echo "$?")
+if [ "$exit_status" != "42" ]; then
+  echo "isolate did not pass the command's exit status through: $exit_status" >&2
+  exit 1
+fi
+scratch_after=$(ls -d "${TMPDIR:-/tmp}"/shprd-isolate.* 2>/dev/null | wc -l | tr -d ' ')
+if [ "$scratch_after" -gt "$scratch_before" ]; then
+  echo "isolate left a scratch folder behind ($scratch_before -> $scratch_after)" >&2
+  exit 1
+fi
+echo "ok: isolate strips every host variable and keeps a later assignment"
+
+echo "== mods load"
+# Every mod's main.js is syntax-checked and imported with the app's modules
+# stubbed, the way Herdr loads it: a duplicate import or a bad path fails here.
+if ! command -v node >/dev/null 2>&1; then
+  echo "node is not on PATH: the mods cannot be load-checked" >&2
+  exit 1
+fi
+node --disable-warning=DEP0205 test/load-mods.mjs
+
 echo "== client unit tests"
 if command -v bun >/dev/null 2>&1; then
   echo "   (bun)"
   bun test --preload ./test/boot-bun.mjs test/
 elif command -v node >/dev/null 2>&1; then
   echo "   (node)"
-  node --import ./test/boot.mjs --test test/
+  node --import ./test/boot.mjs --test 'test/*.test.mjs'
 else
   echo "neither node nor bun is on PATH: the client's tests cannot run" >&2
   exit 1

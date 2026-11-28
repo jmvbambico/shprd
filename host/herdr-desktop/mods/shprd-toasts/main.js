@@ -27,9 +27,11 @@
 
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { run, spaces, theme } from "herdr";
+import { run, setShared, spaces, theme } from "herdr";
 
-import { attach, alive, POLL_WAIT } from "./lib/client.js";
+import { attach, alive, singleFlight, POLL_WAIT } from "./lib/client.js";
+import { canReview } from "./lib/accept.js";
+import { icon, openAccept } from "./lib/panel.js";
 import { spaceIndex } from "./lib/spaces.js";
 import {
   BODY_MAX,
@@ -60,6 +62,8 @@ export default class Toasts extends View {
     this.client = null;
     this.items = [];
     this.dismissed = new Set();
+    this.hovered = null;
+    this.frozen = null;
     this.since = null;
     this.shown = "";
     this.watching = false;
@@ -146,32 +150,41 @@ export default class Toasts extends View {
 
   /** Follows the service's change file, so a poll that died is woken anyway. */
   follow() {
-    if (this.watching || !this.client) return;
-    this.watching = true;
+    if (!this.client || this.watching === this.client.dir) return;
+    // The service follows the shown repository: a new directory is a new watch,
+    // and the loop on the old one ends at its next look.
+    this.watching = this.client.dir;
     const cx = this.cx;
     const dir = this.client.dir;
     cx.spawn(async () => {
-      await followChanges(dir, () => {
-        this.watching = false;
-        this.reload(cx);
-      });
+      // One watcher for the life of this copy: it used to be re-armed on every
+      // change, which left a new followChanges loop (and its host reads)
+      // outstanding per ledger write until the runtime's 1024-task limit.
+      await followChanges(dir, () => this.reload(cx), { stop: () => this.watching !== dir });
     });
   }
 
   /** Re-reads the board once, without waiting for the long poll to answer. */
   reload(cx) {
-    cx.spawn(async (cx) => {
-      try {
-        if (!this.client) return;
-        this.state = await this.client.state();
-        this.absorb([], this.state);
-        cx.notify();
-        this.follow();
-      } catch {
-        this.client = null;
-        this.since = null;
-      }
-    });
+    // A read already in flight is asked for one more run, without a new task
+    // waiting on it: spawned waiters would pile up when changes outrun a read.
+    if (this.__flight) {
+      this.__again = true;
+      return;
+    }
+    cx.spawn(() =>
+      singleFlight(this, async () => {
+        try {
+          if (!this.client) return;
+          this.state = await this.client.state();
+          this.absorb([], this.state);
+          cx.notify();
+        } catch {
+          this.client = null;
+          this.since = null;
+        }
+      }),
+    );
   }
 
   /** Adds what the events and the snapshot say, deduped by their seq. */
@@ -183,17 +196,60 @@ export default class Toasts extends View {
     this.items = mergeNews(this.items, items);
   }
 
+  /** The time toasts expire by: frozen at the moment the pointer came onto one. */
+  clock() {
+    return this.frozen ?? Date.now();
+  }
+
+  /**
+   * The pointer on a toast holds every toast's expiry (Shepherdr's rule,
+   * `mods/toasts/main.js:21-32`): time stops while it is there, and when it goes
+   * each toast gets back the time it was held, so none has lost any.
+   */
+  hover(id, on, cx) {
+    if (on) {
+      if (this.frozen === null || this.frozen === undefined) this.frozen = Date.now();
+      this.hovered = id;
+    } else if (this.hovered === id) {
+      this.hovered = null;
+      const from = this.frozen ?? Date.now();
+      const held = Date.now() - from;
+      this.frozen = null;
+      // Only the toasts that were there when the pointer arrived were held.
+      this.items = this.items.map((item) => (item.at <= from ? { ...item, at: item.at + held } : item));
+    }
+    cx?.notify?.();
+  }
+
   /** Notices a toast whose time is up, and redraws only when one went. */
   expire(cx) {
-    const list = visible(this.items, Date.now(), this.dismissed);
+    const list = visible(this.items, this.clock(), this.dismissed);
     const key = list.map((item) => item.id).join("|");
     if (key === this.shown) return;
     this.shown = key;
     cx.notify();
   }
 
-  /** A click on a toast goes to the thing it is about. */
+  /**
+   * A click on a toast goes to the thing it is about.
+   *
+   * A toast about a task that is ready for review opens the Accept dialog, so the
+   * decision it announces is one click away. That entry point is shprd's own:
+   * Shepherdr's toast click goes to the agent.
+   */
   open(item) {
+    const task = (this.state?.tasks ?? []).find((entry) => entry.id === item.task);
+    if (task && canReview(task)) {
+      openAccept({ task: task.id, title: task.title });
+      return;
+    }
+    // A toast that says a task needs the person opens that task's thread, where
+    // the card that asks is in the timeline (the Asks panel is gone).
+    if (item.level === "warning" && item.task && task) {
+      setShared("tasks.thread", { task: task.id, title: task.title ?? "", at: Date.now() });
+      run("shprd-tasks.open");
+      return;
+    }
     const space = spaceIndex(spaces()).tasks.get(item.task);
     if (space?.id) {
       run("space.select", { id: space.id });
@@ -205,6 +261,8 @@ export default class Toasts extends View {
 
   /** The × on a toast: this one is read, and the person said so. */
   dismiss(id, cx) {
+    // The toast under the pointer is gone, so the pointer has left it.
+    this.hover(id, false, null);
     this.dismissed.add(id);
     this.items = dismiss(this.items, id);
     this.shown = "";
@@ -214,25 +272,23 @@ export default class Toasts extends View {
   render(cx) {
     const t = theme();
     const colors = tone(t);
-    const list = visible(this.items, Date.now(), this.dismissed);
+    const list = visible(this.items, this.clock(), this.dismissed);
     // A float sizes to its content: nothing to say is nothing drawn.
     if (list.length === 0) return div();
     return v_flex()
       .id("toasts")
       .w(WIDTH)
-      .gap(8)
-      .children(list.map((item) => this.item(t, colors, item, cx)));
+      .children(list.map((item, at) => this.item(t, colors, item, at === 0, cx)));
   }
 
   /**
    * One toast: a dot in its level's colour, a one-line title, a body at three
    * lines, and the × that dismisses it.
    *
-   * The dot is filled rather than an icon, so a toast reads at a glance without
-   * an asset, and the × always keeps its place so nothing moves under the
-   * pointer.
+   * The dot is filled, so a toast reads at a glance, and the × keeps its place
+   * and shows only while the pointer is on the toast.
    */
-  item(t, colors, item, cx) {
+  item(t, colors, item, first, cx) {
     const shape = levelTone(item.level);
     const fill = shape === "accent" ? t.accent : (colors[shape] ?? t.accent);
     return h_flex()
@@ -243,11 +299,12 @@ export default class Toasts extends View {
       .gap(10)
       .items_start()
       .rounded(RADIUS.card)
-      .bg(t.popover)
-      .border_1()
-      .border_color(t.border)
+      // The float around the mod is the one card: a toast draws no frame or
+      // background of its own, and each one after the first has a divider on top.
+      .when(!first, (el) => el.border_t(1).border_color(t.border).rounded(0))
       .cursor_pointer()
       .hover((style) => style.bg(t.hover))
+      .on_hover((over, own) => this.hover(item.id, over, own ?? cx))
       .on_click(() => this.open(item))
       .child(div().w(8).h(8).mt(5).flex_none().rounded(4).bg(fill))
       .child(
@@ -276,6 +333,7 @@ export default class Toasts extends View {
             ),
           ),
       )
+      // The × keeps its place and shows on hover, so nothing moves when it does.
       .child(
         div()
           .id(`toast-x-${item.id}`)
@@ -285,14 +343,18 @@ export default class Toasts extends View {
           .items_center()
           .justify_center()
           .rounded(RADIUS.control)
-          .text_size(TEXT.body)
-          .text_color(t.dim)
-          .hover((style) => style.bg(t.hover).text_color(t.foreground))
-          .on_click((_event, own) => {
-            own?.stop_propagation?.();
-            this.dismiss(item.id, own ?? cx);
-          })
-          .child("×"),
+          .when(this.hovered === item.id, (el) =>
+            el
+              .cursor_pointer()
+              .text_color(t.dim)
+              .hover((style) => style.bg(t.hover).text_color(t.foreground))
+              .on_mouse_down("left", (_event, own) => own?.stop_propagation?.())
+              .on_click((_event, own) => {
+                own?.stop_propagation?.();
+                this.dismiss(item.id, own ?? cx);
+              })
+              .child(icon("x", 14, t.dim)),
+          ),
       );
   }
 }

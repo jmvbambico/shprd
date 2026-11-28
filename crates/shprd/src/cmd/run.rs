@@ -30,6 +30,7 @@ use crate::ctx::{CliError, Ctx};
 /// A directory that is not a git repository is left alone: a run there is a
 /// log-only run, which is what the record-only paths and the tests use.
 pub fn start(ctx: &Ctx, args: &RunStartArgs) -> Result<(), CliError> {
+    refuse_a_run_in_flight(ctx)?;
     let repo = ctx.root.to_string_lossy().to_string();
     let kind = EventKind::RunStarted {
         run_id: args.run_id.clone(),
@@ -40,8 +41,12 @@ pub fn start(ctx: &Ctx, args: &RunStartArgs) -> Result<(), CliError> {
     // A refused start must leave nothing behind, so the run's own rule is asked
     // before the branch is made.
     ctx.check(&kind)?;
+    refuse_a_held_branch(&ctx.root, &args.run_id, &args.integration)?;
     let made = ensure_branch(&ctx.root, &args.base, &args.integration)?;
     let event = ctx.commit(kind)?;
+    if let Err(err) = record_baselines(ctx, &args.base) {
+        eprintln!("warning: no gate baseline recorded: {err:#}");
+    }
     if made {
         ctx.commit(EventKind::Resource {
             action: ResourceAction::Created,
@@ -50,7 +55,152 @@ pub fn start(ctx: &Ctx, args: &RunStartArgs) -> Result<(), CliError> {
             task: None,
         })?;
     }
-    emit(ctx, &event)
+    emit(ctx, &event)?;
+    if !ctx.json
+        && let Some(line) = int_worktree_line(ctx, &args.run_id, &args.integration)
+    {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+/// Where shprd lands this run's work, said once at the start: its own worktree,
+/// which holds the integration branch only while a landing is in progress.
+fn int_worktree_line(ctx: &Ctx, run: &str, integration: &str) -> Option<String> {
+    let home = ctx.home.as_deref()?;
+    let layout = shprd_git::worktree::Layout::from_settings(home, &ctx.root);
+    let repo_name = ctx.root.file_name()?.to_string_lossy().into_owned();
+    let path = layout.path(&repo_name, run, "_int");
+    Some(format!(
+        "work lands in its own worktree at {}; it holds {integration:?} only while a task is \
+         landing, so you can `git switch {integration}` in your checkout between lands",
+        path.display()
+    ))
+}
+
+/// Refuses to start while this log's run has not ended, naming it and the verbs
+/// that end it.
+///
+/// The rule that backs this ([`shprd_core::rules::RuleError::RunAlreadyStarted`])
+/// only says "the run has already started": the person needs to know which run
+/// and how to close it.
+fn refuse_a_run_in_flight(ctx: &Ctx) -> Result<(), CliError> {
+    let state = ctx.state()?;
+    let Some(run) = &state.run else {
+        return Ok(());
+    };
+    let advice = if state.finished {
+        format!(
+            "run {} has already finished in this repository's log, which holds one run",
+            run.run_id
+        )
+    } else {
+        format!(
+            "run {} is still running (base {:?}, integration {:?}); end it with `shprd run \
+             close` once its tasks have landed or been dropped, or `shprd run finish \
+             --abandon` to throw its work away",
+            run.run_id, run.base_branch, run.integration_branch
+        )
+    };
+    Err(CliError::Invalid(anyhow!(
+        "refusing to start run: the run has already started: {advice}"
+    )))
+}
+
+/// Refuses an integration branch that another worktree has checked out.
+///
+/// Git allows one checkout per branch, and shprd lands in a worktree of its
+/// own, so a branch the person's checkout holds makes every landing fail. The
+/// refusal says where it is held and offers a branch of the run's own.
+fn refuse_a_held_branch(repo: &Path, run: &str, branch: &str) -> Result<(), CliError> {
+    let git = Git::new(repo);
+    let Some(held) = shprd_git::worktree::checked_out_at(&git, branch) else {
+        return Ok(());
+    };
+    Err(CliError::Invalid(anyhow!(
+        "refusing to start run: branch {branch:?} is checked out at {}, and git allows a branch \
+         in one worktree at a time, so shprd could not land work on it\nswitch that checkout to \
+         another branch (`git -C {} switch -`), or start the run with `--integration \
+         shprd/{run}/int`, a branch shprd makes for this run",
+        held.display(),
+        held.display()
+    )))
+}
+
+/// Seconds a baseline step may take: the same bound `shprd gate` gives a step.
+const BASELINE_STEP_SECS: u64 = 1800;
+
+/// Runs each worker gate on a clean checkout of the base and records how it
+/// fared as a `GateBaselined` event, so a hand-in is judged against it and only
+/// a regression refuses.
+///
+/// The gates run in a detached temporary worktree at the base's commit, never
+/// in the live checkout, so the fingerprint is the base's. Best effort for
+/// absent inputs: a repository with no configured worker gates, no git checkout
+/// or no readable config has no baseline, and then no gate failure is excused.
+/// A baseline that was run but could not be recorded is an error.
+///
+/// Callers: `run start` and `sync` (when the base moved).
+pub fn record_baselines(ctx: &Ctx, base: &str) -> Result<usize, anyhow::Error> {
+    let root = ctx.root.as_path();
+    let repo = root.join(".shprd").join("config.toml");
+    let Ok(config) = shprd_core::config::load(None, Some(&repo)) else {
+        return Ok(0);
+    };
+    let commands = config.gates.worker;
+    if commands.is_empty() {
+        return Ok(0);
+    }
+    let git = Git::new(root);
+    let Ok(sha) = git.rev_parse(base) else {
+        return Ok(0);
+    };
+    let checkout = root
+        .join(".shprd")
+        .join(format!("baseline-checkout-{}", std::process::id()));
+    if checkout.exists() {
+        let _ = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["worktree", "remove", "--force"])
+            .arg(&checkout)
+            .output();
+        let _ = std::fs::remove_dir_all(&checkout);
+    }
+    let added = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["worktree", "add", "--detach"])
+        .arg(&checkout)
+        .arg(&sha)
+        .output()?;
+    if !added.status.success() {
+        let _ = std::fs::remove_dir_all(&checkout);
+        return Err(anyhow!(
+            "checking out the base {sha} for its gate baseline: {}",
+            String::from_utf8_lossy(&added.stderr).trim()
+        ));
+    }
+    let ran = shprd_git::gate::run_baseline(
+        &checkout,
+        &commands,
+        &sha,
+        std::time::Duration::from_secs(BASELINE_STEP_SECS),
+        &[],
+    );
+    let _ = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["worktree", "remove", "--force"])
+        .arg(&checkout)
+        .output();
+    let count = ran.len();
+    ctx.commit(EventKind::GateBaselined {
+        base_sha: sha,
+        entries: ran,
+    })
+    .map_err(|err| anyhow!("recording the gate baseline: {err:?}"))?;
+    Ok(count)
 }
 
 /// Makes sure `branch` exists, cutting it from `base` when it does not.
@@ -111,6 +261,21 @@ pub fn finish_verb(ctx: &Ctx, args: &EndRunArgs, home: Option<&Path>) -> Result<
         ctx,
         home,
         EndRun::finish(args.abandon, args.yes).acting_as(confirm::named_actor()),
+    )
+}
+
+/// `shprd run close`: ends a run whose work is done, and abandons nothing.
+///
+/// Every task has to be landed or dropped, and the work has to have somewhere to
+/// be: a run whose base and integration branch are one branch has no pull
+/// request to wait for. Anything else is refused with the tasks named, and the
+/// refusal points at `run finish --abandon` for throwing work away.
+pub fn close_verb(ctx: &Ctx, home: Option<&Path>) -> Result<(), CliError> {
+    finish(
+        &spawn::real_mux(),
+        ctx,
+        home,
+        EndRun::finish(false, false).acting_as(confirm::named_actor()),
     )
 }
 
@@ -382,6 +547,56 @@ mod tests {
     use super::*;
     use crate::cmd::spawn::fault::{Fault, FlakyMux};
 
+    #[test]
+    fn run_start_records_the_gates_as_they_fail_on_the_base() -> Result<()> {
+        let repo = TempDir::new()?;
+        let git = |args: &[&str]| -> Result<()> {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(repo.path())
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(args)
+                .output()?;
+            anyhow::ensure!(out.status.success(), "git {args:?}: {out:?}");
+            Ok(())
+        };
+        git(&["init", "-q", "-b", "main"])?;
+        std::fs::create_dir_all(repo.path().join(".shprd"))?;
+        std::fs::write(
+            repo.path().join(".shprd/config.toml"),
+            "[gates]\nworker = [\"echo '62 errors'; exit 1\"]\n",
+        )?;
+        std::fs::write(repo.path().join("a.txt"), "a")?;
+        git(&["add", "a.txt"])?;
+        git(&["commit", "-q", "-m", "base"])?;
+        let ctx = Ctx::new(
+            repo.path().to_path_buf(),
+            shprd_core::event::Actor::Human,
+            false,
+            true,
+        );
+        ctx.commit(EventKind::RunStarted {
+            run_id: "rbase1".to_string(),
+            repo: repo.path().display().to_string(),
+            base_branch: "main".to_string(),
+            integration_branch: "shprd/rbase1/int".to_string(),
+        })
+        .map_err(|err| anyhow!("{err:?}"))?;
+        let n = record_baselines(&ctx, "main")?;
+        assert_eq!(n, 1);
+        let state = ctx.state().map_err(|err| anyhow::anyhow!("{err:?}"))?;
+        let entry = state
+            .gate_baselines
+            .entries
+            .first()
+            .context("one baseline")?;
+        assert!(!entry.passed);
+        assert_eq!(entry.exit_code, Some(1));
+        assert_eq!(entry.fingerprint.errors, Some(62));
+        assert_eq!(entry.base_sha.len(), 40);
+        Ok(())
+    }
+
     /// The run id every fixture starts, so a tab record finds its run folder.
     const RUN: &str = "rrun1";
 
@@ -466,11 +681,20 @@ mod tests {
 
     /// Starts a run with the id the end-of-run tests expect.
     fn started(ctx: &Ctx) -> Result<()> {
+        // A test that started the run its own way keeps it.
+        if ctx.state().map_err(failed)?.run.is_some() {
+            return Ok(());
+        }
+        started_on(ctx, "shprd/rabc123/int")
+    }
+
+    /// Starts the run on `integration`, cut from `main`.
+    fn started_on(ctx: &Ctx, integration: &str) -> Result<()> {
         ctx.commit(EventKind::RunStarted {
             run_id: "rabc123".to_string(),
             repo: "/tmp/repo".to_string(),
             base_branch: "main".to_string(),
-            integration_branch: "shprd/rabc123/int".to_string(),
+            integration_branch: integration.to_string(),
         })
         .map_err(failed)?;
         Ok(())
@@ -526,14 +750,32 @@ mod tests {
     /// The reported task's first gate passed, so it waits to be integrated.
     fn passed_task(ctx: &Ctx) -> Result<()> {
         reported_task(ctx)?;
-        ctx.commit(EventKind::GatePassed {
-            task: "M4.1".to_string(),
-            attempt: 1,
-            gate: "tests".to_string(),
-            findings: Vec::new(),
-            source: None,
-        })
-        .map_err(failed)?;
+        let engine = Ctx {
+            actor: shprd_core::event::Actor::Engine,
+            ..ctx.clone()
+        };
+        let request = engine
+            .commit(EventKind::ReviewRequested {
+                task: "M4.1".to_string(),
+                attempt: 1,
+                reviewer: "codex/m1".to_string(),
+                degraded: false,
+                note: None,
+            })
+            .map_err(failed)?;
+        engine
+            .commit(EventKind::GatePassed {
+                task: "M4.1".to_string(),
+                attempt: 1,
+                gate: "review".to_string(),
+                findings: Vec::new(),
+                source: Some(shprd_core::event::ReviewSource {
+                    reviewer: "codex/m1".to_string(),
+                    findings_sha256: "ba7816bf8f01cfea".to_string(),
+                    request_seq: request.seq,
+                }),
+            })
+            .map_err(failed)?;
         Ok(())
     }
 
@@ -644,14 +886,10 @@ mod tests {
         Ok(())
     }
 
-    /// Run end takes every task space and leaves the coordinator's alone.
-    ///
-    /// A run with no task in flight still has the spaces its tasks were given
-    /// (a dropped or abandoned one, say); ending the run is what removes them,
-    /// and the repository-level space is where a person's coordinator lives, so
-    /// it is never shprd's to close.
+    /// Run end stops every agent a task left and never closes the repository's
+    /// space: it is where the coordinator lives, so it is not shprd's to close.
     #[test]
-    fn finish_closes_the_tasks_spaces_and_keeps_the_coordinators() -> Result<()> {
+    fn finish_stops_the_tasks_agents_and_keeps_the_repositorys_space() -> Result<()> {
         let fixture = Fixture::new()?;
         let ctx = fixture.ctx()?;
         ctx.commit(EventKind::TaskAdded {
@@ -671,15 +909,23 @@ mod tests {
             .file_name()
             .map(|name| name.to_string_lossy().to_string())
             .unwrap_or_default();
-        let coordinator = mux
+        let space = mux
             .create_space(&spawn::repo_space_name(&repo_name), fixture.repo.path())
             .map_err(|err| anyhow!("{err}"))?;
-        let task = mux
-            .create_space(
-                &spawn::task_space_name(&repo_name, RUN, "T2"),
-                fixture.repo.path(),
-            )
+        let agent = mux
+            .spawn_agent(&shprd_mux::AgentLaunch {
+                space: &space.id,
+                title: "worker",
+                argv: &[],
+                env: &[],
+                cwd: fixture.repo.path(),
+                role: shprd_mux::AgentRole::Worker,
+                task: Some("T2"),
+                program: "claude",
+                parent: None,
+            })
             .map_err(|err| anyhow!("{err}"))?;
+        fixture.record("T2-a1.tab", &agent.id)?;
 
         finish(
             &mux,
@@ -689,28 +935,25 @@ mod tests {
         )
         .map_err(failed)?;
 
-        let spaces: Vec<shprd_mux::SpaceId> = mux
-            .calls()
-            .into_iter()
-            .filter_map(|call| match call {
-                Call::CloseSpace(closed) => Some(closed),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(spaces, vec![task.id.clone()], "only the task's space goes");
+        assert!(
+            mux.list_agents()
+                .map_err(|err| anyhow!("{err}"))?
+                .is_empty(),
+            "the task's agent was stopped"
+        );
+        assert!(
+            !mux.calls()
+                .iter()
+                .any(|call| matches!(call, Call::CloseSpace(_))),
+            "no space is closed: {:?}",
+            mux.calls()
+        );
         assert!(
             mux.find_space(&spawn::repo_space_name(&repo_name))
                 .map_err(|err| anyhow!("{err}"))?
                 .is_some(),
             "the coordinator's space stayed"
         );
-        assert!(
-            mux.find_space(&spawn::task_space_name(&repo_name, RUN, "T2"))
-                .map_err(|err| anyhow!("{err}"))?
-                .is_none(),
-            "the task's space stayed"
-        );
-        assert!(coordinator.id != task.id);
         Ok(())
     }
 
@@ -1055,6 +1298,138 @@ mod tests {
         )
         .map_err(failed)?;
         assert!(ctx.state().map_err(failed)?.finished);
+        Ok(())
+    }
+
+    /// A run with one task integrated, no pull request ever opened, on a run
+    /// whose base is its integration branch.
+    fn landed_on_the_base(ctx: &Ctx) -> Result<()> {
+        started_on(ctx, "main")?;
+        passed_task(ctx)?;
+        ctx.commit(EventKind::Integrated {
+            task: "M4.1".to_string(),
+            commits: vec!["abc1234".to_string()],
+        })
+        .map_err(failed)?;
+        Ok(())
+    }
+
+    #[test]
+    fn close_ends_a_landed_run_whose_base_is_its_integration_branch() -> Result<()> {
+        let (fixture, ctx, mux) = end_fixture()?;
+        landed_on_the_base(&ctx)?;
+        // `run finish` before the fix refused this: no pull request would ever
+        // merge. Close needs no pull request and no `--abandon`.
+        finish(
+            &mux,
+            &ctx,
+            Some(fixture.home.path()),
+            EndRun::finish(false, false),
+        )
+        .map_err(failed)?;
+        let state = ctx.state().map_err(failed)?;
+        assert!(state.finished);
+        assert!(state.abandoned.is_empty(), "closing abandons nothing");
+        Ok(())
+    }
+
+    #[test]
+    fn close_still_refuses_unlanded_work_on_a_separate_integration_branch() -> Result<()> {
+        let (fixture, ctx, mux) = end_fixture()?;
+        passed_task(&ctx)?;
+        ctx.commit(EventKind::Integrated {
+            task: "M4.1".to_string(),
+            commits: vec!["abc1234".to_string()],
+        })
+        .map_err(failed)?;
+        let err = finish(
+            &mux,
+            &ctx,
+            Some(fixture.home.path()),
+            EndRun::finish(false, false),
+        )
+        .err()
+        .context("work with a pull request to merge must not close")?;
+        assert!(err.to_string().contains("pull request"), "{err}");
+        assert!(err.to_string().contains("--abandon"), "{err}");
+        Ok(())
+    }
+
+    /// A git repository with one commit on `main`, in `fixture`'s repo folder.
+    fn git_repo(fixture: &Fixture) -> Result<()> {
+        for args in [
+            &["init", "-q", "-b", "main"][..],
+            &["config", "user.email", "t@example.invalid"],
+            &["config", "user.name", "t"],
+            &["commit", "-q", "--allow-empty", "-m", "first"],
+        ] {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(fixture.repo.path())
+                .output()?;
+            anyhow::ensure!(out.status.success(), "git {args:?} failed");
+        }
+        Ok(())
+    }
+
+    fn start_args(integration: &str) -> RunStartArgs {
+        RunStartArgs {
+            run_id: "r9".to_string(),
+            base: "main".to_string(),
+            integration: integration.to_string(),
+        }
+    }
+
+    #[test]
+    fn start_refuses_an_integration_branch_the_checkout_holds_and_says_where() -> Result<()> {
+        let fixture = Fixture::new()?;
+        git_repo(&fixture)?;
+        let ctx = fixture.empty();
+        // `main` is checked out in the repository itself.
+        let err = start(&ctx, &start_args("main"))
+            .err()
+            .context("a held branch must refuse the start")?;
+        assert_eq!(err.exit_code(), 2, "{err}");
+        let text = err.to_string();
+        assert!(text.contains("checked out at"), "{text}");
+        assert!(text.contains("one worktree at a time"), "{text}");
+        assert!(
+            text.contains("shprd/r9/int"),
+            "the alternative is offered: {text}"
+        );
+        assert!(
+            ctx.state().map_err(failed)?.run.is_none(),
+            "a refused start writes nothing"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn start_on_a_free_branch_works_and_says_where_int_lives() -> Result<()> {
+        let fixture = Fixture::new()?;
+        git_repo(&fixture)?;
+        let ctx = fixture
+            .empty()
+            .with_home(Some(fixture.home.path().to_path_buf()));
+        start(&ctx, &start_args("shprd/r9/int")).map_err(failed)?;
+        let line = int_worktree_line(&ctx, "r9", "shprd/r9/int").context("a home is known")?;
+        assert!(line.contains("_int"), "{line}");
+        assert!(line.contains("git switch shprd/r9/int"), "{line}");
+        Ok(())
+    }
+
+    #[test]
+    fn start_names_the_running_run_and_the_verbs_that_end_it() -> Result<()> {
+        let fixture = Fixture::new()?;
+        let ctx = fixture.ctx()?;
+        let err = start(&ctx, &start_args("shprd/r9/int"))
+            .err()
+            .context("a run is already in flight")?;
+        let text = err.to_string();
+        assert!(text.contains("the run has already started"), "{text}");
+        assert!(text.contains(RUN), "names the run: {text}");
+        assert!(text.contains("shprd run close"), "{text}");
+        assert!(text.contains("shprd run finish --abandon"), "{text}");
         Ok(())
     }
 }

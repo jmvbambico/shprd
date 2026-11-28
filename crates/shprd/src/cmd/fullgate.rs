@@ -52,7 +52,7 @@ pub fn gate_verb(ctx: &Ctx, args: &FullGateArgs, home: Option<&Path>) -> Result<
         return Err(CliError::Invalid(anyhow!(NO_GATE)));
     }
     let home = resolve_home(home)?;
-    let layout = resolve_layout(Some(&home), &config.janitor.namespace)?;
+    let layout = resolve_layout(Some(&home), &ctx.root)?;
     let repo_name = ctx
         .root
         .file_name()
@@ -168,6 +168,7 @@ fn worker_env(worktree: &Path, run_id: &str) -> Vec<(String, Option<String>)> {
         // A gate step often runs `shprd` itself, and must resolve the config and
         // harness table this engine did.
         home: crate::ctx::resolve_home(None).ok(),
+        bin: shprd_agents::env::service_bin(),
         data: crate::cmd::roster::resolve_data_dir()
             .env_value()
             .map(Path::to_path_buf),

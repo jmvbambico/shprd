@@ -97,6 +97,17 @@ pub enum Command {
     Janitor(JanitorArgs),
     /// Recreate a task's branch from its newest attempt's archive ref.
     Restore(RestoreArgs),
+    /// Remote access: the login password every tunnel's browser must enter, and
+    /// the sessions it starts.
+    ///
+    /// The password is set here, at this terminal, and never over the web: the
+    /// web app is the shell a tunnel exposes, so it can never reset the
+    /// credential that guards it. A password change ends every session.
+    Web {
+        /// Which web verb.
+        #[command(subcommand)]
+        cmd: WebCommand,
+    },
     /// Detect the agent CLIs installed here, their version and sign-in state.
     Roster(RosterArgs),
     /// Write a roster role into the global config, or with `--repo <PATH>`
@@ -172,6 +183,15 @@ pub enum Command {
     /// writes nothing the second time; `--dry-run` writes nothing and prints
     /// the same plan.
     Install(InstallArgs),
+    /// Apply an accepted change to shprd itself: build it, swap it in, restart
+    /// once, and roll back when the new one does not come up. The service starts
+    /// this when `tasks.self_update` is on; it is not for typing.
+    #[command(hide = true)]
+    SelfUpdate {
+        /// What to do.
+        #[command(subcommand)]
+        cmd: SelfUpdateCommand,
+    },
     /// Advance the run once, now: start what may start, land what may land.
     ///
     /// This is the same pass `shprd serve` runs every `tasks.tick_secs`
@@ -278,6 +298,84 @@ pub struct DropArgs {
     pub yes: bool,
 }
 
+/// The `shprd web` verbs.
+#[derive(Debug, Subcommand)]
+pub enum WebCommand {
+    /// The login password: set it here, or forget it.
+    Password {
+        /// Which password verb.
+        #[command(subcommand)]
+        cmd: PasswordCommand,
+    },
+    /// List the browser sessions, or end one or all of them.
+    Sessions(SessionsArgs),
+    /// Put the web app on a tunnel, so a phone or another machine can reach it.
+    ///
+    /// The tunnel runs as a child of the running `shprd serve` and ends with it,
+    /// so this asks the service to start it. A provider on the public internet
+    /// (everything but `tailscale`) refuses to start unless a login password is
+    /// set — `shprd web password set` — and there is no flag around that. The
+    /// providers are your own programs from `PATH`; nothing is downloaded.
+    Up(UpArgs),
+    /// Stop the tunnel.
+    Down,
+    /// Show whether a tunnel is up. The link is masked unless `--show-url`.
+    Status(StatusArgs),
+}
+
+/// Arguments for `shprd web up`.
+#[derive(Debug, Args)]
+pub struct UpArgs {
+    /// Which provider: `tailscale`, `cloudflared`, `cloudflared-named`, `ngrok`
+    /// or `tunnl`. Without it, the `web.tunnel` setting decides (`tailscale`
+    /// unless you changed it).
+    #[arg(long, value_name = "PROVIDER", value_parser = ["tailscale", "cloudflared", "cloudflared-named", "ngrok", "tunnl"])]
+    pub tunnel: Option<String>,
+    /// tunnl.gg only: keep the same address between runs (it is tied to your SSH
+    /// key). Without it the `web.stable` setting decides.
+    #[arg(long)]
+    pub stable: bool,
+    /// Print the link and its QR code instead of a masked link. The link is the
+    /// address of a login page that reaches a shell: do not paste it in a chat.
+    #[arg(long = "show-url")]
+    pub show_url: bool,
+}
+
+/// Arguments for `shprd web status`.
+#[derive(Debug, Args)]
+pub struct StatusArgs {
+    /// Print the link and its QR code instead of a masked link.
+    #[arg(long = "show-url")]
+    pub show_url: bool,
+}
+
+/// The `shprd web password` verbs.
+#[derive(Debug, Subcommand)]
+pub enum PasswordCommand {
+    /// Set the password, typed twice at this terminal without echo.
+    ///
+    /// It must be at least twelve characters, and not one of the commonest
+    /// passwords or this machine's own name. Every existing session ends, because
+    /// each of them trusted the old password.
+    Set,
+    /// Forget the password.
+    ///
+    /// Nothing can sign in through the web afterwards — the loopback token is
+    /// the way back in — and every session ends.
+    Clear,
+}
+
+/// Arguments for `shprd web sessions`.
+#[derive(Debug, Args)]
+pub struct SessionsArgs {
+    /// End the session whose id starts with this (the id `sessions` prints).
+    #[arg(long, value_name = "ID", conflicts_with = "revoke_all")]
+    pub revoke: Option<String>,
+    /// End every session.
+    #[arg(long = "revoke-all")]
+    pub revoke_all: bool,
+}
+
 /// Arguments for `serve`.
 #[derive(Debug, Args)]
 pub struct ServeArgs {
@@ -291,6 +389,54 @@ pub struct ServeArgs {
     /// as `shprd_server=debug`.
     #[arg(long, value_name = "PORT", default_value_t = 0)]
     pub port: u16,
+}
+
+/// The verbs under `self-update`.
+#[derive(Debug, Subcommand)]
+pub enum SelfUpdateCommand {
+    /// Run one update for a repository, under the updater's lock.
+    Run(SelfUpdateArgs),
+}
+
+/// Arguments for `self-update run`. Every path is required: the helper has no
+/// default install to fall back on.
+#[derive(Debug, Args)]
+pub struct SelfUpdateArgs {
+    /// The updater's folder: its lock, request counter and what is installed.
+    #[arg(long, value_name = "PATH", required = true)]
+    pub work_dir: PathBuf,
+    /// The service's state directory, where `service.json` names the pid.
+    #[arg(long, value_name = "PATH", required = true)]
+    pub state_dir: PathBuf,
+    /// The repository whose landing is being applied.
+    #[arg(long, value_name = "PATH", required = true)]
+    pub repo: PathBuf,
+    /// The branch the task landed on.
+    #[arg(long, value_name = "BRANCH", required = true)]
+    pub base: String,
+    /// The landing was local (no forge): read the head from the local branch.
+    #[arg(long)]
+    pub local: bool,
+    /// The running binary's own file: the one swapped, with `.prev` kept beside.
+    #[arg(long, value_name = "PATH", required = true)]
+    pub install_path: PathBuf,
+    /// The shprd home the desktop install and the news are for.
+    #[arg(long, value_name = "PATH", required = true)]
+    pub home_dir: PathBuf,
+    /// The Herdr app home to install the desktop into, when not the default.
+    #[arg(long, value_name = "PATH")]
+    pub app_home: Option<PathBuf>,
+    /// Seconds the restarted service has to answer its health check.
+    #[arg(long, value_name = "SECS", default_value_t = 90)]
+    pub health_timeout_secs: u64,
+    /// Do not tell the coordinator (a test has none).
+    #[arg(long)]
+    pub no_news: bool,
+    /// The build command, after `--`; the default is rustup's `cargo build
+    /// --release -p shprd`. It runs in the build worktree and leaves its binary
+    /// at `$CARGO_TARGET_DIR/release/shprd`.
+    #[arg(last = true)]
+    pub build: Vec<String>,
 }
 
 /// Arguments for `install`.
@@ -312,19 +458,26 @@ pub struct InstallArgs {
     /// person's own window.
     #[arg(long = "app-home", value_name = "PATH")]
     pub app_home: Option<PathBuf>,
-    /// The host tree to install from; defaults to `$SHPRD_HOST_DIR`, then a
-    /// `host/herdr-desktop` beside the working directory (a checkout or a
-    /// worktree of shprd), then the copy embedded in this binary.
+    /// The host tree to install from; defaults to `$SHPRD_HOST_DIR`, then `--repo`,
+    /// then the tree this binary was built from (its own checkout in a debug
+    /// build), then the copy embedded in this binary. The working directory is
+    /// never searched.
     ///
     /// A named tree must be one: a `--from` that holds no `layouts/` is refused
     /// rather than quietly falling back to the embedded copy.
     #[arg(long, value_name = "PATH")]
     pub from: Option<PathBuf>,
-    /// The checkout whose `host/herdr-desktop` is installed, when the working
-    /// directory is not the one to search; defaults to the working directory
-    /// and its parent, which is a worktree's shape.
+    /// The checkout whose `host/herdr-desktop` is installed. It wins over the
+    /// binary's own tree, but not over `--from` or `$SHPRD_HOST_DIR`.
     #[arg(long, value_name = "PATH")]
     pub repo: Option<PathBuf>,
+    /// Let an agent write into the person's real `~/.config/herdr-app`.
+    ///
+    /// Without it, an install started by an agent (an `HC_*` or `HERDR_*` child
+    /// variable, or `SHPRD_ACTOR=agent:*`) refuses to write there. A private
+    /// `--app-home` or `$HERDR_APP_HOME` is never refused.
+    #[arg(long)]
+    pub allow_agent: bool,
 }
 
 /// The hosts `shprd install` can set up.
@@ -566,6 +719,11 @@ pub enum RunCommand {
     Start(RunStartArgs),
     /// Finish the run; nothing may follow.
     Finish(EndRunArgs),
+    /// Close the run once its work is done: every task landed or dropped, and
+    /// nothing left to merge (a run whose base and integration branch are one
+    /// branch has no pull request). It throws nothing away; `run finish
+    /// --abandon` is the verb for that.
+    Close,
 }
 
 /// Arguments for `run start`.
@@ -618,6 +776,55 @@ pub enum AgentCommand {
     Handoff(HandoffArgs),
     /// Open a cross-vendor reviewer on a finished attempt's diff.
     Review(ReviewArgs),
+    /// Propose a human-only verb: the person confirms it on a card.
+    ///
+    /// Raises one needs-you card on the task naming the verb and the reason,
+    /// with the choices `confirm <verb>` and `leave it`. Nothing is run by this
+    /// verb: only the person's confirmation runs it, as the person, so
+    /// recovery never needs a terminal of their own.
+    Propose(ProposeArgs),
+}
+
+/// The human-only verbs an agent may propose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum ProposedVerb {
+    /// `shprd drop`: the task will not be done.
+    Drop,
+    /// `shprd task reopen`: a handed-in task is worked on again.
+    Reopen,
+    /// `shprd sync`: bring the base branch into the integration branch.
+    Sync,
+    /// `shprd override`: set a rule aside for the task.
+    Override,
+    /// `shprd readmit`: an agent is usable again.
+    Readmit,
+    /// `shprd run close`: the run's work is all landed or dropped, so the run
+    /// ends and a new one can start. It throws nothing away.
+    ///
+    /// The card hangs on the task the agent is working on, because a card is
+    /// drawn in one task's timeline; the verb it confirms is the run's, so
+    /// `shprd run close` is what runs, not a task's own.
+    Close,
+}
+
+/// Arguments for `agent propose`.
+#[derive(Debug, Args)]
+pub struct ProposeArgs {
+    /// The verb to propose.
+    #[arg(value_enum, value_name = "VERB")]
+    pub verb: ProposedVerb,
+    /// The task whose card carries the proposal.
+    #[arg(value_name = "TASK")]
+    pub task: String,
+    /// Why, in one sentence for the person.
+    #[arg(long, value_name = "TEXT")]
+    pub reason: String,
+    /// For `override`: the rule to set aside.
+    #[arg(long, value_name = "RULE")]
+    pub rule: Option<String>,
+    /// For `readmit`: the agent to bring back.
+    #[arg(long, value_name = "AGENT")]
+    pub agent: Option<String>,
 }
 
 /// Plan verbs.
@@ -658,6 +865,35 @@ pub enum AskCommand {
     /// no hook of its own (pi, opencode) is left untouched, and the board falls
     /// back to reading its screen.
     Install(AskInstallArgs),
+    /// List the run's asks, one line each: task, id, state, kind, first line.
+    ///
+    /// Open asks by default; `--all` adds answered and expired ones. `--json`
+    /// prints the full asks, so nobody parses the event log.
+    List(AskListArgs),
+    /// Print one ask's full question and options (`--json` for the whole ask).
+    Show(AskShowArgs),
+}
+
+/// Arguments for `ask list`.
+#[derive(Debug, Args)]
+pub struct AskListArgs {
+    /// Also list answered and expired asks.
+    #[arg(long)]
+    pub all: bool,
+    /// Only this task's asks.
+    #[arg(long, value_name = "TASK")]
+    pub task: Option<String>,
+}
+
+/// Arguments for `ask show`.
+#[derive(Debug, Args)]
+pub struct AskShowArgs {
+    /// The ask's id.
+    #[arg(value_name = "ID")]
+    pub id: String,
+    /// The task, when the same id exists on more than one.
+    #[arg(long, value_name = "TASK")]
+    pub task: Option<String>,
 }
 
 /// Arguments for `ask raise`.
@@ -748,6 +984,17 @@ pub struct AskHookArgs {
 pub enum TaskVerb {
     /// Record a short progress line for a task.
     Status(TaskStatusArgs),
+    /// Move a handed-in (Reported or Passed) task back to Working, for the same
+    /// attempt and worktree, so its worker can hand in again. A human's verb.
+    Reopen(TaskReopenArgs),
+}
+
+/// Arguments for `task reopen`.
+#[derive(Debug, Args)]
+pub struct TaskReopenArgs {
+    /// The task to reopen.
+    #[arg(value_name = "TASK")]
+    pub task: String,
 }
 
 /// Arguments for `task status`.
@@ -767,14 +1014,17 @@ pub struct TaskStatusArgs {
 /// Arguments for `agent task add`.
 #[derive(Debug, Args)]
 pub struct TaskAddArgs {
-    /// Task id, e.g. `M1.6`.
+    /// Task id, e.g. `M1.6`. Leave it out and shprd assigns the next free
+    /// `<PREFIX>-<n>` (a 3-letter prefix from the repository's name, e.g.
+    /// `SHP-12`; `tasks.id_prefix` overrides it) and prints it.
     #[arg(long, value_name = "ID")]
-    pub id: String,
+    pub id: Option<String>,
     /// One-line title.
     #[arg(long, value_name = "TITLE")]
     pub title: String,
-    /// Repo-relative path the task may change; repeatable.
-    #[arg(long = "scope", value_name = "PATH", required = true)]
+    /// Repo-relative path where the task is expected to work; repeatable and
+    /// optional. A hint for its worker, never a limit.
+    #[arg(long = "scope", value_name = "PATH")]
     pub scope: Vec<String>,
     /// What must be true when the task is done; repeatable.
     #[arg(long = "acceptance", value_name = "TEXT", required = true)]

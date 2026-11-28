@@ -135,6 +135,13 @@ pub struct Facts {
     /// this fact: reading and judging the file is the executor's work.
     #[serde(default)]
     pub settled_findings: BTreeSet<String>,
+    /// The tasks whose real diff touches a protected path they did not declare
+    /// ([`crate::gate::protected_undeclared`]).
+    ///
+    /// Such a task never lands by itself: under an automatic merge policy it
+    /// waits for the person's Accept, as under `ask`. Nothing is refused.
+    #[serde(default)]
+    pub protected: BTreeSet<String>,
 }
 
 impl Facts {
@@ -161,6 +168,15 @@ pub enum Step {
     /// Start the engine's reviewer on a task that just handed in.
     Review {
         /// The task to review.
+        task: String,
+    },
+    /// Pass a task that handed in clean checks while review is off.
+    ///
+    /// Review is off for the repository (`tasks.review_rounds = 0`, or no
+    /// reviewer), so the hand-in's own checks are the only verdict there is.
+    /// The executor records it as a `ReviewSkipped` event.
+    SkipReview {
+        /// The task to pass.
         task: String,
     },
     /// Decide the review of a task whose reviewer has written its findings.
@@ -227,6 +243,7 @@ impl Step {
         match self {
             Self::Start { task }
             | Self::Review { task }
+            | Self::SkipReview { task }
             | Self::Verdict { task }
             | Self::Land { task, .. }
             | Self::MarkLanded { task, .. }
@@ -241,6 +258,7 @@ impl Step {
         match self {
             Self::Start { .. } => "start",
             Self::Review { .. } => "review",
+            Self::SkipReview { .. } => "skip_review",
             Self::Verdict { .. } => "verdict",
             Self::Land { .. } => "land",
             Self::MarkLanded { .. } => "mark_landed",
@@ -350,6 +368,14 @@ fn step_for(
             task: task.id.clone(),
         });
     }
+    // Review is off: the hand-in's own checks pass it, on the log. Only when
+    // review is off by configuration; a review that is on and failed to start
+    // never reaches here.
+    if !input.review && awaiting_review(task) {
+        return Some(Step::SkipReview {
+            task: task.id.clone(),
+        });
+    }
     // A reviewer only describes what it found: the file it writes is turned into
     // a gate result by the engine, and a settled file nobody decided yet is that
     // work. The recorded gate is what stops the next pass deciding it again, and
@@ -371,8 +397,18 @@ fn step_for(
     // Not while its agent has taken the work up again: a landing judges the
     // commit the branch is at, and an agent that is writing produces another.
     let busy = facts.is_live(&task.id) || matches!(phase, Phase::Working | Phase::Merging);
-    if !busy && !nothing_to_merge && rules::ready_to_land(task).is_ok() {
+    // A task already landed is never landed again, whatever its approvals or
+    // overrides: `ready_to_land` accepts an accepted failure at any status.
+    let landed = matches!(task.status, TaskStatus::Integrated | TaskStatus::Dropped);
+    if !busy && !landed && !nothing_to_merge && rules::ready_to_land(task).is_ok() {
         let policy = input.config.land.policy_for(landing_target);
+        // A task that touched a protected path it did not declare is the
+        // person's to accept, whatever the merge policy says.
+        let policy = if facts.protected.contains(&task.id) {
+            MergePolicy::Ask
+        } else {
+            policy
+        };
         let land = Step::Land {
             task: task.id.clone(),
             policy,
@@ -418,8 +454,13 @@ fn step_for(
     if task.status != TaskStatus::Queued
         || !matches!(phase, Phase::ToDo | Phase::Queued)
         || !deps_landed(state, task)
-        || *running >= max_running
     {
+        return None;
+    }
+    // Declared paths are a hint, not a lock: two tasks that name the same file
+    // run together, and a real clash is caught when the second one lands. Order
+    // between tasks comes from their declared dependencies.
+    if *running >= max_running {
         return None;
     }
     *running += 1;
@@ -452,16 +493,35 @@ fn after_failed_review(
     if task.latest_attempt().is_some_and(|attempt| attempt.stopped) {
         return None;
     }
-    gate::latest_failed_review(task)?;
+    // A landing that clashed with work that landed after the task was cut is
+    // not a review failure: it goes back at once and spends no review round.
+    let conflict = rules::landing_conflict(task);
+    if !conflict {
+        gate::latest_failed_review(task)?;
+    }
     let attempt = task.latest_attempt()?.n;
     // The allowance is the configured one plus every round a person granted by
     // answering this task's card, so one answer buys one attempt.
     let allowed = gate::allowance(state, task, input.config.review.rounds);
-    match gate::after_failure(task, allowed) {
+    let next = if conflict {
+        Next::SendBack
+    } else {
+        gate::after_failure(task, allowed)
+    };
+    match next {
         // A send-back is a spawn, so it takes a slot and an agent that is still
         // live on the task keeps it: the attempt it replaces must be finished.
         Next::SendBack => {
-            if input.facts.is_live(&task.id) || matches!(phase, Phase::Working | Phase::Merging) {
+            //
+            // A clash is the exception to the live-agent rule: the attempt
+            // ended on a hand-in (or a landing) that was judged, and a worker
+            // idle in its pane after handing in stays listed as live until
+            // something closes it. Waiting for it would leave the redo
+            // undone for ever and the task on Needs you. The spawn closes
+            // the old worker as it archives the attempt it replaces.
+            if (input.facts.is_live(&task.id) && !conflict)
+                || matches!(phase, Phase::Working | Phase::Merging)
+            {
                 return None;
             }
             // A send-back that did not start is a person's to start: one card
@@ -522,10 +582,16 @@ fn running_count(state: &RunState, facts: &Facts, phases: &BTreeMap<String, Phas
 }
 
 /// Whether one task counts as running.
+///
+/// A task whose derived phase is `NeedsYou` holds no slot, even while its agent
+/// is still there: an agent that stopped, or went idle without handing in,
+/// is waiting for a person, and counting it would starve the queue behind it.
 fn is_running(id: &str, task: &Task, facts: &Facts, phases: &BTreeMap<String, Phase>) -> bool {
-    facts.is_live(id)
-        || matches!(phases.get(id), Some(Phase::Working | Phase::Merging))
-        || task.status == TaskStatus::Working
+    match phases.get(id) {
+        Some(Phase::NeedsYou) => false,
+        Some(Phase::Working | Phase::Merging) => true,
+        _ => facts.is_live(id) || task.status == TaskStatus::Working,
+    }
 }
 
 /// Whether a task hands in work that passed its own checks and has no review
@@ -608,7 +674,24 @@ fn approval_matches(task: &Task, pr: Option<&PrFacts>) -> bool {
             .and_then(|attempt| attempt.report.as_ref())
             .and_then(|report| report.commit.as_deref())
     });
-    head == Some(approved)
+    head.is_some_and(|head| same_commit(head, approved))
+}
+
+/// Whether two commit ids name the same commit: equal, or one is a prefix of
+/// the other of at least 7 hex characters (a worker's report may carry the
+/// short form of the full SHA an approval records). Case-insensitive; an
+/// empty string never matches, and a prefix match needs hex.
+pub fn same_commit(a: &str, b: &str) -> bool {
+    let (a, b) = (a.trim(), b.trim());
+    if !a.is_empty() && a == b {
+        return true;
+    }
+    let hex = |s: &str| s.len() >= 7 && s.bytes().all(|c| c.is_ascii_hexdigit());
+    if !hex(a) || !hex(b) {
+        return false;
+    }
+    let (short, long) = if a.len() <= b.len() { (a, b) } else { (b, a) };
+    long[..short.len()].eq_ignore_ascii_case(short)
 }
 
 /// Whether this task's `ask` was already recorded, so a pass says it once.
@@ -632,9 +715,15 @@ pub fn needs_you_prefix(task: &str) -> String {
 /// What a human is told when a ready task's `ask` has no forge to approve on.
 ///
 /// A local landing has no pull request, so the only approval path is shprd's
-/// own `shprd approve <task>`: the message must not send the reader to a forge.
+/// own: the message must not send the reader to a forge. The person reads it in the
+/// desktop (a toast, the chat, the status bar, the row), where nobody types a
+/// command, so it names the Accept button, not `shprd approve` (SHPR-83). The words
+/// after the prefix are the only thing that changed: the prefix is the marker.
 pub fn needs_you_body_local(task: &str) -> String {
-    format!("{}: run `shprd approve {task}`", needs_you_prefix(task))
+    format!(
+        "{}: Review and Accept it in the Tasks pane",
+        needs_you_prefix(task)
+    )
 }
 
 /// What a human is told when a ready task's policy is `ask`.
@@ -644,7 +733,7 @@ pub fn needs_you_body(task: &str, number: Option<u64>) -> String {
         None => String::from("its pull request"),
     };
     format!(
-        "{} and its merge policy asks: approve {which} on the forge, or run `shprd approve {task}`",
+        "{} and its merge policy asks: Review and Accept it in the Tasks pane, or approve {which} on the forge",
         needs_you_prefix(task)
     )
 }
@@ -723,6 +812,7 @@ mod tests {
                     command: "cargo test".to_string(),
                     exit_code: Some(0),
                     output_tail: "ok".to_string(),
+                    pre_existing: None,
                 }],
                 changed_paths: vec![format!("src/{id}/x.rs")],
                 commit: Some(format!("{id}-commit")),
@@ -740,6 +830,7 @@ mod tests {
                 attempt,
                 reviewer: "codex".to_string(),
                 degraded: false,
+                note: None,
             },
         )
     }
@@ -886,6 +977,105 @@ mod tests {
         plan_with(state, facts, config, false)
     }
 
+    /// A task added with a scope of its own.
+    fn added_scoped(seq: u64, id: &str, scope: &str) -> Event {
+        ev(
+            seq,
+            EventKind::TaskAdded {
+                task: id.to_string(),
+                title: format!("task {id}"),
+                scope: vec![scope.to_string()],
+                acceptance: vec!["it works".to_string()],
+                tags: Vec::new(),
+                skills: Vec::new(),
+                deps: Vec::new(),
+            },
+        )
+    }
+
+    #[test]
+    fn tasks_with_overlapping_paths_start_in_the_same_pass() {
+        let log = vec![
+            started(1),
+            added_scoped(2, "T1", "calc"),
+            spawned(3, "T1", 1),
+            added_scoped(4, "T4", "calc/ops.py"),
+            added_scoped(5, "T5", "README.md"),
+            added_scoped(6, "T7", "README.md"),
+        ];
+        let state = folded(&log);
+        let steps = plan_for(&state, &Facts::default(), &config(MergePolicy::Ask, 4));
+        assert_eq!(
+            steps,
+            vec![
+                Step::Start {
+                    task: "T4".to_string()
+                },
+                Step::Start {
+                    task: "T5".to_string()
+                },
+                Step::Start {
+                    task: "T7".to_string()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_task_beside_a_handed_in_task_on_the_same_paths_starts() {
+        let log = vec![
+            started(1),
+            added_scoped(2, "T6", "src/T6"),
+            spawned(3, "T6", 1),
+            reported(4, "T6", 1),
+            added_scoped(5, "T7", "src/T6/y.rs"),
+        ];
+        let state = folded(&log);
+        let steps = plan_for(&state, &Facts::default(), &config(MergePolicy::Ask, 4));
+        assert!(
+            steps
+                .iter()
+                .any(|step| matches!(step, Step::Start { task } if task == "T7")),
+            "{steps:?}"
+        );
+    }
+
+    #[test]
+    fn a_working_task_that_needs_you_holds_no_slot() {
+        // Bug 15: two workers, one slot each of two. T1's agent is gone (or idle
+        // without handing in), so its derived phase is NeedsYou: T5 may start.
+        let log = vec![
+            started(1),
+            added(2, "T1", &[]),
+            spawned(3, "T1", 1),
+            added(4, "T2", &[]),
+            spawned(5, "T2", 1),
+            added(6, "T5", &[]),
+        ];
+        let state = folded(&log);
+        let mut phases = phases(&state);
+        let mut facts = Facts::default();
+        facts.live.insert("T1".to_string());
+        facts.live.insert("T2".to_string());
+        let input = |phases: &BTreeMap<String, Phase>| {
+            plan(&Input {
+                state: &state,
+                phases,
+                facts: &facts,
+                config: &config(MergePolicy::Ask, 2),
+                review: false,
+            })
+        };
+        assert!(input(&phases).is_empty(), "both slots are held");
+        phases.insert("T1".to_string(), Phase::NeedsYou);
+        assert_eq!(
+            input(&phases),
+            vec![Step::Start {
+                task: "T5".to_string()
+            }]
+        );
+    }
+
     #[test]
     fn a_queued_task_whose_dependency_landed_starts() {
         // A is done: spawned, handed in, gated and integrated. B waits for it.
@@ -894,7 +1084,8 @@ mod tests {
             added(2, "A", &[]),
             spawned(3, "A", 1),
             reported(4, "A", 1),
-            gated(5, "A", 1, "lint"),
+            review_requested(5, "A", 1),
+            review_passed(5, "A", 1, 5),
             integrated(6, "A"),
             added(7, "B", &["A"]),
         ];
@@ -972,6 +1163,23 @@ mod tests {
                 policy: MergePolicy::Auto,
             }]
         );
+    }
+
+    #[test]
+    fn a_task_flagged_for_a_protected_path_waits_for_accept_under_auto() {
+        let state = folded(&ready_log("A"));
+        let mut facts = Facts {
+            local: true,
+            ..Facts::default()
+        };
+        facts.protected.insert("A".to_string());
+        for policy in [MergePolicy::Auto, MergePolicy::Checks] {
+            let steps = plan_for(&state, &facts, &config(policy, 4));
+            assert!(
+                matches!(steps.as_slice(), [Step::NeedsYou { task, .. }] if task == "A"),
+                "{policy:?}: {steps:?}"
+            );
+        }
     }
 
     #[test]
@@ -1193,7 +1401,12 @@ mod tests {
         let mut facts = Facts::default();
         facts.settled_findings.insert("A".to_string());
         let steps = plan_with(&state, &facts, &config(MergePolicy::Auto, 4), false);
-        assert!(steps.is_empty(), "{steps:?}");
+        assert!(
+            !steps
+                .iter()
+                .any(|step| matches!(step, Step::Verdict { .. })),
+            "{steps:?}"
+        );
     }
 
     #[test]
@@ -1229,6 +1442,72 @@ mod tests {
                 policy: MergePolicy::Ask,
             }]
         );
+    }
+
+    fn short_report_commit_log(approved: &str) -> Vec<Event> {
+        let mut log = ready_log("A");
+        for event in &mut log {
+            if let EventKind::Reported { commit, .. } = &mut event.kind {
+                *commit = Some("c1dc924".to_string());
+            }
+        }
+        log.push(ev(
+            7,
+            EventKind::TaskPrOpened {
+                task: "A".to_string(),
+                number: 7,
+                url: "https://example.invalid/pull/7".to_string(),
+                head: "shprd/r1/A".to_string(),
+            },
+        ));
+        log.push(Event {
+            seq: 8,
+            at_ms: 8_000,
+            actor: Actor::Human,
+            kind: EventKind::TaskApproved {
+                task: "A".to_string(),
+                number: 7,
+                head_sha: approved.to_string(),
+            },
+        });
+        log
+    }
+
+    #[test]
+    fn a_short_report_commit_matches_the_full_approved_sha() {
+        let log = short_report_commit_log("c1dc9247e7eea8e38d5f0505722f1472384d5688");
+        let steps = plan_for(
+            &folded(&log),
+            &Facts::default(),
+            &config(MergePolicy::Ask, 4),
+        );
+        assert_eq!(
+            steps,
+            vec![Step::Land {
+                task: "A".to_string(),
+                policy: MergePolicy::Ask,
+            }]
+        );
+        // Same first 6 characters, a different commit: no landing.
+        let log = short_report_commit_log("c1dc92ffffffffffffffffffffffffffffffffff");
+        let steps = plan_for(
+            &folded(&log),
+            &Facts::default(),
+            &config(MergePolicy::Ask, 4),
+        );
+        assert!(!steps.iter().any(|s| matches!(s, Step::Land { .. })));
+    }
+
+    #[test]
+    fn same_commit_rules() {
+        let full = "c1dc9247e7eea8e38d5f0505722f1472384d5688";
+        assert!(same_commit("c1dc924", full));
+        assert!(same_commit("C1DC924", full));
+        assert!(same_commit(full, "c1dc924"));
+        assert!(!same_commit("c1dc92", full));
+        assert!(!same_commit("", full));
+        assert!(!same_commit("", ""));
+        assert!(!same_commit("c1dc925", full));
     }
 
     #[test]
@@ -1414,8 +1693,9 @@ mod tests {
 
     #[test]
     fn a_hand_in_is_not_reviewed_when_no_reviewer_is_configured() {
-        // With no reviewer in the settings there is nothing to start, so the
-        // pass leaves the hand-in alone rather than failing a step every tick.
+        // With review off (no reviewer, or no rounds) there is nothing to
+        // start: the clean hand-in passes on its checks, recorded as a skip,
+        // rather than failing a review step every tick.
         let log = vec![
             started(1),
             added(2, "A", &[]),
@@ -1424,17 +1704,76 @@ mod tests {
         ];
         let state = folded(&log);
         let steps = plan_for(&state, &Facts::default(), &config(MergePolicy::Auto, 4));
-        assert!(steps.is_empty(), "{steps:?}");
+        assert_eq!(
+            steps,
+            vec![Step::SkipReview {
+                task: "A".to_string()
+            }]
+        );
     }
 
+    /// Review on but never started is not review off: nothing passes the task.
     #[test]
-    fn a_task_that_is_not_ready_to_land_is_left_alone() {
-        // Reported, never reviewed: not ready, and not startable either.
+    fn a_review_that_is_on_is_never_skipped() {
         let log = vec![
             started(1),
             added(2, "A", &[]),
             spawned(3, "A", 1),
             reported(4, "A", 1),
+        ];
+        let state = folded(&log);
+        let steps = plan_with(
+            &state,
+            &Facts::default(),
+            &config(MergePolicy::Auto, 4),
+            true,
+        );
+        assert!(
+            !steps
+                .iter()
+                .any(|step| matches!(step, Step::SkipReview { .. })),
+            "{steps:?}"
+        );
+    }
+
+    /// With review off a repository passes on its gates alone: the skip is
+    /// planned once, and once recorded the task is Passed.
+    #[test]
+    fn review_off_passes_on_the_hand_ins_checks() {
+        let mut log = vec![
+            started(1),
+            added(2, "A", &[]),
+            spawned(3, "A", 1),
+            reported(4, "A", 1),
+        ];
+        log.push(ev(
+            5,
+            EventKind::ReviewSkipped {
+                task: "A".to_string(),
+                attempt: 1,
+            },
+        ));
+        let state = folded(&log);
+        assert_eq!(state.tasks["A"].status, TaskStatus::Passed);
+        let steps = plan_for(&state, &Facts::default(), &config(MergePolicy::Auto, 4));
+        assert!(
+            !steps
+                .iter()
+                .any(|step| matches!(step, Step::SkipReview { .. })),
+            "the skip is recorded once: {steps:?}"
+        );
+    }
+
+    #[test]
+    fn a_task_that_is_not_ready_to_land_is_left_alone() {
+        // Reported, its review out and undecided: not ready, and not startable
+        // either.
+        let log = vec![
+            started(1),
+            added(2, "A", &[]),
+            spawned(3, "A", 1),
+            reported(4, "A", 1),
+            review_requested(5, "A", 1),
         ];
         let state = folded(&log);
         let steps = plan_for(&state, &Facts::default(), &config(MergePolicy::Auto, 4));
@@ -1501,6 +1840,76 @@ mod tests {
         let after = folded(&log);
         let steps = plan_for(&after, &Facts::default(), &config(MergePolicy::Auto, 4));
         assert!(steps.is_empty(), "A has landed: {steps:?}");
+    }
+
+    /// The chat-tail shape: the review failed on every round, a person
+    /// overrode the failure and approved the head.
+    fn overridden_approved_log(id: &str) -> Vec<Event> {
+        let mut log = two_failed_rounds_log(id);
+        log.push(spawned(11, id, 3));
+        log.push(reported(12, id, 3));
+        log.push(review_requested(13, id, 3));
+        log.push(review_failed(14, id, 3, 13));
+        log.push(ev(
+            15,
+            EventKind::TaskPrOpened {
+                task: id.to_string(),
+                number: 7,
+                url: String::from("https://example.invalid/pull/7"),
+                head: format!("shprd/r1/{id}"),
+            },
+        ));
+        log.push(Event {
+            seq: 16,
+            at_ms: 16_000,
+            actor: Actor::Human,
+            kind: EventKind::Override {
+                task: id.to_string(),
+                rule: crate::rules::INTEGRATE_AFTER_FAILED_GATE.to_string(),
+                reason: String::from("take it as it is"),
+            },
+        });
+        log.push(Event {
+            seq: 17,
+            at_ms: 17_000,
+            actor: Actor::Human,
+            kind: EventKind::TaskApproved {
+                task: id.to_string(),
+                number: 7,
+                head_sha: format!("{id}-commit"),
+            },
+        });
+        log
+    }
+
+    #[test]
+    fn an_overridden_approved_task_lands_once() {
+        let mut log = overridden_approved_log("A");
+        let state = folded(&log);
+        let cfg = config(MergePolicy::Ask, 4);
+        let steps = plan_for(&state, &Facts::default(), &cfg);
+        assert_eq!(
+            steps,
+            vec![Step::Land {
+                task: "A".to_string(),
+                policy: MergePolicy::Ask,
+            }]
+        );
+        log.push(ev(
+            20,
+            EventKind::TaskLanded {
+                task: "A".to_string(),
+                base: "main".to_string(),
+                head: "A-commit".to_string(),
+                number: Some(7),
+                outcome: LandOutcome::Merged,
+            },
+        ));
+        let after = folded(&log);
+        for policy in [MergePolicy::Ask, MergePolicy::Auto, MergePolicy::Checks] {
+            let steps = plan_for(&after, &Facts::default(), &config(policy, 4));
+            assert!(steps.is_empty(), "A has landed ({policy:?}): {steps:?}");
+        }
     }
 
     /// A log whose one task handed in and had its review fail on attempt 1.
@@ -1709,9 +2118,9 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_non_review_gate_is_left_to_its_own_escalation() {
-        // A landing that conflicted records a failed `integrate` gate and an
-        // escalation of its own; the review passed, so it is not sent back.
+    fn a_landing_that_clashed_is_sent_back_without_spending_a_review_round() {
+        // A landing that conflicted records a failed `integrate` gate. The
+        // review passed, so no round is spent: the task goes back at once.
         let mut log = ready_log("A");
         log.push(ev(
             7,
@@ -1721,7 +2130,7 @@ mod tests {
                 gate: String::from("integrate"),
                 findings: vec![crate::event::Finding {
                     severity: crate::event::Severity::Major,
-                    title: String::from("conflicts with the integration branch"),
+                    title: String::from("clashed with work that landed after it"),
                     location: None,
                     detail: String::new(),
                 }],
@@ -1730,7 +2139,54 @@ mod tests {
         ));
         let state = folded(&log);
         let steps = plan_for(&state, &Facts::default(), &config(MergePolicy::Auto, 4));
-        assert!(steps.is_empty(), "{steps:?}");
+        assert_eq!(
+            steps,
+            vec![Step::SendBack {
+                task: String::from("A"),
+                attempt: 1
+            }]
+        );
+        assert_eq!(crate::gate::failed_review_rounds(&state.tasks["A"]), 0);
+        // Said once: the attempt it started is the next pass's newest.
+    }
+
+    #[test]
+    fn a_clash_is_redone_even_while_the_finished_worker_is_still_listed_live() {
+        // The live bug: a hand-in clashed before its review, and the worker that
+        // handed in sat idle in its pane, so it stayed in the live set. The redo
+        // waited on it for ever and the task stayed on Needs you.
+        let mut log = vec![
+            started(1),
+            added(2, "A", &[]),
+            spawned(3, "A", 1),
+            reported(4, "A", 1),
+        ];
+        log.push(ev(
+            5,
+            EventKind::GateFailed {
+                task: String::from("A"),
+                attempt: 1,
+                gate: String::from("integrate"),
+                findings: Vec::new(),
+                source: None,
+            },
+        ));
+        log.push(escalated(
+            6,
+            "A",
+            "A clashed with work that landed after it; it is being redone on top of the latest",
+        ));
+        let state = folded(&log);
+        let mut facts = Facts::default();
+        facts.live.insert(String::from("A"));
+        let steps = plan_for(&state, &facts, &config(MergePolicy::Auto, 4));
+        assert_eq!(
+            steps,
+            vec![Step::SendBack {
+                task: String::from("A"),
+                attempt: 1
+            }]
+        );
     }
 
     #[test]

@@ -1,0 +1,8 @@
+<!-- Shepherdr (MIT), path `mods/tasks/pie/25.svg`, commit a3f327a (tag v3.1.34),
+     https://github.com/eliasstravik/shepherdr
+     Copyright (c) 2026 Elias Stravik. Copied whole; see
+     THIRD_PARTY_NOTICES.md at the repository root. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 14 14">
+  <circle cx="7" cy="7" r="6.25" fill="none" stroke="currentColor" stroke-width="1.5"/>
+  <path d="M7 7V3.5A3.5 3.5 0 0 1 10.500 7.000Z" fill="currentColor"/>
+</svg>

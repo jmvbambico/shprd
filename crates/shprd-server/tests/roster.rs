@@ -20,6 +20,12 @@ use shprd_server::App;
 use tempfile::TempDir;
 use tower::ServiceExt;
 
+/// The `Host` every fixture request is addressed to.
+///
+/// The gate refuses a request with no `Host` (`421`), so a test that drove the
+/// router without one would be testing the refusal, not the route.
+const HOST: &str = "127.0.0.1:18080";
+
 /// The port the fixture claims; no `Origin` is sent, so it is only a label.
 const PORT: u16 = 18_092;
 
@@ -70,6 +76,7 @@ impl Fixture {
         let request = Request::builder()
             .method(Method::GET)
             .uri("/api/roster")
+            .header(header::HOST, HOST)
             .header(header::AUTHORIZATION, format!("Bearer {}", self.token))
             .body(Body::empty())
             .expect("the request");
@@ -128,14 +135,27 @@ async fn a_static_catalog_supplies_the_models_and_their_levels() {
     assert_eq!(claude["vendor"], "anthropic");
     assert_eq!(claude["models_source"], "static");
     let models = claude["models"].as_array().expect("models");
-    assert_eq!(models.len(), 3, "{claude}");
-    assert_eq!(models[1]["id"], "opus");
-    assert_eq!(models[1]["name"], "Opus");
+    assert_eq!(models.len(), 8, "{claude}");
+    let ids: Vec<&str> = models
+        .iter()
+        .map(|model| model["id"].as_str().unwrap())
+        .collect();
+    assert!(
+        ids.contains(&"haiku") && ids.contains(&"opus[1m]"),
+        "{ids:?}"
+    );
+    let opus = &models[3];
     assert_eq!(
-        models[1]["efforts"],
+        opus["vendor"], "anthropic",
+        "a model names its vendor: {opus}"
+    );
+    assert_eq!(opus["id"], "opus");
+    assert_eq!(opus["name"], "Opus 5.5");
+    assert_eq!(
+        opus["efforts"],
         serde_json::json!(["low", "medium", "high", "xhigh", "max"])
     );
-    assert_eq!(models[1]["default_effort"], "medium");
+    assert_eq!(opus["default_effort"], "medium");
     assert_eq!(claude["default_permission"], "manual");
     assert_eq!(claude["fast"], true);
     assert!(
@@ -172,6 +192,7 @@ async fn the_roster_needs_a_token_like_every_other_read() {
     let request = Request::builder()
         .method(Method::GET)
         .uri("/api/roster")
+        .header(header::HOST, HOST)
         .body(Body::empty())
         .expect("the request");
     let response = fixture

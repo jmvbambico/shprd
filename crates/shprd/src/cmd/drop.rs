@@ -26,7 +26,7 @@ use crate::ctx::{CliError, Ctx};
 
 /// Drops a task against the host the human is working in.
 pub fn drop_verb(ctx: &Ctx, args: &DropArgs, home: Option<&Path>) -> Result<(), CliError> {
-    drop_task(&spawn::real_mux(), ctx, args, home, &confirm::named_actor())
+    drop_task(&spawn::real_mux(), ctx, args, home)
 }
 
 /// Drops a task, closing the space it works in first.
@@ -39,13 +39,8 @@ pub fn drop_task(
     ctx: &Ctx,
     args: &DropArgs,
     home: Option<&Path>,
-    actor: &str,
 ) -> Result<(), CliError> {
-    confirm::require_human(
-        actor,
-        "drops a task",
-        "ask the maintainer to run `shprd drop`",
-    )?;
+    ctx.require_human("drops a task", "ask the maintainer to run `shprd drop`")?;
     let state = ctx.state()?;
     let run = state.run.as_ref().ok_or_else(|| {
         CliError::Invalid(anyhow!(
@@ -82,7 +77,7 @@ pub fn drop_task(
     // into a task the run has decided against — its branch may be archived and
     // its worktree gone by the time it commits — so a close that genuinely
     // fails refuses the drop, and nothing is written.
-    stop_task_tabs(mux, ctx, home, &run.run_id, &args.task)?;
+    stop_task_tabs(mux, home, &run.run_id, &args.task)?;
     let event = ctx.commit(kind)?;
     crate::cmd::emit(ctx, &event)?;
     if !ctx.json {
@@ -121,7 +116,6 @@ fn dropped_phrase(task: &str, status: &str, task_record: &shprd_core::state::Tas
 /// that cannot check must not go ahead and leave the agent behind.
 fn stop_task_tabs(
     mux: &dyn Host,
-    ctx: &Ctx,
     home: Option<&Path>,
     run: &str,
     task: &str,
@@ -132,15 +126,10 @@ fn stop_task_tabs(
         )))
     })?;
     let briefs = home.join(".shprd").join("briefs");
-    let repo_name = spawn::repo_name(&ctx.root).map_err(|err| {
-        CliError::Invalid(anyhow!(err).context(format!(
-            "the repository's folder name could not be read, so the space of task {task} cannot be found: run `shprd drop` from the repository"
-        )))
-    })?;
-    spawn::close_task_space(mux, &briefs, run, &repo_name, task).map_err(|err| {
+    spawn::stop_task_agents(mux, &briefs, run, task).map_err(|err| {
         CliError::Invalid(
             anyhow!(err).context(format!(
-                "task {task} may still have an agent working in it: close the space or tab it names by hand, then run `shprd drop` again"
+                "task {task} may still have an agent working in it: stop the agent it names by hand, then run `shprd drop` again"
             )),
         )
     })
@@ -247,13 +236,33 @@ mod tests {
         /// Drives `T1` on to Passed, with a passing `tests` gate.
         fn passed(&self) -> Result<()> {
             self.reported()?;
-            self.commit(EventKind::GatePassed {
-                task: "T1".to_string(),
-                attempt: 1,
-                gate: "tests".to_string(),
-                findings: Vec::new(),
-                source: None,
-            })
+            let engine = Ctx {
+                actor: shprd_core::event::Actor::Engine,
+                ..self.ctx.clone()
+            };
+            let request = engine
+                .commit(EventKind::ReviewRequested {
+                    task: "T1".to_string(),
+                    attempt: 1,
+                    reviewer: "codex/m1".to_string(),
+                    degraded: false,
+                    note: None,
+                })
+                .map_err(|err| anyhow!("{err}"))?;
+            engine
+                .commit(EventKind::GatePassed {
+                    task: "T1".to_string(),
+                    attempt: 1,
+                    gate: "review".to_string(),
+                    findings: Vec::new(),
+                    source: Some(shprd_core::event::ReviewSource {
+                        reviewer: "codex/m1".to_string(),
+                        findings_sha256: "ba7816bf8f01cfea".to_string(),
+                        request_seq: request.seq,
+                    }),
+                })
+                .map(|_| ())
+                .map_err(|err| anyhow!("{err}"))
         }
 
         /// Writes one tab record under `name`, as a spawn or a review leaves it.
@@ -307,14 +316,7 @@ mod tests {
         let tab = shprd_mux::TabId::new("tab-7");
         fixture.record_tab(&tab)?;
 
-        drop_task(
-            &fake,
-            &fixture.ctx,
-            &fixture.args(),
-            fixture.home(),
-            "human",
-        )
-        .map_err(failed)?;
+        drop_task(&fake, &fixture.ctx, &fixture.args(), fixture.home()).map_err(failed)?;
 
         assert_eq!(status(&fixture)?, TaskStatus::Dropped);
         let state = fixture.ctx.state().map_err(failed)?;
@@ -339,14 +341,7 @@ mod tests {
         fixture.working()?;
         let fake = FakeMux::default();
 
-        drop_task(
-            &fake,
-            &fixture.ctx,
-            &fixture.args(),
-            fixture.home(),
-            "human",
-        )
-        .map_err(failed)?;
+        drop_task(&fake, &fixture.ctx, &fixture.args(), fixture.home()).map_err(failed)?;
 
         assert_eq!(status(&fixture)?, TaskStatus::Dropped);
         Ok(())
@@ -360,10 +355,9 @@ mod tests {
 
         let err = drop_task(
             &FakeMux::default(),
-            &fixture.ctx,
+            &fixture.ctx.as_actor(shprd_core::event::Actor::Orchestrator),
             &fixture.args(),
             fixture.home(),
-            "orchestrator",
         )
         .err()
         .context("an orchestrator may not drop a task")?;
@@ -387,15 +381,9 @@ mod tests {
 
         // The test harness's stdin is not a terminal, which is exactly the case
         // an agent's shell tool is in.
-        let err = drop_task(
-            &FakeMux::default(),
-            &fixture.ctx,
-            &args,
-            fixture.home(),
-            "human",
-        )
-        .err()
-        .context("a drop with no terminal and no --yes must be refused")?;
+        let err = drop_task(&FakeMux::default(), &fixture.ctx, &args, fixture.home())
+            .err()
+            .context("a drop with no terminal and no --yes must be refused")?;
 
         assert_eq!(err.exit_code(), 2, "{err}");
         assert!(err.to_string().contains("shprd drop"), "{err}");
@@ -503,15 +491,9 @@ mod tests {
         fixture.record_tab(&tab)?;
         let before = fixture.log_text()?;
 
-        let err = drop_task(
-            &fake,
-            &fixture.ctx,
-            &fixture.args(),
-            fixture.home(),
-            "human",
-        )
-        .err()
-        .context("a tab the host keeps must refuse the drop")?;
+        let err = drop_task(&fake, &fixture.ctx, &fixture.args(), fixture.home())
+            .err()
+            .context("a tab the host keeps must refuse the drop")?;
 
         assert_eq!(err.exit_code(), 2, "{err}");
         let message = err.to_string();
@@ -531,14 +513,7 @@ mod tests {
         let fake = FakeMux::default();
         fixture.record_tab(&shprd_mux::TabId::new("tab-7"))?;
 
-        drop_task(
-            &fake,
-            &fixture.ctx,
-            &fixture.args(),
-            fixture.home(),
-            "human",
-        )
-        .map_err(failed)?;
+        drop_task(&fake, &fixture.ctx, &fixture.args(), fixture.home()).map_err(failed)?;
 
         assert_eq!(status(&fixture)?, TaskStatus::Dropped);
         Ok(())
@@ -556,14 +531,7 @@ mod tests {
         fixture.record_tab(&worker)?;
         fixture.record_review_tab(&reviewer)?;
 
-        drop_task(
-            &fake,
-            &fixture.ctx,
-            &fixture.args(),
-            fixture.home(),
-            "human",
-        )
-        .map_err(failed)?;
+        drop_task(&fake, &fixture.ctx, &fixture.args(), fixture.home()).map_err(failed)?;
 
         assert!(
             fake.calls().contains(&Call::CloseTab(reviewer)),
@@ -593,14 +561,7 @@ mod tests {
         fixture.record("T1-audit-a1.tab", &neighbour)?;
         fixture.record("T1-audit-a1-review.tab", &neighbour_reviewer)?;
 
-        drop_task(
-            &fake,
-            &fixture.ctx,
-            &fixture.args(),
-            fixture.home(),
-            "human",
-        )
-        .map_err(failed)?;
+        drop_task(&fake, &fixture.ctx, &fixture.args(), fixture.home()).map_err(failed)?;
 
         let calls = fake.calls();
         assert!(
@@ -637,7 +598,6 @@ mod tests {
             &fixture.ctx,
             &fixture.args(),
             fixture.home(),
-            "human",
         )
         .err()
         .context("an integrated task may not be dropped")?;

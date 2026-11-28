@@ -1,0 +1,14 @@
+
+[1;32m  ● Tunnel is live[0m[38;5;245m on tunnl.gg[0m
+
+[38;5;245m  URL      [0m[38;5;141mhttps://kind-stone-00000000.tunnl.gg[0m
+[38;5;245m           [0m[38;5;245mrandom: connect as stable@ to keep the same URL[0m
+[38;5;245m  Expires  [0min 24h, or after 2h without traffic
+[38;5;245m  Transfer [0m5 GB a day[38;5;245m, 0 B used today (resets at 00:00 UTC)[0m
+[38;5;245m           [0m[38;5;245mPro: your own name, no time limits and 10 GB a day, from $5/mo: https://tunnl.gg/pricing?utm_source=ssh&utm_campaign=time[0m
+[38;5;245m  Account  [0m[38;5;245mSee and replay every request with a free account: https://tunnl.gg/dashboard?utm_source=ssh&utm_campaign=signup[0m
+
+
+[38;5;245m  Requests appear below. Press Ctrl+C to stop.[0m
+
+  [38;5;245mTIME UTC  METHOD   PATH                                      STATUS      SIZE    TOOK  VISITOR[0m

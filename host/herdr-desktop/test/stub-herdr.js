@@ -22,6 +22,11 @@ export function home() {
   return HOME;
 }
 
+/** The app's own folder, as `appHome()` answers it. */
+export function appHome() {
+  return HOME;
+}
+
 export async function readTextFile(path) {
   READS.push(path);
   const entry = FILES.get(path);
@@ -51,8 +56,14 @@ export function reset() {
   HC_CALLS.length = 0;
   SPACES = [];
   RUNS.length = 0;
+  KNOWN = [];
+  OVERLAYS.length = 0;
+  CLOSED.length = 0;
   SHARED.clear();
   PROPS = {};
+  LAYOUT = null;
+  OVERLAYS.length = 0;
+  CLOSED.length = 0;
 }
 
 /** What `exec` answers; a test replaces it. */
@@ -119,6 +130,69 @@ export function spaces() {
   return SPACES;
 }
 
+/** Herdr's live pane and terminal lists; a test sets them. */
+export let PANES = [];
+export let TERMINALS = [];
+
+/** Sets what `panes()` answers. */
+export function setPanes(next) {
+  PANES = next;
+}
+
+/** Sets what `terminals()` answers. */
+export function setTerminals(next) {
+  TERMINALS = next;
+}
+
+export function panes() {
+  return PANES;
+}
+
+export function terminals() {
+  return TERMINALS;
+}
+
+/** Herdr's layout tree, as `layout()` answers it; a test sets it. */
+export let LAYOUT = null;
+
+/** Sets the tree `layout()` answers: sizes, stacks and ids, as the layout file has them. */
+export function setLayout(next) {
+  LAYOUT = next;
+}
+
+export function layout() {
+  return LAYOUT;
+}
+
+/** Every overlay a mod opened, in order: what `openOverlay` was given. */
+export const OVERLAYS = [];
+
+/** The overlays closed, in order: their ids. */
+export const CLOSED = [];
+
+/** Ids the next `openOverlay` calls answer with, so a test can name one. */
+let overlaySeq = 0;
+
+/**
+ * `openOverlay`: records the spec and answers an id, as the app does.
+ *
+ * The props a mod opens itself with are what the app hands the new copy, so the
+ * overlay id is added to them here too — a popup reads `props().overlay` to close
+ * itself.
+ */
+export function openOverlay(spec) {
+  overlaySeq += 1;
+  const id = `overlay-${overlaySeq}`;
+  OVERLAYS.push({ id, ...spec, props: { ...(spec?.props ?? {}), overlay: id } });
+  return id;
+}
+
+/** `closeOverlay`: records the id and answers null, as the app does. */
+export function closeOverlay(id) {
+  CLOSED.push(id);
+  return null;
+}
+
 /** Runs an app command; a test can read what was asked for. */
 export const RUNS = [];
 
@@ -164,5 +238,31 @@ export function theme() {
     working: "#f5b544",
     blocked: "#ff6369",
     accent: "#5b8def",
+    chrome: "#1e1e1e",
+    popover: "#252525",
+    selected: "#333333",
+    solid: "#eeeeee",
+    solid_foreground: "#111111",
   };
+}
+
+/** The agents Herdr knows, as `knownAgents()` answers: a test sets them. */
+export let KNOWN = [];
+export function setKnown(next) {
+  KNOWN = next;
+}
+export async function knownAgents() {
+  return KNOWN;
+}
+
+/** What `focused()` answers (`{ agent }` is the agent the Terminal block shows); a test sets it. */
+export let FOCUSED = null;
+
+/** Sets what `focused()` answers. */
+export function setFocused(next) {
+  FOCUSED = next;
+}
+
+export function focused() {
+  return FOCUSED;
 }

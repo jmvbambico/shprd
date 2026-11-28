@@ -17,7 +17,7 @@
 //!                                     // | escalate | nudge | backup | give_up
 //!       "task": "T1",
 //!       "ok": true,
-//!       "detail": "started T1 attempt 1 with claude in ...",
+//!       "detail": "started T1·a1 with claude in ...",
 //!       "seq": 42                     // the log line it appended, when it did
 //!     }
 //!   ]
@@ -40,6 +40,7 @@
 //! failed is printed and stays in the report — it never stops the other steps,
 //! so it is not the verb's own failure.
 
+use shprd_core::state::TaskStatus;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -93,7 +94,8 @@ pub(crate) fn worker_with_hub(
 ) -> Result<Worker, CliError> {
     let repo = ctx.root.clone();
     let actor = shprd_core::event::Actor::Engine;
-    let forge: shprd_server::SharedForge = std::sync::Arc::from(forge(&repo)?);
+    let forge: shprd_server::SharedForge =
+        std::sync::Arc::from(forge(&repo, &crate::cmd::land::gh_user(home, &repo))?);
     // The live overlay is the host's word: a task with an agent in its tab is
     // at work, and a pass must not land a commit an agent is still writing. A
     // host that cannot be asked answers "nothing is live", which is what a
@@ -110,16 +112,22 @@ pub(crate) fn worker_with_hub(
         }
         crate::cmd::spawn::live_tasks(&*live_host, &live_home, state)
     });
+    let idle_repo = repo.display().to_string();
+    let idle_home = home.to_path_buf();
+    let idle_host = std::sync::Arc::clone(&host);
+    let idle: shprd_server::IdleFn = std::sync::Arc::new(move |state| {
+        if record_only() || Path::new(&idle_repo).file_name().is_none() {
+            return Default::default();
+        }
+        crate::cmd::spawn::idle_tasks(&*idle_host, &idle_home, state)
+    });
     let facts: std::sync::Arc<dyn shprd_server::FactsSource> =
-        std::sync::Arc::new(shprd_server::LiveFacts {
-            forge: forge.clone(),
-            live,
-        });
+        std::sync::Arc::new(shprd_server::LiveFacts::new(forge.clone(), live).with_idle(idle));
     let spawn_home = home.to_path_buf();
     let spawn_actor = actor.clone();
     let start: Starter = std::sync::Arc::new(move |repo: &Path, task: &str| {
         let spawn_ctx = Ctx::new(repo.to_path_buf(), spawn_actor.clone(), false, true);
-        crate::cmd::agent::start_for_tick(&spawn_ctx, &spawn_home, task)
+        start_once(&spawn_ctx, &spawn_home, repo, task)
     });
     // The engine starts the reviewer on a hand-in, as `shprd agent review` does:
     // the closure is that verb's own `review()`, so the cross-vendor rule, the
@@ -146,6 +154,17 @@ pub(crate) fn worker_with_hub(
                 .map_err(|err| err.to_string())
         }) as shprd_server::ReviewCloser
     });
+    // A reviewer whose account is spent hands its review to the next reviewer in
+    // the settings list on the pass that sees it, through the same `review()`.
+    let switch_home = home.to_path_buf();
+    let switch_host = std::sync::Arc::clone(&host);
+    let switch_actor = actor.clone();
+    let switch_reviewers: Option<shprd_server::ReviewSwitcher> = (!record_only()).then(|| {
+        std::sync::Arc::new(move |repo: &Path| {
+            let ctx = Ctx::new(repo.to_path_buf(), switch_actor.clone(), false, true);
+            crate::cmd::review::switch_exhausted(&*switch_host, &ctx, &switch_home)
+        }) as shprd_server::ReviewSwitcher
+    });
     // A landing closes the task's whole space, for the same reason and through
     // the same one path `shprd agent integrate` uses: the worker and the
     // reviewer are tabs of it, so one close takes both, and a landed task cannot
@@ -155,15 +174,8 @@ pub(crate) fn worker_with_hub(
     let close_worker: Option<shprd_server::WorkerCloser> = (!record_only()).then(|| {
         std::sync::Arc::new(move |repo: &Path, task: &str| {
             let (run, briefs) = run_and_briefs(repo, &close_worker_home)?;
-            let repo_name = crate::cmd::spawn::repo_name(repo).map_err(|err| err.to_string())?;
-            crate::cmd::spawn::close_task_space(
-                &*close_worker_host,
-                &briefs,
-                &run,
-                &repo_name,
-                task,
-            )
-            .map_err(|err| err.to_string())
+            crate::cmd::spawn::stop_task_agents(&*close_worker_host, &briefs, &run, task)
+                .map_err(|err| err.to_string())
         }) as shprd_server::WorkerCloser
     });
     // The fallback ladder's host: transcript facts, sign-in probes, and the two
@@ -200,7 +212,7 @@ pub(crate) fn worker_with_hub(
     Ok(Worker {
         repo,
         home: home.to_path_buf(),
-        state_dir: shprd_server::state_dir(&crate::ctx::resolve_state_home(home)),
+        state_dir: shprd_server::repo_state_dir(&crate::ctx::resolve_state_home(home), &ctx.root),
         config,
         facts,
         fallback,
@@ -209,12 +221,37 @@ pub(crate) fn worker_with_hub(
         start,
         review,
         close_reviewer,
+        switch_reviewers,
         close_worker,
         actor,
         after_write: None,
         hub,
         news,
     })
+}
+
+/// Starts `task` unless another pass already has.
+///
+/// The service's own tick and a coordinator's `shprd tick` can plan the same
+/// start in the same moment. The start lock is held from the fresh read of the
+/// log to the spawn, so the second pass waits, then finds the task running and
+/// leaves it alone: it is not a failure, and nothing is written about it.
+fn start_once(ctx: &Ctx, home: &Path, repo: &Path, task: &str) -> Result<String, String> {
+    let name = crate::cmd::spawn::repo_name(repo).map_err(|err| err.to_string())?;
+    let (run, _) = run_and_briefs(repo, home)?;
+    let _lock =
+        crate::cmd::run_lock::lock_start(home, &name, &run).map_err(|err| err.to_string())?;
+    let fresh = ctx.state().map_err(|err| err.to_string())?;
+    if let Some(found) = fresh.tasks.get(task)
+        && !found.attempts.is_empty()
+        && matches!(
+            found.status,
+            TaskStatus::Working | TaskStatus::Reported | TaskStatus::Passed
+        )
+    {
+        return Ok(format!("{task} was already started by another pass"));
+    }
+    crate::cmd::agent::start_for_tick(ctx, home, task)
 }
 
 /// The run id and the briefs directory of `repo`, as a tab-closing closure needs
@@ -268,7 +305,7 @@ pub(crate) fn load_config(ctx: &Ctx, home: &Path) -> Result<config::Config, CliE
 ///
 /// A release binary ignores the variable entirely, so nothing but a real merge
 /// can ever be recorded as one.
-fn forge(dir: &Path) -> Result<Box<dyn Forge + Send + Sync>, CliError> {
+fn forge(dir: &Path, gh_user: &str) -> Result<Box<dyn Forge + Send + Sync>, CliError> {
     let env_value =
         std::env::var_os(FAKE_FORGE_ENV).map(|value| value.to_string_lossy().into_owned());
     match env_value {
@@ -277,7 +314,7 @@ fn forge(dir: &Path) -> Result<Box<dyn Forge + Send + Sync>, CliError> {
             let fake = ScriptedForge::new(Path::new(&path))?;
             Ok(Box::new(fake))
         }
-        _ => Ok(Box::new(GhForge::new(dir))),
+        _ => Ok(Box::new(GhForge::new(dir).with_user(gh_user))),
     }
 }
 

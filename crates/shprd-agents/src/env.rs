@@ -70,6 +70,12 @@ const FOREIGN_VARS: &[&str] = &[
     "OPENCODE_CONFIG_CONTENT",
 ];
 
+/// Variables of the terminal holder that another product's hooks key off.
+///
+/// Removed for every role, so a hook installed globally for another product
+/// (Shepherdr's SessionStart note) finds nothing to act on in a shprd agent.
+const NOT_OURS_VARS: &[&str] = &["HC_TERMINAL_ID"];
+
 /// Prefixes reserved by other orchestrators; anything under them is removed.
 const FOREIGN_PREFIXES: &[&str] = &["OMNIGENT_", "OG_"];
 
@@ -80,6 +86,28 @@ const HOME_ENV: &str = "SHPRD_HOME";
 /// Environment variable naming the data directory holding `harness/` and
 /// `skills/`, as the engine resolved it.
 const DATA_ENV: &str = "SHPRD_DATA_DIR";
+
+/// Environment variable naming the full path of the running `shprd`.
+const BIN_ENV: &str = "SHPRD_BIN";
+
+/// The running `shprd` executable, symlinks resolved.
+///
+/// `None` when the operating system cannot say; the first failure is reported
+/// once on stderr and the agents' `PATH` is then left as it was.
+pub fn service_bin() -> Option<PathBuf> {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    match std::env::current_exe() {
+        Ok(exe) => Some(exe.canonicalize().unwrap_or(exe)),
+        Err(error) => {
+            WARNED.call_once(|| {
+                eprintln!(
+                    "shprd: cannot resolve its own executable ({error}); agents keep the inherited PATH"
+                );
+            });
+            None
+        }
+    }
+}
 
 /// Names a parent Claude Code session leaves in the environment, exactly.
 ///
@@ -117,6 +145,11 @@ pub struct EnvContext {
     /// The data directory holding `harness/` and `skills/`, exposed as
     /// `SHPRD_DATA_DIR` when the engine resolved one.
     pub data: Option<PathBuf>,
+    /// The running `shprd` executable, resolved ([`service_bin`]). When set, its
+    /// directory is put first on the CLI's `PATH` and the full path is exposed
+    /// as `SHPRD_BIN`, so an agent's `shprd` is this service's own and not
+    /// whichever stale build comes first on the person's `PATH`.
+    pub bin: Option<PathBuf>,
 }
 
 /// A diff over a base environment: names to set and names to drop.
@@ -208,6 +241,13 @@ pub fn launch_env(base: &BTreeMap<String, String>, role: Role, ctx: &EnvContext)
             remove.insert(name.clone());
         }
     }
+    // Another product's SessionStart hook (Shepherdr's `session-note.sh`, in the
+    // person's global Claude Code and Codex settings) acts only when
+    // `HC_TERMINAL_ID` is set, and then tells the agent it is that product's
+    // Assistant. shprd's agents need no terminal id of their own.
+    for name in NOT_OURS_VARS {
+        remove.insert((*name).to_string());
+    }
     remove.retain(|name| !is_protected(name));
 
     set.insert("SHPRD_ACTOR".to_string(), ctx.actor.clone());
@@ -219,6 +259,7 @@ pub fn launch_env(base: &BTreeMap<String, String>, role: Role, ctx: &EnvContext)
         set.insert("SHPRD_RUN".to_string(), run.clone());
     }
     set_engine_dirs(base, ctx, &mut set);
+    set_service_bin(base, ctx, &mut set);
 
     LaunchEnv { set, remove }
 }
@@ -250,6 +291,37 @@ fn set_engine_dirs(
             set.insert(name.to_string(), value);
         }
     }
+}
+
+/// Put the service's own `shprd` first on the CLI's `PATH` and name it in
+/// `SHPRD_BIN`.
+///
+/// Workers call `shprd` for every hand-in verb; a stale build earlier on the
+/// person's `PATH` would answer instead of the service that started them. The
+/// directory is prepended to the base `PATH` (an entry already first is not
+/// doubled). A context without a resolved binary changes nothing.
+fn set_service_bin(
+    base: &BTreeMap<String, String>,
+    ctx: &EnvContext,
+    set: &mut BTreeMap<String, String>,
+) {
+    let Some(bin) = &ctx.bin else {
+        return;
+    };
+    set.insert(BIN_ENV.to_string(), bin.display().to_string());
+    let Some(dir) = bin.parent().filter(|dir| !dir.as_os_str().is_empty()) else {
+        return;
+    };
+    let dir = dir.display().to_string();
+    let inherited = base.get("PATH").map(String::as_str).unwrap_or_default();
+    let path = if inherited.is_empty() {
+        dir
+    } else if inherited.split(':').next() == Some(dir.as_str()) {
+        inherited.to_string()
+    } else {
+        format!("{dir}:{inherited}")
+    };
+    set.insert("PATH".to_string(), path);
 }
 
 /// Append a `credential.helper = ""` entry to git's command-scoped config.
@@ -348,6 +420,7 @@ mod tests {
             repo: PathBuf::from("/repo"),
             home: None,
             data: None,
+            bin: None,
         }
     }
 
@@ -455,6 +528,27 @@ mod tests {
         }
     }
 
+    /// SHPR-66: Shepherdr's global SessionStart hook acts only when
+    /// `HC_TERMINAL_ID` is set; no shprd role carries it into its CLI.
+    #[test]
+    fn another_products_terminal_id_is_dropped_for_every_role() {
+        let mut base = base_env();
+        base.insert("HC_TERMINAL_ID".to_string(), "t8m".to_string());
+        for role in [
+            Role::Engine,
+            Role::Orchestrator,
+            Role::Worker,
+            Role::Reviewer,
+        ] {
+            let env = launch_env(&base, role, &ctx());
+            assert!(
+                env.removed_names().contains(&"HC_TERMINAL_ID".to_string()),
+                "{role:?}"
+            );
+            assert!(!env.apply_to(&base).contains_key("HC_TERMINAL_ID"));
+        }
+    }
+
     #[test]
     fn foreign_vars_go_for_every_role() {
         let base = base_env();
@@ -515,6 +609,7 @@ mod tests {
             repo: PathBuf::from("/repo"),
             home: None,
             data: None,
+            bin: None,
         };
         let env = launch_env(&base, Role::Orchestrator, &bare);
         assert!(!env.set.contains_key("SHPRD_TASK"));
@@ -527,6 +622,7 @@ mod tests {
         let engine = EnvContext {
             home: Some(PathBuf::from("/srv/shprd-home")),
             data: Some(PathBuf::from("/srv/shprd-data")),
+            bin: None,
             ..ctx()
         };
         for role in [Role::Worker, Role::Reviewer] {
@@ -695,6 +791,7 @@ mod tests {
             repo: repo.to_path_buf(),
             home: None,
             data: None,
+            bin: None,
         };
         let applied = launch_env(&base, Role::Worker, &worker_ctx).apply_to(&base);
 
@@ -732,5 +829,72 @@ mod tests {
             "effective credential.helper must be empty: {:?}",
             String::from_utf8_lossy(&one.stdout)
         );
+    }
+
+    fn ctx_with_bin(bin: Option<&str>) -> EnvContext {
+        EnvContext {
+            bin: bin.map(PathBuf::from),
+            ..ctx()
+        }
+    }
+
+    #[test]
+    fn every_role_gets_the_service_binary_first_on_path_and_in_shprd_bin() {
+        let base = base_env();
+        for role in [
+            Role::Engine,
+            Role::Orchestrator,
+            Role::Worker,
+            Role::Reviewer,
+        ] {
+            let applied =
+                launch_env(&base, role, &ctx_with_bin(Some("/svc/release/shprd"))).apply_to(&base);
+            assert_eq!(
+                applied.get("SHPRD_BIN").map(String::as_str),
+                Some("/svc/release/shprd"),
+                "{role:?}"
+            );
+            assert_eq!(
+                applied.get("PATH").map(String::as_str),
+                Some("/svc/release:/usr/bin:/bin"),
+                "{role:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_service_directory_is_not_doubled_and_an_empty_path_is_just_it() {
+        let mut base = base_env();
+        base.insert("PATH".to_string(), "/svc/release:/usr/bin".to_string());
+        let applied = launch_env(
+            &base,
+            Role::Worker,
+            &ctx_with_bin(Some("/svc/release/shprd")),
+        )
+        .apply_to(&base);
+        assert_eq!(applied["PATH"], "/svc/release:/usr/bin");
+
+        base.remove("PATH");
+        let applied = launch_env(
+            &base,
+            Role::Worker,
+            &ctx_with_bin(Some("/svc/release/shprd")),
+        )
+        .apply_to(&base);
+        assert_eq!(applied["PATH"], "/svc/release");
+    }
+
+    #[test]
+    fn without_a_resolved_binary_path_is_left_alone() {
+        let base = base_env();
+        let applied = launch_env(&base, Role::Worker, &ctx_with_bin(None)).apply_to(&base);
+        assert_eq!(applied["PATH"], "/usr/bin:/bin");
+        assert!(!applied.contains_key("SHPRD_BIN"));
+    }
+
+    #[test]
+    fn service_bin_resolves_this_test_executable() {
+        let bin = service_bin();
+        assert!(bin.is_some_and(|path| path.is_absolute()));
     }
 }

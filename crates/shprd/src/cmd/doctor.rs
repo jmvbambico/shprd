@@ -11,7 +11,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::anyhow;
 use shprd_agents::data::{DataDir, Kind};
-use shprd_agents::detect::{Detection, SignIn, detect_all, find_binary, vendor_name};
+use shprd_agents::detect::{
+    Detection, PREFLIGHT_TIMEOUT, SignIn, detect_all, find_binary, model_reads_images,
+    preflight_probe, vendor_name,
+};
 use shprd_agents::env::{self, EnvContext, LaunchEnv, Role};
 use shprd_agents::families::{Families, agent_vendor};
 use shprd_agents::models::AgentRef;
@@ -138,16 +141,77 @@ fn build(home_flag: Option<&Path>, no_quota: bool) -> Report {
     let specs = data(&mut report, &facts);
     let roles = config_section(&mut report, &facts);
     graph_section(&mut report, &facts);
+    forge_section(&mut report, &facts, &RealGh::new(facts.repo.as_deref()));
     let clean = worker_env(&facts);
     let detections = detect_every(&facts, &specs, &roles);
     agents(&mut report, &detections);
+    preflight_section(&mut report, &facts, &specs, &detections, &clean);
     review(&mut report, &facts, &specs, &roles);
     if !no_quota {
         quota_section(&mut report, &facts, &specs, &roles);
     }
     skills_section(&mut report, &facts, &specs, &clean, &detections);
     launch_env_section(&mut report, &facts, &clean);
+    news_section(&mut report, &facts);
     report
+}
+
+/// The news section: how many stop alarms the task later contradicted, a
+/// measure of how trustworthy "Agent stopped" has been.
+fn news_section(report: &mut Report, facts: &Facts) {
+    let section = report.section("News");
+    let Some(repo) = facts.repo.as_deref() else {
+        section.add(Level::Warn, "not inside a repository, so no news memory");
+        return;
+    };
+    let count = crate::cmd::live_news::stops_contradicted(repo);
+    let (level, text) = contradicted_stops_line(count);
+    section.add(level, text);
+}
+
+/// The doctor line for the contradicted-stop count: a warning when a stop alarm
+/// has been wrong, since that is a false "Agent stopped" the person saw.
+fn contradicted_stops_line(count: u32) -> (Level, String) {
+    if count == 0 {
+        (Level::Ok, String::from("0 stop alarms contradicted"))
+    } else {
+        (
+            Level::Warn,
+            format!("{count} stop alarm(s) contradicted by the task itself"),
+        )
+    }
+}
+
+/// What `run start` warns about: the programs that fail to start, and whether
+/// the reviewer's model reads images. Only warnings, never a refusal.
+pub fn start_warnings(home: Option<&Path>) -> Vec<String> {
+    let facts = Facts::resolve(home);
+    let mut scratch = Report::default();
+    let specs = data(&mut scratch, &facts);
+    let roles = config_section(&mut scratch, &facts);
+    let clean = worker_env(&facts);
+    let detections = detect_every(&facts, &specs, &roles);
+    let mut report = Report::default();
+    preflight_section(&mut report, &facts, &specs, &detections, &clean);
+    if let Some(reviewer) = roles.reviewer.as_deref() {
+        image_line(report.section("Review"), &specs_model(&specs, reviewer));
+    } else {
+        report
+            .section("Review")
+            .add(Level::Warn, "reviewer not set, so no cross-vendor review");
+    }
+    warnings_of(&report)
+}
+
+/// The text of every warning line on the page.
+fn warnings_of(report: &Report) -> Vec<String> {
+    report
+        .sections
+        .iter()
+        .flat_map(|section| section.lines.iter())
+        .filter(|line| line.level == Level::Warn)
+        .map(|line| line.text.clone())
+        .collect()
 }
 
 /// The machine facts every section reads, resolved once.
@@ -238,7 +302,9 @@ fn host(report: &mut Report, facts: &Facts) {
     // The host the verbs would drive, and why: the same resolution the run does
     // (M10.9), so a person asking "which multiplexer is shprd using?" gets the
     // answer the next spawn will act on rather than a second opinion.
-    let resolution = crate::host::resolve();
+    // Through the sticky select, like every other caller, so doctor reports the
+    // host a spawn would drive rather than a second probe.
+    let (resolution, _host) = crate::host::select();
     let level = if resolution.fell_back {
         Level::Warn
     } else {
@@ -572,6 +638,7 @@ fn worker_env(facts: &Facts) -> LaunchEnv {
         run: None,
         repo: std::env::current_dir().unwrap_or_default(),
         home: facts.home.clone(),
+        bin: shprd_agents::env::service_bin(),
         data: facts.data.env_value().map(Path::to_path_buf),
     };
     env::launch_env(&facts.current, Role::Worker, &ctx)
@@ -671,6 +738,256 @@ fn graph_section(report: &mut Report, facts: &Facts) {
         (None, None) => section.add(
             Level::Info,
             "no run yet, so there is no graph to draw",
+        ),
+    }
+}
+
+/// How the doctor asks `gh`: a seam so the section's decisions are tested with
+/// a script instead of a login and a network.
+trait Gh {
+    /// Runs `gh <args>`; `token`, when given, goes in as `GH_TOKEN`. `Err` is
+    /// the reason it could not even start.
+    fn run(&self, args: &[&str], token: Option<&str>) -> Result<GhOut, String>;
+}
+
+/// What one `gh` call answered.
+struct GhOut {
+    /// True when it exited zero.
+    ok: bool,
+    /// Its stdout, trimmed.
+    stdout: String,
+    /// Its stderr, trimmed.
+    stderr: String,
+}
+
+/// The real `gh`, run in the repository the doctor was started in.
+struct RealGh {
+    /// Where `gh` runs, so it names this repository's remote.
+    dir: Option<PathBuf>,
+}
+
+impl RealGh {
+    /// A `gh` that runs in `dir`.
+    fn new(dir: Option<&Path>) -> Self {
+        Self {
+            dir: dir.map(Path::to_path_buf),
+        }
+    }
+}
+
+impl Gh for RealGh {
+    fn run(&self, args: &[&str], token: Option<&str>) -> Result<GhOut, String> {
+        let mut command = std::process::Command::new("gh");
+        command
+            .args(args)
+            .env("GH_PROMPT_DISABLED", "1")
+            .env("LC_ALL", "C")
+            .stdin(std::process::Stdio::null());
+        if let Some(dir) = &self.dir {
+            command.current_dir(dir);
+        }
+        if let Some(token) = token {
+            command.env("GH_TOKEN", token);
+        }
+        let output = command.output().map_err(|err| err.to_string())?;
+        Ok(GhOut {
+            ok: output.status.success(),
+            stdout: String::from_utf8_lossy(&output.stdout).trim().to_string(),
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        })
+    }
+}
+
+/// The `gh` accounts `gh auth status` lists, the active one flagged.
+fn gh_accounts(status: &str) -> Vec<(String, bool)> {
+    let mut accounts: Vec<(String, bool)> = Vec::new();
+    for line in status.lines().map(str::trim) {
+        let line = line.trim_start_matches(['\u{2713}', '-', ' ']);
+        if let Some(rest) = line
+            .split(" account ")
+            .nth(1)
+            .filter(|_| line.starts_with("Logged in to"))
+        {
+            let name = rest.split_whitespace().next().unwrap_or_default();
+            accounts.push((name.to_string(), false));
+        } else if let Some(active) = line.strip_prefix("Active account:")
+            && let Some(last) = accounts.last_mut()
+        {
+            last.1 = active.trim() == "true";
+        }
+    }
+    accounts
+}
+
+/// What one account can do to the repository.
+enum Access {
+    /// It can push and open pull requests.
+    Write,
+    /// It sees the repository but may not write (`READ`, `TRIAGE`).
+    ReadOnly(String),
+    /// It cannot see the repository; `gh`'s own words say why.
+    Hidden(String),
+    /// The repository has no GitHub remote.
+    NoRemote,
+    /// It could not be asked (no network, no token): not a verdict.
+    Unknown(String),
+}
+
+/// The last line of a `gh` error, which is the one that says what happened.
+fn gh_words(stderr: &str) -> String {
+    stderr
+        .lines()
+        .map(str::trim)
+        .rfind(|line| !line.is_empty())
+        .unwrap_or("no reason given")
+        .to_string()
+}
+
+/// Whether `account` (or the active one, for `None`) can write to the
+/// repository `gh` runs in. Never prints a token.
+fn gh_access(gh: &dyn Gh, account: Option<&str>) -> Access {
+    let token = match account {
+        None => None,
+        Some(name) => match gh.run(&["auth", "token", "-u", name], None) {
+            Ok(out) if out.ok && !out.stdout.is_empty() => Some(out.stdout),
+            Ok(out) => {
+                return Access::Unknown(format!(
+                    "no token for the gh account {name}: {}",
+                    gh_words(&out.stderr)
+                ));
+            }
+            Err(err) => return Access::Unknown(err),
+        },
+    };
+    let out = match gh.run(
+        &["repo", "view", "--json", "nameWithOwner,viewerPermission"],
+        token.as_deref(),
+    ) {
+        Ok(out) => out,
+        Err(err) => return Access::Unknown(err),
+    };
+    if !out.ok {
+        let said = out.stderr.to_ascii_lowercase();
+        let words = gh_words(&out.stderr);
+        return if said.contains("known github host") || said.contains("no git remotes") {
+            Access::NoRemote
+        } else if said.contains("could not resolve")
+            || said.contains("not found")
+            || said.contains("404")
+        {
+            Access::Hidden(words)
+        } else {
+            Access::Unknown(words)
+        };
+    }
+    let value: serde_json::Value = serde_json::from_str(&out.stdout).unwrap_or_default();
+    let permission = value
+        .get("viewerPermission")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("UNKNOWN");
+    match permission {
+        "ADMIN" | "MAINTAIN" | "WRITE" => Access::Write,
+        other => Access::ReadOnly(other.to_string()),
+    }
+}
+
+/// The Forge section: which `gh` account landing will use, and whether it can
+/// see the repository's remote and write to it. When it cannot, says which
+/// logged-in account can, and the setting that pins it.
+fn forge_section(report: &mut Report, facts: &Facts, gh: &dyn Gh) {
+    let Some(repo) = facts.repo.as_deref() else {
+        return;
+    };
+    let section = report.section("Forge");
+    let status = match gh.run(&["auth", "status"], None) {
+        Ok(out) => format!("{}\n{}", out.stdout, out.stderr),
+        Err(_) => {
+            section.add(
+                Level::Info,
+                "gh is not installed here, so work lands locally and nothing reaches GitHub",
+            );
+            return;
+        }
+    };
+    let accounts = gh_accounts(&status);
+    let active = accounts
+        .iter()
+        .find(|(_, active)| *active)
+        .map(|(name, _)| name.clone());
+    let pinned = facts
+        .home
+        .as_deref()
+        .map(|home| crate::cmd::land::gh_user(home, repo))
+        .filter(|name| !name.is_empty());
+    if accounts.is_empty() {
+        section.add(
+            Level::Info,
+            "gh is not signed in, so work lands locally; `gh auth login` signs it in",
+        );
+        return;
+    }
+    let names: Vec<String> = accounts
+        .iter()
+        .map(|(name, active)| {
+            if *active {
+                format!("{name} (active)")
+            } else {
+                name.clone()
+            }
+        })
+        .collect();
+    section.add(Level::Info, format!("gh accounts: {}", names.join(", ")));
+    let used = pinned.clone().or(active.clone());
+    let label = match (&pinned, &active) {
+        (Some(name), _) => format!("{name} (pinned by tasks.gh_user)"),
+        (None, Some(name)) => format!("{name} (the active account)"),
+        (None, None) => String::from("the active account"),
+    };
+    let denied = match gh_access(gh, pinned.as_deref()) {
+        Access::Write => {
+            section.add(
+                Level::Ok,
+                format!("{label} can see this repository's remote and has write access"),
+            );
+            return;
+        }
+        Access::NoRemote => {
+            section.add(
+                Level::Info,
+                "this repository has no GitHub remote, so work lands locally",
+            );
+            return;
+        }
+        Access::Unknown(why) => {
+            section.add(
+                Level::Warn,
+                format!("could not check {label} against the remote: {why}"),
+            );
+            return;
+        }
+        Access::ReadOnly(permission) => {
+            format!("{label} has only {permission} access to this repository and needs WRITE")
+        }
+        Access::Hidden(words) => {
+            format!("{label} cannot see this repository's remote: {words}")
+        }
+    };
+    let can: Vec<&str> = accounts
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .filter(|name| Some(*name) != used.as_deref())
+        .filter(|name| matches!(gh_access(gh, Some(name)), Access::Write))
+        .collect();
+    match can.first() {
+        Some(name) => section.add(
+            Level::Fail,
+            format!(
+                "{denied}; logged-in account {name} can: `shprd settings set tasks.gh_user {name}` pins it"
+            ),
+        ),
+        None => section.add(
+            Level::Fail,
+            format!("{denied}; no other logged-in account can write to it"),
         ),
     }
 }
@@ -790,6 +1107,86 @@ fn review(report: &mut Report, facts: &Facts, specs: &[HarnessSpec], roles: &Rol
             ),
         ),
         _ => {}
+    }
+    image_line(section, &specs_model(specs, reviewer));
+}
+
+/// Section 4b: does every program a run starts actually start?
+///
+/// `node --version` and each installed agent CLI's version command are run, so a
+/// CLI that is on `PATH` but dies at launch (a missing dynamic library, say)
+/// shows its first error line here, instead of as a silent "version unknown"
+/// and a reviewer that never writes findings.
+fn preflight_section(
+    report: &mut Report,
+    facts: &Facts,
+    specs: &[HarnessSpec],
+    detections: &[Detection],
+    clean: &LaunchEnv,
+) {
+    let probes = preflight_probes(&facts.path_env, specs, detections, &clean.as_pairs());
+    preflight_lines(report.section("Preflight"), &probes);
+}
+
+/// Runs `node --version` and each installed agent's version command, returning
+/// one entry per program: `None` when it is not installed, else how it started.
+fn preflight_probes(
+    path_env: &str,
+    specs: &[HarnessSpec],
+    detections: &[Detection],
+    pairs: &[(String, Option<String>)],
+) -> Vec<(String, Option<Result<(), String>>)> {
+    let mut probes: Vec<(String, Option<Result<(), String>>)> = Vec::new();
+    let node = find_binary("node", path_env)
+        .map(|path| preflight_probe(&path, &["--version".to_owned()], pairs, PREFLIGHT_TIMEOUT));
+    probes.push(("node".to_owned(), node));
+    for detection in detections {
+        let Some(binary) = &detection.binary else {
+            continue;
+        };
+        let Some(spec) = specs.iter().find(|spec| spec.id == detection.id) else {
+            continue;
+        };
+        let result = preflight_probe(binary, &spec.detect.version_args, pairs, PREFLIGHT_TIMEOUT);
+        probes.push((detection.id.clone(), Some(result)));
+    }
+    probes
+}
+
+/// One line per probed program: started cleanly, not installed, or why not.
+fn preflight_lines(section: &mut Section, probes: &[(String, Option<Result<(), String>>)]) {
+    for (name, result) in probes {
+        match result {
+            Some(Ok(())) => section.add(Level::Ok, format!("{name} starts")),
+            Some(Err(why)) => section.add(Level::Warn, format!("{name} fails to start: {why}")),
+            None => section.add(Level::Warn, format!("{name} not on PATH")),
+        }
+    }
+}
+
+/// The model an agent string names, or the string itself when it names none.
+fn specs_model(specs: &[HarnessSpec], agent: &str) -> String {
+    match AgentRef::parse(agent, specs) {
+        Ok(named) => named.model.unwrap_or_else(|| named.program.clone()),
+        Err(_) => agent.to_owned(),
+    }
+}
+
+/// Whether the reviewer's model can read images, which decides whether image
+/// proof can be judged by it.
+fn image_line(section: &mut Section, model: &str) {
+    match model_reads_images(model) {
+        Some(true) => section.add(Level::Ok, format!("reviewer model {model} can read images")),
+        Some(false) => section.add(
+            Level::Warn,
+            format!(
+                "reviewer model {model} cannot read images: a review with image proof is degraded and its acceptance lines stay yours to check"
+            ),
+        ),
+        None => section.add(
+            Level::Warn,
+            format!("cannot tell whether reviewer model {model} reads images"),
+        ),
     }
 }
 
@@ -1062,6 +1459,86 @@ mod tests {
     }
 
     #[test]
+    fn a_program_that_fails_to_start_is_named_with_its_error() {
+        let mut page = Report::default();
+        preflight_lines(
+            page.section("Preflight"),
+            &[
+                ("node".to_owned(), Some(Ok(()))),
+                (
+                    "claude".to_owned(),
+                    Some(Err("exited 134: dyld: Library not loaded".to_owned())),
+                ),
+            ],
+        );
+        let text = render(&page);
+        assert!(text.contains("✓ node starts"), "{text}");
+        assert!(
+            text.contains("! claude fails to start: exited 134: dyld"),
+            "{text}"
+        );
+        assert!(!page.has_fail());
+    }
+
+    #[test]
+    fn preflight_runs_node_and_names_its_first_error_line() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap_or_else(|err| panic!("{err}"));
+        let node = dir.path().join("node");
+        std::fs::write(
+            &node,
+            "#!/bin/sh\necho 'dyld: Library not loaded: libnode' >&2\nexit 134\n",
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+        std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o755))
+            .unwrap_or_else(|err| panic!("{err}"));
+        let path_env = dir.path().display().to_string();
+        let probes = preflight_probes(&path_env, &[], &[], &[]);
+        let [(name, Some(Err(why)))] = probes.as_slice() else {
+            panic!("node must be probed and fail: {probes:?}");
+        };
+        assert_eq!(name, "node");
+        assert!(why.contains("Library not loaded"), "{why}");
+        let none = preflight_probes("", &[], &[], &[]);
+        assert!(matches!(none.as_slice(), [(_, None)]), "{none:?}");
+    }
+
+    #[test]
+    fn run_start_warns_of_a_failing_cli_and_a_blind_reviewer() {
+        let mut page = Report::default();
+        preflight_lines(
+            page.section("Preflight"),
+            &[
+                ("node".to_owned(), Some(Ok(()))),
+                (
+                    "claude".to_owned(),
+                    Some(Err("dyld: Library not loaded".to_owned())),
+                ),
+            ],
+        );
+        image_line(page.section("Review"), "deepseek-v4");
+        let warnings = warnings_of(&page);
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(
+            warnings[0].contains("claude fails to start"),
+            "{warnings:?}"
+        );
+        assert!(warnings[1].contains("cannot read images"), "{warnings:?}");
+    }
+
+    #[test]
+    fn a_blind_reviewer_model_is_said_to_degrade_image_review() {
+        let mut page = Report::default();
+        image_line(page.section("Review"), "deepseek-v4");
+        let text = render(&page);
+        assert!(text.contains("cannot read images"), "{text}");
+        assert!(text.contains("degraded"), "{text}");
+        let mut page = Report::default();
+        image_line(page.section("Review"), "claude-opus");
+        assert!(render(&page).contains("can read images"));
+    }
+
+    #[test]
     fn a_worker_whose_vendor_cannot_be_checked_is_reported() {
         let specs = harness_specs();
         let mut config = config(None, &["kilo", "gemini/pro"]);
@@ -1313,5 +1790,156 @@ mod tests {
             assert!(std::fs::write(dir.join("kilo.jsonc"), body).is_ok());
         }
         home
+    }
+
+    /// A scripted `gh`: answers by account (the token it is handed), so a test
+    /// states which account can do what.
+    struct ScriptGh {
+        status: &'static str,
+        /// (account, `repo view` stdout or stderr, ok)
+        views: Vec<(&'static str, &'static str, bool)>,
+    }
+
+    impl Gh for ScriptGh {
+        fn run(&self, args: &[&str], token: Option<&str>) -> Result<GhOut, String> {
+            let out = |ok: bool, stdout: &str, stderr: &str| {
+                Ok(GhOut {
+                    ok,
+                    stdout: stdout.to_string(),
+                    stderr: stderr.to_string(),
+                })
+            };
+            match args {
+                ["auth", "status"] => out(true, self.status, ""),
+                ["auth", "token", "-u", name] => out(true, &format!("tok-{name}"), ""),
+                ["repo", "view", ..] => {
+                    let who = token.map_or("alice", |t| t.trim_start_matches("tok-"));
+                    match self.views.iter().find(|(name, _, _)| *name == who) {
+                        Some((_, text, true)) => out(true, text, ""),
+                        Some((_, text, false)) => out(false, "", text),
+                        None => out(false, "", "no such account"),
+                    }
+                }
+                _ => out(false, "", "unexpected"),
+            }
+        }
+    }
+
+    const TWO: &str = "github.com\n  \u{2713} Logged in to github.com account alice (keyring)\n  - Active account: true\n\n  \u{2713} Logged in to github.com account bob (keyring)\n  - Active account: false\n";
+
+    fn forge_text(gh: &ScriptGh) -> (String, bool) {
+        let facts = Facts {
+            current: BTreeMap::new(),
+            path_env: String::new(),
+            home: None,
+            repo: Some(PathBuf::from("/nonexistent-repo")),
+            data: DataDir::resolve(None, None),
+        };
+        let mut report = Report::default();
+        forge_section(&mut report, &facts, gh);
+        (render(&report), report.has_fail())
+    }
+
+    #[test]
+    fn the_doctor_names_the_active_account_and_the_one_that_can_write() {
+        let gh = ScriptGh {
+            status: TWO,
+            views: vec![
+                (
+                    "alice",
+                    "{\"nameWithOwner\":\"o/r\",\"viewerPermission\":\"READ\"}",
+                    true,
+                ),
+                (
+                    "bob",
+                    "{\"nameWithOwner\":\"o/r\",\"viewerPermission\":\"WRITE\"}",
+                    true,
+                ),
+            ],
+        };
+        let (text, failed) = forge_text(&gh);
+        assert!(failed, "{text}");
+        assert!(text.contains("alice (active)"), "{text}");
+        assert!(
+            text.contains("alice (the active account) has only READ"),
+            "{text}"
+        );
+        assert!(text.contains("logged-in account bob can"), "{text}");
+        assert!(text.contains("tasks.gh_user bob"), "{text}");
+        assert!(!text.contains("tok-"), "no token is printed: {text}");
+    }
+
+    #[test]
+    fn the_doctor_flags_the_wrong_active_account_and_names_the_right_one() {
+        // The 2026-11-23 incident: the active account cannot see the repository
+        // ("Could not resolve to a Repository"), another logged-in one can write.
+        let gh = ScriptGh {
+            status: TWO,
+            views: vec![
+                (
+                    "alice",
+                    "GraphQL: Could not resolve to a Repository with the name 'o/r'.",
+                    false,
+                ),
+                (
+                    "bob",
+                    "{\"nameWithOwner\":\"o/r\",\"viewerPermission\":\"WRITE\"}",
+                    true,
+                ),
+            ],
+        };
+        let (text, failed) = forge_text(&gh);
+        assert!(failed, "{text}");
+        assert!(
+            text.contains("alice (the active account) cannot see this repository's remote"),
+            "{text}"
+        );
+        assert!(text.contains("tasks.gh_user bob"), "{text}");
+    }
+
+    #[test]
+    fn the_doctor_shows_what_github_said_when_the_repo_is_hidden() {
+        let gh = ScriptGh {
+            status: TWO,
+            views: vec![
+                (
+                    "alice",
+                    "GraphQL: Could not resolve to a Repository with the name 'o/r'.",
+                    false,
+                ),
+                (
+                    "bob",
+                    "GraphQL: Could not resolve to a Repository with the name 'o/r'.",
+                    false,
+                ),
+            ],
+        };
+        let (text, failed) = forge_text(&gh);
+        assert!(failed, "{text}");
+        assert!(text.contains("Could not resolve to a Repository"), "{text}");
+        assert!(
+            text.contains("no other logged-in account can write"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn an_account_with_write_access_passes() {
+        let gh = ScriptGh {
+            status: TWO,
+            views: vec![("alice", "{\"viewerPermission\":\"ADMIN\"}", true)],
+        };
+        let (text, failed) = forge_text(&gh);
+        assert!(!failed, "{text}");
+        assert!(text.contains("has write access"), "{text}");
+    }
+
+    /// The contradicted-stop count shows on the page, warning when non-zero.
+    #[test]
+    fn the_contradicted_stop_count_is_shown() {
+        assert_eq!(contradicted_stops_line(0).0, Level::Ok);
+        let (level, text) = contradicted_stops_line(3);
+        assert_eq!(level, Level::Warn);
+        assert!(text.contains('3'));
     }
 }

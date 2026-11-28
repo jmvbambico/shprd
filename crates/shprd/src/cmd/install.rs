@@ -26,13 +26,15 @@
 //!   person has edited since (a change is theirs, not stale ours).
 //!
 //! The source tree is the one this *binary* carries, not one the caller happens
-//! to stand in: `--from`, then `$SHPRD_HOST_DIR`, then a `host/herdr-desktop`
-//! beside the working directory (a checkout or worktree of shprd), then the
-//! checkout this binary was compiled from in a debug build, and finally the copy
+//! to stand in: `--from`, then `$SHPRD_HOST_DIR`, then `--repo`'s
+//! `host/herdr-desktop`, then the checkout this binary was compiled from in a
+//! debug build, and finally the copy
 //! embedded in the binary at build time (`build.rs`, the same shape as
 //! `shprd-agents`'s `data/`). An installed `shprd` therefore installs its own
 //! desktop with no checkout at all, and a worker's worktree installs the worktree
-//! rather than the canonical checkout (the M10 gate's bug 6). Every path here is
+//! rather than the canonical checkout (the M10 gate's bug 6). The working
+//! directory is never searched: an install run from an old checkout must not
+//! install that checkout's old layout over the one this binary ships. Every path here is
 //! carried in as a value; this module reads no environment variable itself.
 //!
 //! A file Herdr pruned is put back: Herdr resolves a layout terminal block by
@@ -40,6 +42,14 @@
 //! such terminal exists (measured, `crates/shprd/src/cmd/graph.rs`). The prune is
 //! the app's edit and not the person's, so an install whose manifest still owns
 //! the file restores it — only a change that is not a prune is refused.
+//!
+//! A prune is also recognised across a layout's own change ([`PREVIOUS_LAYOUTS`]):
+//! a build that adds or takes away a block ships a different layout, and a person
+//! who installed the build before may be holding that older layout with a
+//! terminal block pruned out of it. Refusing *that* would make every such upgrade
+//! a manual repair, so the layouts earlier builds shipped are carried here as the
+//! documents they were, and a file that is one of them with its terminal blocks
+//! pruned is the app's edit rather than the person's.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -68,9 +78,53 @@ const MANIFEST_VERSION: u32 = 1;
 /// the person's, and is never written to or removed.
 const MOD_PREFIX: &str = "shprd-";
 
+/// The layouts earlier builds shipped, as the documents they were.
+///
+/// One entry per version of a layout file this verb has installed that has since
+/// changed — every version, because a person upgrades from whichever one they last
+/// installed: a file Herdr pruned out of an *older* build's layout is still
+/// recognised as the app's edit when this build's layout is a different document,
+/// which is what makes such an upgrade one command rather than a manual repair. The
+/// rule for a later change is to add here the layout it replaces, and nothing else
+/// — a document here is a fact about what shprd shipped, never a guess about what a
+/// person meant.
+///
+/// The three M10 layouts are the ones that differ (the four M10 fix releases did
+/// not touch the file): M10.3's, M10.4's (`spaces` became `shprd-spaces`, and the
+/// tab bar and panel gained their buttons) and M10.7's, which is where M10 ended
+/// and whose side panel held settings as a tab. M11 fix S made settings a dialog
+/// over the window, so that block went away. M11 U3 made the Accept card a dialog,
+/// so the task thread's stack lost its `tasks-thread-accept` block and opens on the
+/// terminal; the layout before that is `shprd-m11-menu.json` (and `shprd-m11.json` before the
+/// terminal menu was added). M11 U4 gave the task thread a Chat view it opens on and
+/// took the Asks stack and the sidebar's coordinator block away; the layout before
+/// that is `shprd-m11-accept.json`. SHPR-28 gave the thread a read-only stream child
+/// (the Terminal view's fallback) and an Artifacts child; the layout before that is
+/// `shprd-m11-thread.json`.
+const PREVIOUS_LAYOUTS: &[&str] = &[
+    include_str!("previous-layouts/shprd-m10.3.json"),
+    include_str!("previous-layouts/shprd-m10.4.json"),
+    include_str!("previous-layouts/shprd-m10.json"),
+    include_str!("previous-layouts/shprd-m11.json"),
+    include_str!("previous-layouts/shprd-m11-menu.json"),
+    include_str!("previous-layouts/shprd-m11-accept.json"),
+    include_str!("previous-layouts/shprd-m11-thread.json"),
+];
+
 /// Runs `shprd install`, whichever mode the command line asked for.
 pub fn run(args: &InstallArgs, home: Option<&Path>, json: bool) -> Result<(), CliError> {
     let app_home = resolve_app_home(args, home)?;
+    let env: Vec<(String, String)> = std::env::vars_os()
+        .map(|(key, value)| {
+            (
+                key.to_string_lossy().into_owned(),
+                value.to_string_lossy().into_owned(),
+            )
+        })
+        .collect();
+    let real_home = env_home(&env).map(|home| home.join(".config").join("herdr-app"));
+    refuse_agent_on_real_home(&env, &app_home, real_home.as_deref(), args.allow_agent)
+        .map_err(|message| CliError::other(anyhow!(message)))?;
     if args.uninstall {
         return uninstall(&app_home, args.dry_run, json);
     }
@@ -95,6 +149,70 @@ fn resolve_app_home(args: &InstallArgs, home: Option<&Path>) -> Result<PathBuf, 
     Ok(crate::ctx::resolve_home(home)?
         .join(".config")
         .join("herdr-app"))
+}
+
+/// The person's own home (`$HOME`, never `$SHPRD_HOME`), from an environment
+/// snapshot.
+fn env_home(env: &[(String, String)]) -> Option<PathBuf> {
+    env.iter()
+        .find(|(key, value)| key == "HOME" && !value.is_empty())
+        .map(|(_, value)| PathBuf::from(value))
+}
+
+/// Names what marks this process as started by an agent, if anything does.
+///
+/// A pure function over the environment as `(name, value)` pairs: an `HC_*` or
+/// `HERDR_*` variable with a value (a Herdr child's markers, `HERDR_APP_HOME`
+/// included: Herdr hands it to every child, and one pointing at the real home is
+/// exactly the case this guards), or `SHPRD_ACTOR` naming an
+/// `agent:` actor.
+fn agent_marker(env: &[(String, String)]) -> Option<String> {
+    env.iter().find_map(|(key, value)| {
+        if value.is_empty() {
+            return None;
+        }
+        let child = key.starts_with("HC_") || key.starts_with("HERDR_");
+        let actor = key == "SHPRD_ACTOR" && value.starts_with("agent:");
+        (child || actor).then(|| key.clone())
+    })
+}
+
+/// Drops `.` parts and trailing separators so two spellings of one path compare
+/// equal. Purely lexical, so the decision stays free of I/O.
+fn normalized(path: &Path) -> PathBuf {
+    path.components()
+        .filter(|part| !matches!(part, std::path::Component::CurDir))
+        .collect()
+}
+
+/// Refuses an agent-started install into the person's real Herdr app home.
+///
+/// `env` is the environment as data, `app_home` the folder about to be written,
+/// `real_app_home` the person's own (`$HOME/.config/herdr-app`, `None` when there
+/// is no `$HOME`). Pure: no I/O and no environment read, so a test passes any
+/// environment it likes. `allow_agent` (`--allow-agent`) lets it through. An
+/// `app_home` other than the real one is never refused.
+fn refuse_agent_on_real_home(
+    env: &[(String, String)],
+    app_home: &Path,
+    real_app_home: Option<&Path>,
+    allow_agent: bool,
+) -> Result<(), String> {
+    let Some(real) = real_app_home else {
+        return Ok(());
+    };
+    if allow_agent || normalized(app_home) != normalized(real) {
+        return Ok(());
+    }
+    match agent_marker(env) {
+        None => Ok(()),
+        Some(marker) => Err(format!(
+            "refusing to write into {}: this install was started by an agent ({marker} is set). \
+             Point --app-home or $HERDR_APP_HOME at a private folder, or pass --allow-agent \
+             if the person asked for their own Herdr to be changed",
+            real.display()
+        )),
+    }
 }
 
 /// Where the files to install come from.
@@ -164,13 +282,12 @@ fn layout_file(rel: &str) -> bool {
 }
 
 /// The tree to install from: `--from`, then `$SHPRD_HOST_DIR`, then a checkout
-/// under the working directory, then the checkout this binary was built from in
-/// a debug build, then the embedded copy.
+/// named by `--repo`, then the checkout this binary was built from in a debug
+/// build, then the embedded copy.
 ///
 /// A tree named outright (`--from`, `$SHPRD_HOST_DIR`) must be one: falling back
 /// to the embedded copy would install something other than what was asked for.
-/// The search under the working directory is quiet, because most directories a
-/// person runs `shprd` from hold no host tree at all.
+/// The working directory and its parent are not searched.
 fn resolve_source(args: &InstallArgs) -> Result<Source, CliError> {
     if let Some(path) = &args.from {
         return Ok(Source::Tree(checked_tree(path, "--from")?));
@@ -190,10 +307,9 @@ fn resolve_source(args: &InstallArgs) -> Result<Source, CliError> {
 /// The `host/herdr-desktop` folders to try, best first, for a caller who named
 /// none.
 ///
-/// The order is "what this binary is", not "where the person happens to be": a
-/// worktree the caller stands in, then the folder above it (a `host/` block
-/// inside a checkout), then — in a debug build only — the checkout the binary was
-/// compiled from, which is the same tree by another name. A release build has no
+/// The order is "what this binary is", not "where the person happens to be":
+/// `--repo`, then — in a debug build only — the checkout the binary was compiled
+/// from, which is the same tree by another name. A release build has no
 /// such path to offer and says nothing about it.
 fn search_places(args: &InstallArgs) -> Vec<PathBuf> {
     let mut out = Vec::new();
@@ -203,16 +319,9 @@ fn search_places(args: &InstallArgs) -> Vec<PathBuf> {
             out.push(candidate);
         }
     };
-    // `--repo` is the caller naming the checkout outright, so it comes before the
-    // working directory's own guess.
+    // `--repo` is the caller naming the checkout outright, so it comes first.
     if let Some(repo) = &args.repo {
         push(repo.clone());
-    }
-    if let Ok(cwd) = std::env::current_dir() {
-        push(cwd.clone());
-        if let Some(parent) = cwd.parent() {
-            push(parent.to_path_buf());
-        }
     }
     if cfg!(debug_assertions) {
         push(Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join(".."));
@@ -331,6 +440,32 @@ fn source_files(source: &Source) -> Result<Vec<SourceFile>, CliError> {
     }
     out.sort_by(|left, right| left.rel.cmp(&right.rel));
     Ok(out)
+}
+
+/// The layouts earlier builds shipped, for one path in the tree.
+///
+/// A path nothing has replaced has no history, which is every file but a layout.
+fn previous_layouts(rel: &str) -> &'static [&'static str] {
+    match rel {
+        "layouts/shprd.json" => PREVIOUS_LAYOUTS,
+        _ => &[],
+    }
+}
+
+/// Whether `on_disk` is what Herdr left of a layout an earlier build shipped.
+///
+/// It is the same comparison [`same_minus_terminals`] makes, against the document
+/// the build before wrote instead of this one: a file that is structurally the
+/// older layout with its terminal blocks pruned is the app's edit, and the shipped
+/// file replaces it. A person's own change to that older layout still differs from
+/// it, and is still refused.
+fn pruned_before(on_disk: &[u8], rel: &str) -> Result<bool, CliError> {
+    for previous in previous_layouts(rel) {
+        if same_minus_terminals(on_disk, previous.as_bytes())? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Whether `on_disk` and `shipped` differ only by the terminal blocks Herdr
@@ -549,8 +684,17 @@ struct InstallPlan {
     keys: Vec<(String, String, String)>,
     /// The keys left alone because the person bound them, `(section, key, theirs)`.
     kept_keys: Vec<(String, String, String)>,
+    /// The keys an earlier build wrote that this one no longer ships, given back
+    /// because they still hold what was written, `(section, key, command)`.
+    retired_keys: Vec<(String, String, String)>,
     /// The merged `keys.json`, when it differs from the one on disk.
     keys_json: Option<Vec<u8>>,
+    /// Files an earlier install wrote that this build no longer ships (a mod that
+    /// was removed or renamed), still holding exactly what was written: they are
+    /// taken away. One the person edited is left alone and is no longer ours.
+    stale: Vec<String>,
+    /// The directories of those files, which go when they are empty.
+    stale_dirs: Vec<String>,
     /// The manifest this install records.
     manifest: Manifest,
 }
@@ -561,7 +705,9 @@ impl InstallPlan {
         self.clashes.is_empty()
             && self.files.iter().all(|(_, plan)| *plan == Plan::Same)
             && self.keys.is_empty()
+            && self.retired_keys.is_empty()
             && self.keys_json.is_none()
+            && self.stale.is_empty()
     }
 }
 
@@ -599,7 +745,8 @@ fn plan(source: &Source, app_home: &Path, previous: &Manifest) -> Result<Install
                     Plan::Write
                 } else if ours.is_some()
                     && layout_file(&source.rel)
-                    && same_minus_terminals(&current, &source.bytes)?
+                    && (same_minus_terminals(&current, &source.bytes)?
+                        || pruned_before(&current, &source.rel)?)
                 {
                     // A file we wrote, then Herdr pruned a terminal block out of:
                     // the app's edit, so the block is put back.
@@ -698,6 +845,27 @@ fn plan(source: &Source, app_home: &Path, previous: &Manifest) -> Result<Install
             }
         }
     }
+    // A key an earlier build wrote and this one no longer ships (Ctrl+K moved from
+    // `global` to `layout:shprd`): given back if it still holds exactly what we
+    // wrote. One the person changed since is theirs and stays.
+    let mut retired = Vec::new();
+    for (section, bindings) in &previous.keys {
+        for (key, command) in bindings {
+            if ours.get(section).is_some_and(|map| map.contains_key(key)) {
+                continue;
+            }
+            let holds = theirs.get(section).and_then(|map| map.get(key)) == Some(command);
+            if holds {
+                if let Some(map) = theirs.get_mut(section) {
+                    map.remove(key);
+                    if map.is_empty() {
+                        theirs.remove(section);
+                    }
+                }
+                retired.push((section.clone(), key.clone(), command.clone()));
+            }
+        }
+    }
     manifest.keys = wrote;
     let keys_json = (theirs != before).then(|| {
         let mut text = serde_json::to_string_pretty(&theirs).unwrap_or_default();
@@ -705,11 +873,35 @@ fn plan(source: &Source, app_home: &Path, previous: &Manifest) -> Result<Install
         text.into_bytes()
     });
 
+    // What an earlier install wrote and this build does not ship: taken back, if
+    // nobody changed it since.
+    let mut stale = Vec::new();
+    for (rel, hash) in &previous.files {
+        if manifest.files.contains_key(rel) {
+            continue;
+        }
+        if let Ok(current) = fs::read(app_home.join(rel))
+            && sha256(&current) == *hash
+        {
+            stale.push(rel.clone());
+        }
+    }
+    let mut stale_dirs: Vec<String> = previous
+        .dirs
+        .iter()
+        .filter(|dir| !manifest.dirs.contains(*dir))
+        .cloned()
+        .collect();
+    stale_dirs.sort_by_key(|dir| std::cmp::Reverse(dir.matches('/').count()));
+
     Ok(InstallPlan {
         files,
         clashes,
+        stale,
+        stale_dirs,
         keys: listed,
         kept_keys: kept,
+        retired_keys: retired,
         keys_json,
         manifest,
     })
@@ -746,6 +938,16 @@ fn install(source: &Source, app_home: &Path, dry_run: bool, json: bool) -> Resul
             }
             write_atomic(&target, &file.bytes)?;
         }
+        for rel in &plan.stale {
+            let path = app_home.join(rel);
+            fs::remove_file(&path).map_err(|err| {
+                CliError::other(anyhow!(err).context(format!("removing {}", path.display())))
+            })?;
+        }
+        // Deepest first; a directory the person filled stays.
+        for rel in &plan.stale_dirs {
+            let _ = fs::remove_dir(app_home.join(rel));
+        }
         if let Some(bytes) = &plan.keys_json {
             write_atomic(&app_home.join("keys.json"), bytes)?;
         }
@@ -766,6 +968,7 @@ fn install(source: &Source, app_home: &Path, dry_run: bool, json: bool) -> Resul
                 .filter(|(_, plan)| plan.writes())
                 .map(|(file, _)| file.rel.clone())
                 .collect::<Vec<_>>(),
+            "removed": plan.stale.clone(),
             "restored": plan
                 .files
                 .iter()
@@ -780,6 +983,15 @@ fn install(source: &Source, app_home: &Path, dry_run: bool, json: bool) -> Resul
                 .collect::<Vec<_>>(),
             "keys_written": plan
                 .keys
+                .iter()
+                .map(|(section, key, command)| serde_json::json!({
+                    "section": section,
+                    "key": key,
+                    "command": command,
+                }))
+                .collect::<Vec<_>>(),
+            "keys_retired": plan
+                .retired_keys
                 .iter()
                 .map(|(section, key, command)| serde_json::json!({
                     "section": section,
@@ -819,15 +1031,27 @@ fn install(source: &Source, app_home: &Path, dry_run: bool, json: bool) -> Resul
             println!("{prefix}{}", app_home.join(&file.rel).display());
         }
     }
+    for rel in &plan.stale {
+        let word = if dry_run { "would remove" } else { "removed" };
+        println!(
+            "{word} {} (this build no longer ships it)",
+            app_home.join(rel).display()
+        );
+    }
     for (section, key, command) in &plan.keys {
         println!("{prefix}keys.json {section} {key} = {command}");
     }
+    for (section, key, command) in &plan.retired_keys {
+        let word = if dry_run { "would remove" } else { "removed" };
+        println!("{word} keys.json {section} {key} = {command} (this build binds it elsewhere)");
+    }
     for (section, key, theirs) in &plan.kept_keys {
-        println!("kept keys.json {section} {key} = {theirs} (bound by you)");
+        println!("kept keys.json {section} {key} = {theirs} (bound by you, not changed)");
     }
     if dry_run {
         println!(
-            "dry run: nothing was written; {changed} file(s) would change in {}",
+            "dry run: nothing was written; {changed} file(s) and {} key(s) would change in {}",
+            plan.keys.len() + plan.retired_keys.len(),
             app_home.display()
         );
     } else {
@@ -1103,7 +1327,65 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    use super::{Manifest, parents, parse_keys, sha256};
+    use super::{Manifest, parents, parse_keys, refuse_agent_on_real_home, sha256};
+    use std::path::Path;
+
+    fn env(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    const REAL: &str = "/h/.config/herdr-app";
+
+    fn gate(pairs: &[(&str, &str)], app: &str, allow: bool) -> Result<(), String> {
+        refuse_agent_on_real_home(&env(pairs), Path::new(app), Some(Path::new(REAL)), allow)
+    }
+
+    #[test]
+    fn an_hc_or_herdr_child_variable_refuses_the_real_home() {
+        for key in ["HC_SESSION", "HERDR_PANE_ID", "HERDR_SOCKET_PATH"] {
+            let err = gate(&[(key, "x")], REAL, false).expect_err("refused");
+            assert!(err.contains(key) && err.contains("--allow-agent"), "{err}");
+        }
+    }
+
+    #[test]
+    fn an_agent_actor_refuses_the_real_home() {
+        assert!(gate(&[("SHPRD_ACTOR", "agent:w1")], REAL, false).is_err());
+        assert!(gate(&[("SHPRD_ACTOR", "human")], REAL, false).is_ok());
+    }
+
+    #[test]
+    fn the_flag_lets_an_agent_through() {
+        assert!(gate(&[("HC_SESSION", "x")], REAL, true).is_ok());
+    }
+
+    #[test]
+    fn a_private_app_home_is_never_refused() {
+        let vars = [("HC_SESSION", "x"), ("SHPRD_ACTOR", "agent:w1")];
+        assert!(gate(&vars, "/tmp/private", false).is_ok());
+    }
+
+    #[test]
+    fn no_marker_and_empty_markers_pass() {
+        assert!(gate(&[("PATH", "/bin")], REAL, false).is_ok());
+        assert!(gate(&[("HC_SESSION", "")], REAL, false).is_ok());
+        assert!(gate(&[("HERDR_APP_HOME", REAL)], REAL, false).is_err());
+        assert!(gate(&[("HERDR_APP_HOME", "/tmp/p")], "/tmp/p", false).is_ok());
+    }
+
+    #[test]
+    fn another_spelling_of_the_real_home_is_still_refused() {
+        assert!(gate(&[("HC_SESSION", "x")], "/h/./.config/herdr-app/", false).is_err());
+    }
+
+    #[test]
+    fn no_known_real_home_refuses_nothing() {
+        let vars = env(&[("HC_SESSION", "x")]);
+        assert!(refuse_agent_on_real_home(&vars, Path::new(REAL), None, false).is_ok());
+    }
 
     #[test]
     fn a_hash_is_lowercase_hex_of_the_content() {

@@ -13,7 +13,7 @@
 //! a title can never turn into a command.
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
@@ -132,18 +132,57 @@ pub trait Forge {
     ///
     /// Fails when the forge refuses to merge it.
     fn merge(&self, number: u64, head_sha: &str) -> Result<(), ForgeError>;
+
+    /// Whether pull request `number` merges cleanly into its base right now:
+    /// `Some(false)` when the forge says it conflicts, `None` when it cannot
+    /// say yet (a forge computes this lazily) or does not report it.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the forge cannot be asked.
+    fn mergeable(&self, number: u64) -> Result<Option<bool>, ForgeError> {
+        let _ = number;
+        Ok(None)
+    }
+
+    /// Closes pull request `number` unmerged, leaving `comment` on it.
+    ///
+    /// A forge that cannot close one does nothing: the stale pull request is
+    /// then left for a human, and a fresh attempt opens its own.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the forge refuses to close it.
+    fn close(&self, number: u64, comment: &str) -> Result<(), ForgeError> {
+        let _ = (number, comment);
+        Ok(())
+    }
 }
 
 /// The real forge: `gh`, run in the repository the pull request belongs to.
 ///
 /// The directory decides which repository `gh` talks about, so it is always an
 /// explicit path and never the caller's working directory.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct GhForge {
     /// The directory `gh` runs in.
     dir: PathBuf,
     /// The program to run: `gh`, or a test double naming itself `gh`.
     program: String,
+    /// The `gh` account every call is pinned to, when one is.
+    user: Option<String>,
+    /// The pinned account's token, fetched once on first use.
+    token: std::sync::Arc<std::sync::OnceLock<Token>>,
+}
+
+/// A token from `gh auth token`: it is only ever handed to a child's
+/// environment, so it has no way to be printed or logged.
+struct Token(String);
+
+impl std::fmt::Debug for Token {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Token(..)")
+    }
 }
 
 impl GhForge {
@@ -152,7 +191,19 @@ impl GhForge {
         Self {
             dir: dir.into(),
             program: String::from("gh"),
+            user: None,
+            token: std::sync::Arc::default(),
         }
+    }
+
+    /// The same forge, pinned to `user`: every call passes `GH_TOKEN` from
+    /// `gh auth token -u <user>` instead of using whichever account is active.
+    /// An empty name pins nothing.
+    #[must_use]
+    pub fn with_user(mut self, user: &str) -> Self {
+        let user = user.trim();
+        self.user = (!user.is_empty()).then(|| user.to_string());
+        self
     }
 
     /// The same forge, running `program` instead of `gh`.
@@ -164,6 +215,8 @@ impl GhForge {
         Self {
             dir: dir.into(),
             program: program.to_string(),
+            user: None,
+            token: std::sync::Arc::default(),
         }
     }
 
@@ -176,7 +229,49 @@ impl GhForge {
             .env("GH_PROMPT_DISABLED", "1")
             .env("LC_ALL", "C")
             .stdin(Stdio::null());
+        if let Some(token) = self.pinned_token()? {
+            command.env("GH_TOKEN", token);
+        }
         spawn::output(&mut command).map_err(|source| ForgeError::Spawn { source })
+    }
+
+    /// The pinned account's token, read once with `gh auth token -u <user>`;
+    /// `None` when no account is pinned. The token is never printed or logged,
+    /// and a failure names the account, not the token.
+    fn pinned_token(&self) -> Result<Option<&str>, ForgeError> {
+        let Some(user) = &self.user else {
+            return Ok(None);
+        };
+        if let Some(token) = self.token.get() {
+            return Ok(Some(&token.0));
+        }
+        let args = vec![
+            "auth".to_string(),
+            "token".to_string(),
+            "-u".to_string(),
+            user.clone(),
+        ];
+        let mut command = Command::new(&self.program);
+        command
+            .args(&args)
+            .current_dir(&self.dir)
+            .env("GH_PROMPT_DISABLED", "1")
+            .env("LC_ALL", "C")
+            .env_remove("GH_TOKEN")
+            .stdin(Stdio::null());
+        let output = spawn::output(&mut command).map_err(|source| ForgeError::Spawn { source })?;
+        let token = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !output.status.success() || token.is_empty() {
+            return Err(ForgeError::Failed {
+                args,
+                code: output.status.code(),
+                stderr: format!(
+                    "no token for the gh account {user} (is it logged in?): {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ),
+            });
+        }
+        Ok(Some(&self.token.get_or_init(|| Token(token)).0))
     }
 
     /// Runs the program and returns its trimmed stdout, or why it failed.
@@ -342,6 +437,34 @@ impl Forge for GhForge {
         ];
         self.run(&args).map(|_| ())
     }
+
+    fn mergeable(&self, number: u64) -> Result<Option<bool>, ForgeError> {
+        let args = vec![
+            "pr".to_string(),
+            "view".to_string(),
+            number.to_string(),
+            "--json".to_string(),
+            "mergeable".to_string(),
+        ];
+        let text = self.run(&args)?;
+        let value: Value = self.parse(&text, "pr view mergeable")?;
+        Ok(match value.get("mergeable").and_then(Value::as_str) {
+            Some("CONFLICTING") => Some(false),
+            Some("MERGEABLE") => Some(true),
+            _ => None,
+        })
+    }
+
+    fn close(&self, number: u64, comment: &str) -> Result<(), ForgeError> {
+        let args = vec![
+            "pr".to_string(),
+            "close".to_string(),
+            number.to_string(),
+            "--comment".to_string(),
+            comment.to_string(),
+        ];
+        self.run(&args).map(|_| ())
+    }
 }
 
 /// A forge that records what it was asked and answers from a script.
@@ -377,6 +500,8 @@ struct FakeState {
     /// True when `merge` leaves the pull request unmerged, standing in for a
     /// forge that accepted the call without merging anything.
     merge_silent: bool,
+    /// The pull requests the forge reports as conflicting with their base.
+    conflicting: BTreeSet<u64>,
 }
 
 impl Default for FakeState {
@@ -389,6 +514,7 @@ impl Default for FakeState {
             create_url: None,
             merge_fails: false,
             merge_silent: false,
+            conflicting: BTreeSet::new(),
         }
     }
 }
@@ -437,6 +563,9 @@ impl FakeForge {
                     what: String::from("script row number"),
                     detail: row.to_string(),
                 })?;
+                if row.get("mergeable").and_then(Value::as_bool) == Some(false) {
+                    state.conflicting.insert(number);
+                }
                 state.statuses.insert(number, Self::status_from(row)?);
             }
         }
@@ -505,6 +634,11 @@ impl FakeForge {
     /// merge settled gets tested.
     pub fn silence_merges(&self) {
         self.state.borrow_mut().merge_silent = true;
+    }
+
+    /// Makes `mergeable` report pull request `number` as conflicting.
+    pub fn set_conflicting(&self, number: u64) {
+        self.state.borrow_mut().conflicting.insert(number);
     }
 
     /// Scripts the status `status` for pull request `number`.
@@ -598,6 +732,23 @@ impl Forge for FakeForge {
             }))
     }
 
+    fn mergeable(&self, number: u64) -> Result<Option<bool>, ForgeError> {
+        self.record(format!("mergeable {number}"));
+        Ok(self
+            .state
+            .borrow()
+            .conflicting
+            .contains(&number)
+            .then_some(false))
+    }
+
+    fn close(&self, number: u64, comment: &str) -> Result<(), ForgeError> {
+        self.record(format!("close {number} {comment}"));
+        let mut state = self.state.borrow_mut();
+        state.open.retain(|pr| pr.number != number);
+        Ok(())
+    }
+
     fn merge(&self, number: u64, head_sha: &str) -> Result<(), ForgeError> {
         self.record(format!("merge {number} {head_sha}"));
         let mut state = self.state.borrow_mut();
@@ -658,7 +809,9 @@ mod tests {
                 #!/bin/sh\n\
                 dir=$(dirname \"$0\")\n\
                 echo \"$*\" >> \"$dir/calls\"\n\
+                echo \"${GH_TOKEN:-}\" >> \"$dir/tokens\"\n\
                 case \"$2\" in\n\
+                  token) if [ \"$4\" = nobody ]; then echo 'no oauth token found for nobody' >&2; exit 1; fi; echo \"tok-$4\" ;;\n\
                   list) cat \"$dir/list.json\" ;;\n\
                   create) echo 'https://example.invalid/pull/8' ;;\n\
                   view) cat \"$dir/view.json\" ;;\n\
@@ -712,6 +865,70 @@ mod tests {
                 Err(err) => panic!("read the call log: {err}"),
             }
         }
+    }
+
+    /// The `GH_TOKEN` each fake `gh` call saw, one line per call.
+    fn tokens(script: &Script) -> String {
+        std::fs::read_to_string(script.dir.join("tokens")).unwrap_or_default()
+    }
+
+    #[test]
+    fn a_pinned_account_passes_its_token_to_every_call_and_fetches_it_once() {
+        let script = Script::new("0");
+        let forge = match script.forge() {
+            Ok(forge) => forge.with_user("alice"),
+            Err(err) => panic!("forge: {err}"),
+        };
+        if let Err(err) = forge.find_open("b") {
+            panic!("find_open: {err}");
+        }
+        if let Err(err) = forge.status(7) {
+            panic!("status: {err}");
+        }
+        let calls = script.calls();
+        assert_eq!(
+            calls.matches("auth token -u alice").count(),
+            1,
+            "one fetch: {calls}"
+        );
+        let tokens = tokens(&script);
+        // The fetch itself ran without a token; every later call saw alice's.
+        let seen: Vec<&str> = tokens.lines().skip(1).collect();
+        assert!(
+            seen.len() >= 2 && seen.iter().all(|t| *t == "tok-alice"),
+            "{tokens}"
+        );
+        assert!(!format!("{forge:?}").contains("tok-alice"), "never printed");
+    }
+
+    #[test]
+    fn an_unpinned_forge_leaves_the_environment_alone() {
+        let script = Script::new("0");
+        let forge = match script.forge() {
+            Ok(forge) => forge,
+            Err(err) => panic!("forge: {err}"),
+        };
+        if let Err(err) = forge.find_open("b") {
+            panic!("find_open: {err}");
+        }
+        assert!(!script.calls().contains("auth token"), "{}", script.calls());
+    }
+
+    #[test]
+    fn a_pinned_account_with_no_token_fails_naming_the_account() {
+        let script = Script::new("0");
+        let forge = match script.forge() {
+            Ok(forge) => forge.with_user("nobody"),
+            Err(err) => panic!("forge: {err}"),
+        };
+        match forge.find_open("b") {
+            Err(ForgeError::Failed { stderr, .. }) => {
+                assert!(stderr.contains("nobody"), "{stderr}");
+                assert!(stderr.contains("no oauth token"), "{stderr}");
+            }
+            other => panic!("expected a failure, got {other:?}"),
+        }
+        assert!(!script.calls().contains("pr list"), "no forge call ran");
     }
 
     fn status_of(script: &Script) -> PrStatus {

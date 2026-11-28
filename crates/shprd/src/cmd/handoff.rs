@@ -15,7 +15,7 @@ use shprd_core::log::{Clock, SystemClock};
 use shprd_core::state::{Attempt, RunState, Task, TaskStatus};
 use shprd_git::git::Git;
 use shprd_git::worktree::Worktree;
-use shprd_mux::{Host, MuxError, Space, TabId};
+use shprd_mux::{Host, MuxError, TabId};
 
 use crate::cli::HandoffArgs;
 use crate::cmd::spawn::{self, BriefInput, Launching, Pick, Program, SpawnEnv};
@@ -34,7 +34,7 @@ pub struct HandoffRequest {
     /// The role whose words the newcomer starts with; the worker's when none
     /// is named.
     ///
-    /// A backup handover (a provider cut the worker's turn off) names `backup`,
+    /// A takeover handover (a provider cut the worker's turn off) names `takeover`,
     /// so the newcomer reads what a takeover means and then the task, instead of
     /// the brief written for the program that stopped.
     pub role: Option<String>,
@@ -52,11 +52,15 @@ pub struct HandoffRequest {
     pub opening: Option<String>,
 }
 
-/// The attempt being handed over: the latest one, which must be Working.
+/// The attempt being handed over: the latest one, which must be Working, or
+/// Reported or Passed, which the hand-off reopens first.
 fn working_attempt(task: &Task) -> Result<&Attempt, CliError> {
-    if task.status != TaskStatus::Working {
+    if !matches!(
+        task.status,
+        TaskStatus::Working | TaskStatus::Reported | TaskStatus::Passed
+    ) {
         return Err(CliError::Invalid(anyhow!(
-            "task {:?} is {:?}, not Working: only a task an agent is working on can be handed off",
+            "task {:?} is {:?}, not Working, Reported or Passed: only a task an agent is working on or has handed in can be handed off",
             task.id,
             task.status
         )));
@@ -208,7 +212,12 @@ fn checkpoint(worktree: &Path, from: &str) -> Result<String, CliError> {
 /// What the attempt changed against the run's integration branch, as git
 /// summarizes it. A branch git cannot compare is reported, never fatal.
 fn diffstat(worktree: &Path, base: &str) -> String {
-    match Git::new(worktree).run(&["diff", "--stat", &format!("{base}..HEAD")]) {
+    let git = Git::new(worktree);
+    // From where the attempt started, not the base's tip: `base..HEAD` as a tree
+    // diff would also show whatever landed on the base since.
+    let from = shprd_git::sync::attempt_base(&git, base, "HEAD", false)
+        .unwrap_or_else(|_| base.to_string());
+    match git.run(&["diff", "--stat", &format!("{from}..HEAD")]) {
         Ok(text) if text.trim().is_empty() => "(no changes yet)".to_string(),
         Ok(text) => text,
         Err(err) => format!("(not available: {err})"),
@@ -264,7 +273,6 @@ const PANE_TAIL_LINES: usize = 30;
 /// error, the brief just says nothing about it.
 fn old_pane_tail(
     mux: &dyn Host,
-    space: &Space,
     env: &SpawnEnv<'_>,
     task: &str,
     attempt: &Attempt,
@@ -272,7 +280,7 @@ fn old_pane_tail(
     let record = spawn::tab_path(&env.briefs_dir, &env.run, task, attempt.n);
     let wanted = std::fs::read_to_string(record).ok()?;
     let wanted = wanted.trim().to_string();
-    let tabs = mux.list_tabs(&space.id).ok()?;
+    let tabs = spawn::all_handles(mux);
     let tab = tabs.iter().find(|tab| tab.id.as_str() == wanted)?;
     let text = mux.read(&tab.root_pane, PANE_TAIL_LINES).ok()?;
     let text = text.trim_end().to_string();
@@ -371,7 +379,15 @@ pub fn handoff(
     let task = spawn::task_of(&state, &req.task)?;
     let attempt = working_attempt(task)?;
     let from = attempt.agent.clone();
-    let Some(to) = pick_to(
+    // A handed-in task has no agent working on it, so the hand-off reopens it
+    // first: the same attempt, back to Working, for the agent that takes over.
+    let reopen = matches!(task.status, TaskStatus::Reported | TaskStatus::Passed).then(|| {
+        EventKind::TaskReopened {
+            task: task.id.clone(),
+            attempt: attempt.n,
+        }
+    });
+    let Some(mut to) = pick_to(
         &state,
         &env.programs,
         &env.workers,
@@ -391,38 +407,78 @@ pub fn handoff(
             task.id
         )));
     };
+    // The task moves along the worker's program lines: the program it moves to
+    // keeps that line's model, fast mode and access mode.
+    let worker_lines = env
+        .settings
+        .resolve(None)
+        .role(spawn::BRIEF_ROLE)
+        .map(|role| role.lines())
+        .unwrap_or_default();
+    let to_line = worker_lines.iter().find(|line| line.agent == to.agent);
+    if to.model.is_none()
+        && let Some(line) = to_line
+    {
+        to.model = line.model.clone();
+    }
     // Refuse before any effect: a refused hand-off must leave nothing behind.
-    env.ctx.check(&EventKind::HandedOff {
+    let handed_off = EventKind::HandedOff {
         task: task.id.clone(),
         from_agent: from.clone(),
         to_agent: to.agent.clone(),
         checkpoint: "<pending>".to_string(),
         reason: Some(req.reason.clone()),
-    })?;
+    };
+    match &reopen {
+        None => env.ctx.check(&handed_off)?,
+        Some(reopen) => {
+            env.ctx.check(reopen)?;
+            // The hand-off itself is judged against the task as reopened.
+            let mut reopened = state.clone();
+            let at_ms = SystemClock.now_ms();
+            reopened
+                .apply(&Event {
+                    seq: reopened.last_seq + 1,
+                    at_ms,
+                    actor: env.ctx.actor.clone(),
+                    kind: reopen.clone(),
+                })
+                .map_err(CliError::Refused)?;
+            reopened
+                .check_as(&env.ctx.actor, &handed_off, at_ms)
+                .map_err(CliError::Refused)?;
+        }
+    }
     let worktree = PathBuf::from(&attempt.worktree);
     let handoff_no = previous_handoffs(&events, &task.id, attempt.n) + 1;
     let brief_path = handoff_brief_path(&env.briefs_dir, &env.run, &task.id, attempt.n, handoff_no);
     let checkpoint = checkpoint(&worktree, &from)?;
     let skills = spawn::select_skills(&env.skills, &env.compat, &task.tags);
     let role_id = req.role.as_deref().unwrap_or(spawn::BRIEF_ROLE);
-    let settings_role = env.settings.resolve(None).role(role_id);
+    let settings_role = env
+        .settings
+        .resolve(None)
+        .role(spawn::settings_role_id(role_id));
     let program = spawn::program_of(env.programs.as_slice(), &to.agent)?;
-    let chosen = spawn::applied(
-        &program.spec,
-        settings_role
-            .as_ref()
-            .and_then(|role| role.perm.as_ref())
-            .map(|perm| perm.value.as_str()),
-        settings_role.as_ref().is_some_and(|role| role.fast.value),
-    );
+    let chosen = match to_line {
+        Some(line) => spawn::applied(&program.spec, line.perm.as_deref(), line.fast),
+        None => spawn::applied(
+            &program.spec,
+            settings_role
+                .as_ref()
+                .and_then(|role| role.perm.as_ref())
+                .map(|perm| perm.value.as_str()),
+            settings_role.as_ref().is_some_and(|role| role.fast.value),
+        ),
+    };
     // The newcomer's program decides how it raises a needs-you card.
     let ask = spawn::AskRoute::of_harness(program.spec.asks.supported);
     // The newcomer's words are read before the space and the pane are touched:
     // a prompt that cannot be read must cost nothing.
     let context = spawn::brief_context(env, role_id, &to, None, &chosen)?;
-    // A hand-off is the same attempt in the same task, so the newcomer joins the
-    // tab group the outgoing agent's space already holds.
-    let space = spawn::task_space(mux, env, &task.id)?;
+    // A hand-off is the same attempt in the same task: the newcomer starts the
+    // way the outgoing agent did, in the repository's one space.
+    let space = spawn::agent_space(mux, env)?;
     // The newcomer keeps the worktree the attempt already has, which an older
     // build may have made without shprd's state excluded. A warning, not a
     // failure: the hand-off is about the work, not a tidy `git status`.
@@ -432,7 +488,7 @@ pub fn handoff(
             worktree.display()
         );
     }
-    let pane_tail = old_pane_tail(mux, &space, env, &task.id, attempt);
+    let pane_tail = old_pane_tail(mux, env, &task.id, attempt);
     let stats = diffstat(&worktree, &env.base_branch);
     let start = BriefInput {
         task,
@@ -452,6 +508,7 @@ pub fn handoff(
         settings: Some(&context.settings),
         role: context.role.as_ref(),
         warnings: &[],
+        program_line: None,
     };
     // A worker continuing an attempt reads the brief it was launched with; a
     // different role reads its own words, because that brief was written for
@@ -573,6 +630,12 @@ pub fn handoff(
         checkpoint: checkpoint.clone(),
         reason: Some(req.reason.clone()),
     };
+    if let Some(reopen) = reopen
+        && let Err(err) = env.ctx.commit(reopen)
+    {
+        spawn::close_tab(mux, &tab_id);
+        return Err(err);
+    }
     if let Err(err) = env.ctx.commit(kind) {
         spawn::close_tab(mux, &tab_id);
         return Err(err);
@@ -671,8 +734,12 @@ pub fn handoff_verb(ctx: &Ctx, args: &HandoffArgs, home: Option<&Path>) -> Resul
         return Ok(());
     }
     println!(
-        "ok handed {} attempt {} from {} to {} at {} (tab {:?})",
-        report.task, report.attempt, report.from, report.to, report.checkpoint, report.tab
+        "ok handed {} from {} to {} at {} (tab {:?})",
+        shprd_core::event::attempt_label(&report.task, report.attempt),
+        report.from,
+        report.to,
+        report.checkpoint,
+        report.tab
     );
     Ok(())
 }
@@ -919,7 +986,7 @@ project_dirs = []
     }
 
     #[test]
-    fn a_backup_hand_off_uses_the_backup_roles_words() {
+    fn a_takeover_hand_off_uses_the_takeover_words() {
         let scratch = Scratch::new();
         let ctx = scratch.ctx();
         let env = scratch.env(&ctx, &["sh", "pi"]);
@@ -929,20 +996,32 @@ project_dirs = []
             task: "T1".to_string(),
             reason: "the provider cut sh's turn off".to_string(),
             to: Some("pi".to_string()),
-            role: Some("backup".to_string()),
+            role: Some(spawn::TAKEOVER_ROLE.to_string()),
             same_worker: false,
             opening: Some("<shprd-backup>context</shprd-backup>".to_string()),
         };
         let report = handoff(&mux, &env, &request).unwrap_or_else(|err| panic!("{err}"));
         let brief = std::fs::read_to_string(&report.brief).unwrap_or_else(|err| panic!("{err}"));
-        // The backup role's shipped words and a freshly rendered task, not the
+        // The takeover's shipped words and a freshly rendered task, not the
         // brief the stopped worker was launched with, with the ladder's
         // takeover context before both.
         assert!(
-            brief.contains("You are taking over one shprd task"),
-            "the backup role's prompt is in the brief: {brief}"
+            brief.contains("worker taking over one task"),
+            "the takeover prompt is in the brief: {brief}"
         );
         assert!(brief.contains("<shprd-backup>"), "{brief}");
+        // The takeover's words, then the worker's, then the task.
+        let at = |needle: &str| {
+            brief
+                .find(needle)
+                .unwrap_or_else(|| panic!("{needle}: {brief}"))
+        };
+        assert!(
+            at("worker taking over one task") < at("You are a shprd worker. Use only")
+                && at("You are a shprd worker. Use only") < at("# T1 Hand a task over"),
+            "{brief}"
+        );
+        assert!(!brief.contains("Shepherdr"), "{brief}");
         assert!(brief.contains("# T1 Hand a task over"), "{brief}");
         assert!(brief.contains("## Your settings"), "{brief}");
         assert!(
@@ -975,10 +1054,9 @@ project_dirs = []
         );
         assert_eq!(task.attempts[0].agent, "pi");
         assert_eq!(task.status, TaskStatus::Working);
-        let space = spawn::task_space(&mux, &env, "T1").unwrap_or_else(|err| panic!("{err}"));
-        let tabs = mux
-            .list_tabs(&space.id)
-            .unwrap_or_else(|err| panic!("{err}"));
+        let space = spawn::agent_space(&mux, &env).unwrap_or_else(|err| panic!("{err}"));
+        let _ = &space;
+        let tabs = spawn::all_handles(&mux);
         assert_eq!(tabs.len(), 1, "the old tab should be closed: {tabs:?}");
         assert_eq!(tabs[0].title, "pi·T1");
         assert!(
@@ -1003,6 +1081,98 @@ project_dirs = []
             .unwrap_or_else(|| panic!("no tab was created by the hand-off"));
         assert_eq!(created, worktree, "the newcomer sits elsewhere");
         assert_eq!(report.tab, "pi·T1");
+    }
+
+    #[test]
+    fn a_hand_off_reopens_a_reported_task_first() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.env(&ctx, &["sh", "pi"]);
+        let mux = mux_with_workspace(&scratch);
+        seed(&mux, &env);
+        ctx.commit(shprd_core::event::EventKind::Reported {
+            task: "T1".to_string(),
+            attempt: 1,
+            status: shprd_core::event::ReportStatus::Completed,
+            summary: "done".to_string(),
+            tests: Vec::new(),
+            checks: vec![shprd_core::event::CheckReport::passed(
+                "tests",
+                "cargo test",
+            )],
+            changed_paths: Vec::new(),
+            commit: None,
+            skills_used: Vec::new(),
+            proofs: Vec::new(),
+        })
+        .unwrap_or_else(|err| panic!("{err}"));
+        let state = ctx.state().unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(state.tasks["T1"].status, TaskStatus::Reported);
+
+        let report = handoff(&mux, &env, &request(None)).unwrap_or_else(|err| panic!("{err}"));
+
+        assert_eq!(report.to, "pi");
+        let (state, events) = ctx.load().unwrap_or_else(|err| panic!("{err}"));
+        let task = &state.tasks["T1"];
+        assert_eq!(task.status, TaskStatus::Working);
+        assert_eq!(task.attempts.len(), 1, "same attempt");
+        assert_eq!(task.attempts[0].agent, "pi");
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e.kind, shprd_core::event::EventKind::TaskReopened { .. })),
+            "the reopen is on the log"
+        );
+    }
+
+    #[test]
+    fn a_hand_off_reopens_a_passed_task_first() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.env(&ctx, &["sh", "pi"]);
+        let mux = mux_with_workspace(&scratch);
+        let worktree = seed(&mux, &env);
+        ctx.commit(shprd_core::event::EventKind::Reported {
+            task: "T1".to_string(),
+            attempt: 1,
+            status: shprd_core::event::ReportStatus::Completed,
+            summary: "done".to_string(),
+            tests: Vec::new(),
+            checks: vec![shprd_core::event::CheckReport::passed(
+                "tests",
+                "cargo test",
+            )],
+            changed_paths: Vec::new(),
+            commit: None,
+            skills_used: Vec::new(),
+            proofs: Vec::new(),
+        })
+        .unwrap_or_else(|err| panic!("{err}"));
+        let engine = Ctx {
+            actor: shprd_core::event::Actor::Engine,
+            ..ctx.clone()
+        };
+        engine
+            .commit(shprd_core::event::EventKind::ReviewSkipped {
+                task: "T1".to_string(),
+                attempt: 1,
+            })
+            .unwrap_or_else(|err| panic!("{err}"));
+        let state = ctx.state().unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(state.tasks["T1"].status, TaskStatus::Passed);
+
+        handoff(&mux, &env, &request(None)).unwrap_or_else(|err| panic!("{err}"));
+
+        let state = ctx.state().unwrap_or_else(|err| panic!("{err}"));
+        let task = &state.tasks["T1"];
+        assert_eq!(task.status, TaskStatus::Working);
+        assert_eq!(task.attempts.len(), 1);
+        assert_eq!(task.attempts[0].agent, "pi");
+        assert_eq!(
+            task.attempts[0].worktree,
+            worktree.to_string_lossy(),
+            "same worktree"
+        );
     }
 
     /// A spec whose only status source is the plugin it runs for us, and which
@@ -1091,11 +1261,8 @@ project_dirs = []
         let mux = mux_with_workspace(&scratch);
         let worktree = seed(&mux, &env);
         // What the outgoing agent last printed, which the newcomer should see.
-        let pane = mux
-            .list_spaces()
-            .unwrap_or_else(|err| panic!("{err}"))
-            .iter()
-            .flat_map(|space| mux.list_tabs(&space.id).unwrap_or_default())
+        let pane = spawn::all_handles(&mux)
+            .into_iter()
             .next()
             .map(|tab| tab.root_pane)
             .unwrap_or_else(|| panic!("the CLI was never started"));
@@ -1423,10 +1590,9 @@ project_dirs = []
                 .map(|escalation| escalation.body.as_str()),
             Some("hand-off to pi could not be recorded")
         );
-        let space = spawn::task_space(&mux, &env, "T1").unwrap_or_else(|err| panic!("{err}"));
-        let tabs = mux
-            .list_tabs(&space.id)
-            .unwrap_or_else(|err| panic!("{err}"));
+        let space = spawn::agent_space(&mux, &env).unwrap_or_else(|err| panic!("{err}"));
+        let _ = &space;
+        let tabs = spawn::all_handles(&mux);
         assert!(
             tabs.is_empty(),
             "the newcomer's tab was left open: {tabs:?}"

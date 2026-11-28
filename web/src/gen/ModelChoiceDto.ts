@@ -23,4 +23,11 @@ default_effort?: string,
 /**
  * Whether the model has a speed tier of its own.
  */
-fast: boolean, };
+fast: boolean, 
+/**
+ * Whose model it is: the family of the model for a program that runs
+ * several vendors' models (`pi`), else the program's own vendor. Absent
+ * when no family claims it. The cross-vendor rule reads this, so a
+ * picker can choose a default that does not break it.
+ */
+vendor?: string, };

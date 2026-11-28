@@ -18,7 +18,7 @@ use tempfile::TempDir;
 
 mod support;
 
-use support::herdr::isolate;
+use support::isolate;
 
 /// The binary under test, built by cargo for this integration test.
 const BIN: &str = env!("CARGO_BIN_EXE_shprd");
@@ -209,6 +209,7 @@ impl Fixture {
                 attempt: 1,
                 reviewer: "c1".to_string(),
                 degraded: false,
+                note: None,
             },
         };
         let line = serde_json::to_string(&event).expect("serialize the request");
@@ -502,8 +503,8 @@ fn a_local_ask_can_be_approved_on_the_task_itself() {
     let head = fixture.hand_in("T1", "integration/m9", "a.txt", "the task's work\n");
     let seed = fixture.seed.clone();
 
-    // The ask names the verb a person can actually run: there is no pull
-    // request, so nothing points at a forge.
+    // The ask names what a person in the desktop actually does (the Accept button, SHPR-83:
+    // nobody types a command there): there is no pull request, so nothing points at a forge.
     let steps = fixture.tick();
     assert_eq!(
         actions(&steps),
@@ -514,7 +515,10 @@ fn a_local_ask_can_be_approved_on_the_task_itself() {
         .get("detail")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    assert!(detail.contains("shprd approve T1"), "{detail}");
+    assert!(
+        detail.contains("T1 is ready to land: Review and Accept it in the Tasks pane"),
+        "{detail}"
+    );
     assert!(!detail.contains("pull request"), "{detail}");
     assert_eq!(fixture.integration_head(), seed);
 
@@ -575,4 +579,85 @@ fn the_settings_file_alone_sets_the_merge_policy_the_tick_lands_under() {
         "an ask never lands by itself: {steps:?}"
     );
     assert_eq!(fixture.integration_head(), before, "the ask moved nothing");
+}
+
+/// An accepted task in a repository whose `origin` is `url`: the land step
+/// merges locally and says so in one plain sentence, whatever `gh` thinks.
+fn accepted_task_lands_with_origin(url: &str) -> (Fixture, String) {
+    let fixture = Fixture::new();
+    fixture.write_config("ask");
+    fixture.git(&["remote", "add", "origin", url]);
+    fixture.start();
+    let head = fixture.hand_in("T1", "integration/m9", "a.txt", "the task's work\n");
+    let steps = fixture.tick();
+    assert_eq!(
+        actions(&steps),
+        vec!["needs_you:T1".to_string()],
+        "{steps:?}"
+    );
+    fixture.ok(&["approve", "T1", "--yes"]);
+    let steps = fixture.tick();
+    assert_eq!(actions(&steps), vec!["land:T1".to_string()], "{steps:?}");
+    assert_eq!(steps[0].get("ok"), Some(&Value::Bool(true)), "{steps:?}");
+    assert_eq!(fixture.integration_head(), head);
+    (fixture, head)
+}
+
+#[test]
+fn accepting_lands_when_origin_is_a_local_bare_repository_and_pushes_it() {
+    let temp = TempDir::new().expect("temp dir");
+    let bare = temp.path().join("remote.git");
+    let out = Command::new("git")
+        .args(["init", "--bare", "-q"])
+        .arg(&bare)
+        .output()
+        .expect("git runs");
+    assert!(out.status.success());
+    let (fixture, head) = accepted_task_lands_with_origin(bare.to_str().expect("utf8 path"));
+    assert_eq!(
+        fixture.git_in(&bare, &["rev-parse", "integration/m9"]),
+        head,
+        "the remote took the merge"
+    );
+}
+
+#[test]
+fn accepting_lands_when_origin_is_not_a_github_host() {
+    // The host does not resolve and is never contacted: no `gh pr list`, so no
+    // forge error, and the push to it fails quietly.
+    let (_fixture, _head) =
+        accepted_task_lands_with_origin("ssh://git@git.example.invalid/owner/repo.git");
+}
+
+/// A non-GitHub remote that already has the integration branch, one commit
+/// behind: landing merges locally and the local branch is never reset to the
+/// remote's copy first (only a forge landing realigns).
+#[test]
+fn a_non_forge_remote_never_resets_the_local_integration_branch() {
+    let temp = TempDir::new().expect("temp dir");
+    let bare = temp.path().join("remote.git");
+    let out = Command::new("git")
+        .args(["init", "--bare", "-q"])
+        .arg(&bare)
+        .output()
+        .expect("git runs");
+    assert!(out.status.success());
+    let fixture = Fixture::new();
+    fixture.write_config("ask");
+    fixture.git(&["remote", "add", "origin", bare.to_str().expect("utf8 path")]);
+    fixture.git(&["push", "-q", "origin", "integration/m9"]);
+    // The local branch moves ahead of the remote's copy.
+    fixture.git(&["switch", "-q", "integration/m9"]);
+    fixture.git(&["commit", "-q", "--allow-empty", "-m", "local only"]);
+    let ahead = fixture.git(&["rev-parse", "integration/m9"]);
+    fixture.git(&["switch", "-q", "--detach"]);
+    fixture.start();
+    let head = fixture.hand_in("T1", "integration/m9", "a.txt", "the task's work\n");
+    fixture.tick();
+    fixture.ok(&["approve", "T1", "--yes"]);
+    let steps = fixture.tick();
+    assert_eq!(actions(&steps), vec!["land:T1".to_string()], "{steps:?}");
+    assert_eq!(fixture.integration_head(), head);
+    // The local-only commit survived: the landing sits on top of it.
+    fixture.git(&["merge-base", "--is-ancestor", &ahead, &head]);
 }

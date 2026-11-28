@@ -23,13 +23,14 @@
 //! two answers are the same fact said twice so that a caller may check first
 //! (the plan) and still degrade if it forgot (the act).
 //!
-//! # One space per task
+//! # One space per repository, no tab per agent
 //!
 //! The layout is [`Space`]s (a herdr workspace, a tuios session), each holding
-//! [`Tab`]s, each holding [`PaneId`]s. shprd gives **a task its own space**,
-//! labelled from the task, and keeps one repository-level space
-//! (`shprd · <folder>`) for the coordinator. [`Host::ensure_space`] finds or
-//! makes one, [`Host::close_space`] removes a task's when it lands.
+//! [`Tab`]s, each holding [`PaneId`]s. shprd keeps **one space per repository**
+//! (`shprd · <folder>`) for its coordinator. Workers and reviewers get no space
+//! and no tab: [`Host::spawn_agent`] starts them as labelled headless terminals
+//! where the host can ([`Capabilities::headless_agents`]) and as a tab of that
+//! space where it cannot. See [`agent`] for the design.
 //!
 //! # Shape of the trait
 //!
@@ -38,8 +39,11 @@
 //! never turn into a command. Text that is meant as a shell line is typed
 //! through [`Host::write`], which the caller chose to do.
 
+pub mod agent;
 pub mod fake;
 pub mod types;
+
+pub use agent::{AgentLaunch, AgentRole, LiveAgent};
 
 use std::path::Path;
 use std::time::Duration;
@@ -77,6 +81,65 @@ pub trait Host: Send + Sync {
     /// about; it just cannot say what else it has, which
     /// [`Capabilities::list_spaces`] is about.
     fn find_space(&self, name: &str) -> Result<Option<Space>>;
+
+    /// The space shprd marked as `mark`, wherever it is called now.
+    ///
+    /// shprd's own label on a space, kept apart from the display name so a
+    /// person can rename the space and shprd still finds it. `Ok(None)` when
+    /// nothing carries the mark (or the host cannot keep one). A mark whose
+    /// space is gone is `None` too.
+    fn marked_space(&self, _mark: &str) -> Result<Option<Space>> {
+        Ok(None)
+    }
+
+    /// Put shprd's `mark` on `space`, replacing the space the mark named before.
+    ///
+    /// The mark lives on the host's own record of the space, not on anything
+    /// inside it, so a space with no terminals keeps it. A host that cannot keep
+    /// a mark answers [`MuxError::Unsupported`], and the caller falls back to
+    /// the name.
+    fn mark_space(&self, _space: &SpaceId, _mark: &str) -> Result<()> {
+        Err(MuxError::Unsupported("marking a space"))
+    }
+
+    /// Give `space` the display name `name`.
+    ///
+    /// The id and the mark stay. A host that cannot rename answers
+    /// [`MuxError::Unsupported`], and the caller leaves the name as it is.
+    fn rename_space(&self, _space: &SpaceId, _name: &str) -> Result<()> {
+        Err(MuxError::Unsupported("renaming a space"))
+    }
+
+    /// The spaces whose folder is `folder`, in the host's display order.
+    ///
+    /// A host that does not record a space's folder answers none: the caller
+    /// then falls back to names.
+    fn spaces_in_folder(&self, _folder: &Path) -> Result<Vec<Space>> {
+        Ok(Vec::new())
+    }
+
+    /// Every coordinator agent the host has, running or ended, whichever space
+    /// it was started for. [`Host::list_agents`] lists the headless agents only
+    /// (a coordinator keeps a tab), so this is the one place a coordinator
+    /// shprd started earlier can be found again.
+    fn list_coordinators(&self) -> Result<Vec<LiveAgent>> {
+        Ok(Vec::new())
+    }
+
+    /// Whether `pane` runs another product's agent (Shepherdr's per-space
+    /// Assistant), which shprd never adopts, types into or counts. A host that
+    /// cannot tell answers `false`.
+    fn is_foreign_agent(&self, _pane: &PaneId) -> bool {
+        false
+    }
+
+    /// The tabs another product's agent claims as its own (Shepherdr's
+    /// Assistant names the tab it chats in), by tab id. Such a tab holds that
+    /// agent's conversation even when no terminal is drawn in it, so shprd never
+    /// closes it as an empty one. A host that cannot tell answers none.
+    fn foreign_agent_tabs(&self) -> Vec<TabId> {
+        Vec::new()
+    }
 
     /// Every space the host has, in the host's display order.
     ///
@@ -167,6 +230,33 @@ pub trait Host: Send + Sync {
         cwd: &Path,
     ) -> Result<Tab>;
 
+    /// Start one agent: a worker, a reviewer or the coordinator.
+    ///
+    /// Where [`Capabilities::headless_agents`] is true (Herdr desktop) a worker
+    /// or reviewer is a labelled terminal with **no tab and no space**, found by
+    /// [`Host::list_agents`], read and typed into through its `root_pane`, and
+    /// stopped by [`Host::close_tab`] on the returned handle. The coordinator
+    /// keeps a tab in `launch.space`. Everywhere else — the default — it is
+    /// [`Host::spawn`]: a tab of `launch.space` titled `launch.title`.
+    fn spawn_agent(&self, launch: &AgentLaunch<'_>) -> Result<Tab> {
+        self.spawn(
+            launch.space,
+            launch.title,
+            launch.argv,
+            launch.env,
+            launch.cwd,
+        )
+    }
+
+    /// Every agent [`Host::spawn_agent`] started that the host still has, live
+    /// or finished and not yet stopped, found by label rather than by layout.
+    ///
+    /// A host that keeps tabs answers an empty list: its agents are tabs and
+    /// [`Host::list_tabs`] finds them.
+    fn list_agents(&self) -> Result<Vec<LiveAgent>> {
+        Ok(Vec::new())
+    }
+
     /// Split `pane` into a second pane, returning the new one.
     ///
     /// `ratio` is the share of the split axis the *existing* pane keeps, in
@@ -185,6 +275,29 @@ pub trait Host: Send + Sync {
     /// that would be left with an unwanted process can tell before planning.
     fn close_pane(&self, _pane: &PaneId) -> Result<()> {
         Err(MuxError::Unsupported("closing a pane"))
+    }
+
+    /// The name of every tab in `space`, mod-only tabs included, with its id.
+    ///
+    /// [`Host::list_tabs`] lists only tabs a program runs in. This is for the
+    /// question "is that name taken?", which another product's tab answers too:
+    /// the default is the listed tabs' titles.
+    fn tab_names(&self, space: &SpaceId) -> Result<Vec<(TabId, String)>> {
+        Ok(self
+            .list_tabs(space)?
+            .into_iter()
+            .map(|tab| (tab.id, tab.title))
+            .collect())
+    }
+
+    /// Show the agent in `pane` as a chat over `chat_space`'s conversation, in
+    /// the pane's own place: the chat takes the pane's spot and the terminal
+    /// keeps running behind it, one switch away (Shepherdr's Chat · Terminal).
+    ///
+    /// A host with no window answers [`MuxError::Unsupported`], and the agent
+    /// stays a plain terminal tab.
+    fn show_chat(&self, _pane: &PaneId, _chat_space: &str) -> Result<()> {
+        Err(MuxError::Unsupported("showing a chat"))
     }
 
     /// Type `text` into `pane`, submitting it (pressing enter) when `submit`.
@@ -373,6 +486,14 @@ macro_rules! forward_a_wrapper {
                     (**self).spawn(space, title, argv, env, cwd)
                 }
 
+                fn spawn_agent(&self, launch: &AgentLaunch<'_>) -> Result<Tab> {
+                    (**self).spawn_agent(launch)
+                }
+
+                fn list_agents(&self) -> Result<Vec<LiveAgent>> {
+                    (**self).list_agents()
+                }
+
                 fn split(
                     &self,
                     pane: &PaneId,
@@ -385,6 +506,14 @@ macro_rules! forward_a_wrapper {
 
                 fn close_pane(&self, pane: &PaneId) -> Result<()> {
                     (**self).close_pane(pane)
+                }
+
+                fn tab_names(&self, space: &SpaceId) -> Result<Vec<(TabId, String)>> {
+                    (**self).tab_names(space)
+                }
+
+                fn show_chat(&self, pane: &PaneId, chat_space: &str) -> Result<()> {
+                    (**self).show_chat(pane, chat_space)
                 }
 
                 fn write(&self, pane: &PaneId, text: &str, submit: bool) -> Result<()> {
@@ -421,6 +550,34 @@ macro_rules! forward_a_wrapper {
 
                 fn subscribe(&self, timeout: Duration) -> Result<Vec<MuxEvent>> {
                     (**self).subscribe(timeout)
+                }
+
+                fn marked_space(&self, mark: &str) -> Result<Option<Space>> {
+                    (**self).marked_space(mark)
+                }
+
+                fn mark_space(&self, space: &SpaceId, mark: &str) -> Result<()> {
+                    (**self).mark_space(space, mark)
+                }
+
+                fn rename_space(&self, space: &SpaceId, name: &str) -> Result<()> {
+                    (**self).rename_space(space, name)
+                }
+
+                fn spaces_in_folder(&self, folder: &Path) -> Result<Vec<Space>> {
+                    (**self).spaces_in_folder(folder)
+                }
+
+                fn list_coordinators(&self) -> Result<Vec<LiveAgent>> {
+                    (**self).list_coordinators()
+                }
+
+                fn is_foreign_agent(&self, pane: &PaneId) -> bool {
+                    (**self).is_foreign_agent(pane)
+                }
+
+                fn foreign_agent_tabs(&self) -> Vec<TabId> {
+                    (**self).foreign_agent_tabs()
                 }
 
                 fn doc(&self, space: &SpaceId, name: &str, body: &str) -> Result<String> {
@@ -479,20 +636,122 @@ pub(crate) fn wait_by_polling(
 /// line is never cut off.
 const SCREEN_LINES: usize = 200;
 
-/// The space shprd gives one task: its name, derived from the task and the run.
-///
-/// One task, one space: a person reading the host's bar sees which task each
-/// group of terminals belongs to, and closing a task's space closes exactly its
-/// tabs. The repository's own space ([`repo_space_name`]) stays, for the
-/// coordinator.
-pub fn task_space_name(repo_name: &str, run: &str, task: &str) -> String {
-    format!("shprd · {repo_name} · {run} · {task}")
-}
-
 /// The space the coordinator's tabs live in, named after the repository folder.
 ///
-/// This is the one space a run does not own, so it outlives every task and is
-/// only ever emptied, never closed.
+/// This is the one space shprd makes: it outlives every task and is only ever
+/// emptied, never closed.
 pub fn repo_space_name(repo_name: &str) -> String {
     format!("shprd · {repo_name}")
+}
+
+/// The space shprd keeps under `name`, found by shprd's own mark first.
+///
+/// A person may rename the space, so the display name is not the identity: the
+/// mark is. Order: the space carrying the mark; else (back-compat, a space made
+/// before marks existed) the space with that exact name; else a space already
+/// open on `cwd` (one repository is one space, so a space an older shprd or a
+/// person made for the same folder is adopted, never shown beside a second);
+/// else a new space made in `cwd`. The space found or made is marked, and
+/// given `name` when the host shows it by its raw id, by no name at all or by
+/// its folder's name, because a person reads the label on the sidebar. A name
+/// a person chose is left alone. Returns the space and whether this call made
+/// it. A host that cannot keep marks or rename still works by name.
+pub fn ensure_marked_space(host: &dyn Host, name: &str, cwd: &Path) -> Result<(Space, bool)> {
+    ensure_marked_space_from(host, name, cwd, &[])
+}
+
+/// [`ensure_marked_space`], also adopting a plain space open on one of `also`.
+///
+/// A person who adds a folder *inside* a repository gets a space on that
+/// subfolder; the repository's root is where shprd works, so the space on the
+/// folder the person added is the one adopted, not a second one made beside it.
+pub fn ensure_marked_space_from(
+    host: &dyn Host,
+    name: &str,
+    cwd: &Path,
+    also: &[&Path],
+) -> Result<(Space, bool)> {
+    ensure_marked_space_detail(host, name, cwd, also).map(|(space, created, _)| (space, created))
+}
+
+/// [`ensure_marked_space_from`], also saying whether the space was *adopted
+/// fresh*: one the window made a moment ago (shown by its raw id, no name or its
+/// folder's name) and shprd had never marked. The window's own add-folder flow
+/// makes such a space with a default shell tab; the caller may tidy that tab
+/// once, because after this call the space carries shprd's mark and name and is
+/// never "fresh" again.
+pub fn ensure_marked_space_detail(
+    host: &dyn Host,
+    name: &str,
+    cwd: &Path,
+    also: &[&Path],
+) -> Result<(Space, bool, bool)> {
+    let marked_before = matches!(host.marked_space(name), Ok(Some(_)));
+    let known = match host.marked_space(name)? {
+        Some(space) => Some(space),
+        None => match host.find_space(name)? {
+            Some(space) => Some(space),
+            None => same_folder_space(host, name, cwd).or_else(|| {
+                also.iter()
+                    .find_map(|folder| same_folder_space(host, name, folder))
+            }),
+        },
+    };
+    let (mut space, created) = match known {
+        Some(space) => (space, false),
+        None => match host.create_space(name, cwd) {
+            Ok(space) => (space, true),
+            // The loser of a creation race reads back what the winner made.
+            Err(err) => match host.find_space(name) {
+                Ok(Some(space)) => (space, false),
+                _ => return Err(err),
+            },
+        },
+    };
+    let auto = shows_as_auto(&space, name, cwd);
+    if auto && host.rename_space(&space.id, name).is_ok() {
+        space.name = name.to_string();
+    }
+    match host.mark_space(&space.id, name) {
+        Ok(()) | Err(MuxError::Unsupported(_)) => {}
+        Err(err) => return Err(err),
+    }
+    Ok((space, created, !created && auto && !marked_before))
+}
+
+/// The space already open on `cwd` that is not another repository's label: the
+/// one a repository adopts instead of making a second.
+fn same_folder_space(host: &dyn Host, label: &str, cwd: &Path) -> Option<Space> {
+    let spaces = host.spaces_in_folder(cwd).ok()?;
+    spaces
+        .into_iter()
+        .find(|space| space.name == label || !space.name.starts_with(SPACE_PREFIX))
+}
+
+/// What every label starts with.
+const SPACE_PREFIX: &str = "shprd · ";
+
+/// Whether a host shows `space` by something the window made up rather than by
+/// a name a person chose: its raw id, nothing, or its folder's name.
+fn shows_as_auto(space: &Space, label: &str, cwd: &Path) -> bool {
+    if space.name == label {
+        return false;
+    }
+    let name = space.name.trim();
+    let folder = cwd
+        .file_name()
+        .map(|folder| folder.to_string_lossy().to_string())
+        .unwrap_or_default();
+    name.is_empty()
+        || name == space.id.as_str()
+        || (!folder.is_empty() && name.eq_ignore_ascii_case(&folder))
+}
+
+/// The space shprd keeps under `name` if the host has it: by mark first, then
+/// (a space nobody has marked yet) by name. Never creates or marks anything.
+pub fn find_marked_space(host: &dyn Host, name: &str) -> Result<Option<Space>> {
+    match host.marked_space(name)? {
+        Some(space) => Ok(Some(space)),
+        None => host.find_space(name),
+    }
 }

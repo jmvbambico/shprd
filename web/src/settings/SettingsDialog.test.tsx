@@ -1,0 +1,544 @@
+// The dialog's states and its writes: loading, the service down, data, a refusal
+// in the service's own words, the repo scope, the prompts and the phone sheet.
+
+// @vitest-environment jsdom
+
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import { SettingsDialog } from "./SettingsDialog";
+import { NOTE_MS } from "./TasksPage";
+import { PROMPT_MS } from "./PromptsPage";
+import { json, prompt, PROMPTS, reads, refusal, ROSTER, scripted, settings, row } from "./testkit";
+
+function width(px: number) {
+  Object.defineProperty(globalThis, "innerWidth", { value: px, configurable: true, writable: true });
+}
+
+beforeEach(() => width(1280));
+
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+});
+
+function open(routes: Parameters<typeof scripted>[0]) {
+  const kit = scripted(routes);
+  const onClose = vi.fn();
+  render(<SettingsDialog client={kit.api} onClose={onClose} onSignedOut={vi.fn()} />);
+  return { ...kit, onClose };
+}
+
+describe("SettingsDialog: frame", () => {
+  it("lists the four pages beside the page and has no Save button", async () => {
+    open(reads());
+    const nav = screen.getByRole("navigation", { name: "Settings pages" });
+    expect(within(nav).getAllByRole("button").map((b) => b.textContent)).toEqual([
+      "Agents",
+      "Tasks",
+      "Prompts",
+      "Remote",
+    ]);
+    await screen.findByText("Worker (s)");
+    expect(screen.queryByRole("button", { name: /save/i })).toBeNull();
+    expect(screen.getByRole("dialog", { name: "Settings" }).getAttribute("data-view")).toBe("both");
+  });
+
+  it("says it is reading, then says the service is down", async () => {
+    open({
+      "GET /api/settings": new Promise<Response>(() => undefined) as unknown as Response,
+    });
+    expect(screen.getByText("Reading the settings…")).toBeDefined();
+    cleanup();
+    open({
+      "GET /api/settings": () => {
+        throw new TypeError("connection refused");
+      },
+      "GET /api/roster": json(200, { programs: [] }),
+      "GET /api/prompts": json(200, { prompts: [] }),
+    });
+    expect(await screen.findByText(/shprd serve is not running|connection refused/)).toBeDefined();
+  });
+
+  it("closes on Escape and on the close button", async () => {
+    const { onClose } = open(reads());
+    await screen.findByText("Worker (s)");
+    fireEvent.keyDown(document, { key: "Escape" });
+    fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
+    expect(onClose).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("SettingsDialog: Agents", () => {
+  it("shows one compact row a role: its name, one line, and one model button", async () => {
+    open(reads());
+    const worker = await screen.findByRole("region", { name: "Worker (s)" });
+    const button = within(worker).getByRole("button", { name: "Worker (s) program 1" });
+    expect(button.textContent).toContain("Sonnet");
+    expect(screen.queryByRole("button", { name: /Edit instructions/ })).toBeNull();
+    // No stacked Program / Model / Effort rows, and no "nothing sets it" captions.
+    expect(screen.queryByText("nothing sets it")).toBeNull();
+    expect(screen.queryByText("Program")).toBeNull();
+    expect(screen.getByText("reads only")).toBeDefined();
+  });
+
+  it("the model button opens the menu on a click, with only the detected programs in a dropdown", async () => {
+    const roster = {
+      programs: [
+        ...ROSTER.programs,
+        { ...ROSTER.programs[1]!, id: "pi", name: "Pi", installed: false },
+      ],
+    };
+    open(reads({ "GET /api/roster": json(200, roster) }));
+    const worker = await screen.findByRole("region", { name: "Worker (s)" });
+    fireEvent.click(await within(worker).findByRole("button", { name: "Worker (s) program 1" }));
+    expect(screen.queryByRole("tablist")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Program" }));
+    const programs = within(screen.getByRole("listbox", { name: "Programs" })).getAllByRole("option");
+    expect(programs.map((entry) => entry.textContent?.replace("✓", ""))).toEqual(["Claude Code", "Codex"]);
+    expect(screen.queryByRole("option", { name: /Pi/ })).toBeNull();
+    fireEvent.click(screen.getByRole("option", { name: /Claude Code/ }));
+    expect(screen.getByRole("option", { name: /Sonnet/ }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByRole("radiogroup", { name: "Reasoning" })).toBeDefined();
+  });
+
+  it("writes a model pick at once, to your own settings", async () => {
+    const { calls } = open(
+      reads({
+        "PUT /api/settings": json(200, {
+          outcome: "stored",
+          settings: settings([row("roles.worker.model", "opus", "you")]),
+        }),
+      }),
+    );
+    const worker = await screen.findByRole("region", { name: "Worker (s)" });
+    fireEvent.click(await within(worker).findByRole("button", { name: "Worker (s) program 1" }));
+    fireEvent.click(await screen.findByRole("option", { name: /opus/ }));
+    await waitFor(() => expect(calls.some((call) => call.method === "PUT")).toBe(true));
+    const put = calls.find((call) => call.method === "PUT");
+    // the level the model does not take is dropped, the model is written
+    expect(put?.body).toEqual({ key: "roles.worker.model", value: "opus" });
+    await waitFor(() =>
+      expect(within(worker).getByRole("button", { name: "Worker (s) program 1" }).textContent).toContain("opus"),
+    );
+  });
+
+  it("writes to the repo's entry in This repo, shows a repo badge, and Reset removes the key", async () => {
+    const { calls } = open(
+      reads({
+        "GET /api/settings": json(
+          200,
+          settings([row("roles.worker.model", "opus", "repo_entry")]),
+        ),
+        "PUT /api/settings": json(200, { outcome: "removed", settings: settings() }),
+      }),
+    );
+    const worker = await screen.findByRole("region", { name: "Worker (s)" });
+    expect(within(worker).getByText("repo")).toBeDefined();
+    expect(screen.queryByRole("button", { name: "Reset worker" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Applies to" }));
+    fireEvent.click(await screen.findByRole("option", { name: /This repo/ }));
+    expect(screen.getByText(/Only this repository \(shprd\)/)).toBeDefined();
+    fireEvent.click(screen.getByRole("button", { name: "Reset worker" }));
+    await waitFor(() => expect(calls.some((call) => call.method === "PUT")).toBe(true));
+    const put = calls.find((call) => call.method === "PUT");
+    expect(put?.body).toEqual({ key: "roles.worker.model", for_repo: true });
+  });
+
+  it("shows the same-vendor refusal exactly as the API words it, and writes no more of the choice", async () => {
+    const words = "the reviewer (codex, openai) and the worker (codex, openai) share a vendor";
+    const { calls } = open(
+      reads({
+        "PUT /api/settings": refusal(409, "refused", words),
+      }),
+    );
+    const worker = await screen.findByRole("region", { name: "Worker (s)" });
+    fireEvent.click(await within(worker).findByRole("button", { name: "Worker (s) program 1" }));
+    fireEvent.click(screen.getByRole("button", { name: "Program" }));
+    fireEvent.click(screen.getByRole("option", { name: /Codex/ }));
+    fireEvent.change(screen.getByLabelText("Search every agent’s models"), { target: { value: "gpt-6" } });
+    fireEvent.click(await screen.findByRole("option", { name: /Use gpt-6/ }));
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain(words);
+    // the key path is not drawn, and the old model is written out first and refused, so nothing after it was sent
+    expect(alert.textContent).not.toContain("roles.");
+    expect(calls.filter((call) => call.method === "PUT")).toHaveLength(1);
+  });
+
+  it("puts back what a choice already wrote when a later write of it is refused", async () => {
+    let puts = 0;
+    const { calls } = open(
+      reads({
+        "PUT /api/settings": (call) => {
+          puts += 1;
+          const body = call.body as { key: string; value?: unknown };
+          // the program goes through, the model after it is refused
+          return body.key === "roles.worker.model" && body.value === "bad-id"
+            ? refusal(409, "refused", "that model is not one codex has")
+            : json(200, {
+                outcome: "stored",
+                settings: settings([row("roles.worker.agent", "codex", "you")]),
+              });
+        },
+      }),
+    );
+    const worker = await screen.findByRole("region", { name: "Worker (s)" });
+    fireEvent.click(await within(worker).findByRole("button", { name: "Worker (s) program 1" }));
+    fireEvent.click(screen.getByRole("button", { name: "Program" }));
+    fireEvent.click(screen.getByRole("option", { name: /Codex/ }));
+    fireEvent.change(screen.getByLabelText("Search every agent’s models"), { target: { value: "bad-id" } });
+    fireEvent.click(await screen.findByRole("option", { name: /Use bad-id/ }));
+    await waitFor(() => expect(calls.filter((call) => call.method === "PUT")).toHaveLength(5));
+    expect(calls.filter((call) => call.method === "PUT").map((call) => call.body)).toEqual([
+      // the old program's model goes out first, then the new program in, then its model
+      { key: "roles.worker.model" },
+      { key: "roles.worker.agent", value: "codex" },
+      { key: "roles.worker.model", value: "bad-id" },
+      // and the layer's own values go back (the stand-in service answers "codex" for the program)
+      { key: "roles.worker.agent", value: "codex" },
+      { key: "roles.worker.model", value: "sonnet" },
+    ]);
+    expect((await screen.findByRole("alert")).textContent).toContain("that model is not one codex has");
+  });
+
+  it("says so when putting a write back is refused too", async () => {
+    let puts = 0;
+    open(
+      reads({
+        "PUT /api/settings": (call) => {
+          puts += 1;
+          const body = call.body as { key: string; value?: unknown };
+          if (body.key === "roles.worker.model" && body.value === "bad-id") {
+            return refusal(409, "refused", "that model is not one codex has");
+          }
+          return puts === 4
+            ? refusal(409, "refused", "the worker and the reviewer share a vendor")
+            : json(200, { outcome: "stored", settings: settings([row("roles.worker.agent", "codex", "you")]) });
+        },
+      }),
+    );
+    const worker = await screen.findByRole("region", { name: "Worker (s)" });
+    fireEvent.click(await within(worker).findByRole("button", { name: "Worker (s) program 1" }));
+    fireEvent.click(screen.getByRole("button", { name: "Program" }));
+    fireEvent.click(screen.getByRole("option", { name: /Codex/ }));
+    fireEvent.change(screen.getByLabelText("Search every agent’s models"), { target: { value: "bad-id" } });
+    fireEvent.click(await screen.findByRole("option", { name: /Use bad-id/ }));
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toMatch(/back was refused too: the worker and the reviewer share a vendor/));
+    expect(screen.getByRole("alert").textContent).toContain("that model is not one codex has");
+  });
+
+  it("holds several worker programs: + adds a line, × removes one, a line picks its own program", async () => {
+    const { calls } = open(
+      reads({
+        "PUT /api/settings": json(200, { outcome: "stored", settings: settings([row("roles.worker.agents", ["codex||||"], "you")]) }),
+      }),
+    );
+    const worker = await screen.findByRole("region", { name: "Worker (s)" });
+    expect(within(worker).queryByRole("button", { name: /Remove program/ })).toBeNull();
+    expect(within(worker).queryByText(/The first line is the default worker/)).toBeNull();
+    expect(within(worker).queryByText("Fallback")).toBeNull();
+    fireEvent.click(within(worker).getByRole("button", { name: "Add New +" }));
+    await waitFor(() => expect(calls.some((call) => call.method === "PUT")).toBe(true));
+    expect(calls.find((call) => call.method === "PUT")?.body).toEqual({
+      key: "roles.worker.agents",
+      value: ["codex||||"],
+    });
+    // the second line shows, with a × on each line, and its menu has the first line's program taken
+    fireEvent.click(await within(worker).findByRole("button", { name: "Worker (s) program 2" }));
+    fireEvent.click(screen.getByRole("button", { name: "Program" }));
+    const claude = screen.getByRole("option", { name: /Claude Code/ }) as HTMLButtonElement;
+    expect(claude.disabled).toBe(true);
+    expect(claude.textContent).toContain("another line has it");
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(within(worker).getAllByRole("button", { name: /Remove program/ })).toHaveLength(2);
+  });
+
+  it("a reviewer holds lines like a worker: Add, a gutter, no separate Fallback picker; an old fallback reads as line 2", async () => {
+    const { calls } = open(
+      reads({
+        "GET /api/settings": json(
+          200,
+          settings([row("roles.reviewer.agent", "claude", "you"), row("roles.reviewer.fallback", ["codex"], "you")]),
+        ),
+        "PUT /api/settings": json(200, { outcome: "stored", settings: settings() }),
+      }),
+    );
+    const reviewer = await screen.findByRole("region", { name: "Reviewer (s)" });
+    expect(within(reviewer).queryByText("Fallback")).toBeNull();
+    expect(within(reviewer).queryByRole("button", { name: /fallback/i })).toBeNull();
+    const second = within(reviewer).getByRole("button", { name: "Reviewer (s) program 2" });
+    expect(second.textContent).toContain("Codex");
+    // two lines: a gutter with the order, and a remove on each
+    expect(reviewer.querySelectorAll(".chain-gutter")).toHaveLength(2);
+    expect(Array.from(reviewer.querySelectorAll(".chain-dot")).map((dot) => dot.textContent)).toEqual(["1", "2"]);
+    fireEvent.click(within(reviewer).getByRole("button", { name: "Remove program 2" }));
+    await waitFor(() => expect(calls.some((call) => call.method === "PUT")).toBe(true));
+    expect(calls.find((call) => call.method === "PUT")?.body).toEqual({ key: "roles.reviewer.fallback", value: [] });
+  });
+
+  it("a worker with three lines shows a numbered gutter; one line has none; no Backup row; one generic note", async () => {
+    open(
+      reads({
+        "GET /api/settings": json(
+          200,
+          settings([row("roles.worker.agents", ["codex||||", "pi||||"], "you")]),
+        ),
+      }),
+    );
+    const worker = await screen.findByRole("region", { name: "Worker (s)" });
+    expect(Array.from(worker.querySelectorAll(".chain-dot")).map((dot) => dot.textContent)).toEqual(["1", "2", "3"]);
+    const reviewer = screen.getByRole("region", { name: "Reviewer (s)" });
+    expect(reviewer.querySelectorAll(".chain-gutter")).toHaveLength(0);
+    expect(screen.queryByText("Backup agent")).toBeNull();
+    expect(screen.queryByRole("switch")).toBeNull();
+    expect(screen.getAllByText(/the first line is the default/)).toHaveLength(1);
+  });
+
+  it("types an id for a program that lists no models", async () => {
+    const { calls } = open(
+      reads({
+        "PUT /api/settings": json(200, { outcome: "stored", settings: settings() }),
+      }),
+    );
+    const reviewer = await screen.findByRole("region", { name: "Reviewer (s)" });
+    fireEvent.click(await within(reviewer).findByRole("button", { name: "Reviewer (s) program 1" }));
+    fireEvent.change(screen.getByLabelText("Search every agent’s models"), { target: { value: "gpt-6-luna" } });
+    fireEvent.click(await screen.findByRole("option", { name: /Use gpt-6-luna/ }));
+    await waitFor(() =>
+      expect(calls.find((call) => call.method === "PUT")?.body).toEqual({
+        key: "roles.reviewer.model",
+        value: "gpt-6-luna",
+      }),
+    );
+  });
+
+  it("adds a custom role through roles.order and refuses a bad id without a call", async () => {
+    const { calls } = open(
+      reads({ "PUT /api/settings": json(200, { outcome: "stored", settings: settings() }) }),
+    );
+    await screen.findByText("Worker (s)");
+    fireEvent.click(screen.getByRole("button", { name: "Add a role" }));
+    fireEvent.change(screen.getByLabelText("Role id"), { target: { value: "worker" } });
+    const addForm = within(screen.getByLabelText("Role id").closest("form")!);
+    fireEvent.click(addForm.getByRole("button", { name: "Add" }));
+    expect((await screen.findByRole("alert")).textContent).toMatch(/letters, digits/);
+    expect(calls.some((call) => call.method === "PUT")).toBe(false);
+    fireEvent.change(screen.getByLabelText("Role id"), { target: { value: "docs" } });
+    fireEvent.click(addForm.getByRole("button", { name: "Add" }));
+    await waitFor(() =>
+      expect(calls.find((call) => call.method === "PUT")?.body).toEqual({
+        key: "roles.order",
+        value: ["coordinator", "worker", "reviewer", "docs"],
+      }),
+    );
+  });
+
+  it("shows the service's problems and 'not checked' beside the roles", async () => {
+    open(
+      reads({
+        "GET /api/settings": json(
+          200,
+          settings([], { problems: ["reviewer shares a vendor"], not_checked: "no harness data" }),
+        ),
+      }),
+    );
+    expect(await screen.findByText("reviewer shares a vendor")).toBeDefined();
+    expect(screen.getByText(/the roles were not checked: no harness data/)).toBeDefined();
+  });
+});
+
+describe("SettingsDialog: Tasks", () => {
+  async function tasks(extra: Record<string, ReturnType<typeof json>> = {}) {
+    const kit = open(
+      reads({
+        "PUT /api/settings": json(200, { outcome: "stored", settings: settings() }),
+        ...extra,
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Tasks" }));
+    await screen.findByText("When a task lands");
+    return kit;
+  }
+
+  it("writes a choice, a switch and a step as they are made", async () => {
+    const { calls } = await tasks();
+    fireEvent.click(screen.getByRole("button", { name: "When a task lands" }));
+    fireEvent.click(await screen.findByRole("option", { name: "By itself" }));
+    await waitFor(() => expect(calls.filter((c) => c.method === "PUT")).toHaveLength(1));
+    fireEvent.click(screen.getByRole("switch", { name: "Ask for proof" }));
+    await waitFor(() => expect(calls.filter((c) => c.method === "PUT")).toHaveLength(2));
+    fireEvent.click(screen.getByRole("button", { name: "More: Review rounds" }));
+    await waitFor(() => expect(calls.filter((c) => c.method === "PUT")).toHaveLength(3));
+    expect(calls.filter((c) => c.method === "PUT").map((c) => c.body)).toEqual([
+      { key: "tasks.merge", value: "auto" },
+      { key: "tasks.proof", value: false },
+      { key: "tasks.review_rounds", value: 4 },
+    ]);
+  });
+
+  it("writes a note a moment after typing stops, and a line when it is left", async () => {
+    const { calls } = await tasks();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    fireEvent.change(screen.getByLabelText("When a task starts"), { target: { value: "Be kind. Be quick." } });
+    expect(calls.some((c) => c.method === "PUT")).toBe(false);
+    await act(async () => {
+      vi.advanceTimersByTime(NOTE_MS + 10);
+    });
+    vi.useRealTimers();
+    await waitFor(() =>
+      expect(calls.find((c) => c.method === "PUT")?.body).toEqual({
+        key: "tasks.start_notes",
+        value: "Be kind. Be quick.",
+      }),
+    );
+    const line = screen.getByLabelText("Archive branches as");
+    fireEvent.focus(line);
+    fireEvent.change(line, { target: { value: "archive/" } });
+    fireEvent.blur(line);
+    await waitFor(() => expect(calls.filter((c) => c.method === "PUT")).toHaveLength(2));
+    expect(calls.filter((c) => c.method === "PUT")[1]?.body).toEqual({
+      key: "tasks.archive_namespace",
+      value: "archive/",
+    });
+  });
+});
+
+describe("SettingsDialog: Prompts", () => {
+  it("lists, opens, saves itself and resets", async () => {
+    const { calls } = open(
+      reads({
+        "GET /api/prompts/worker": json(200, prompt("worker", "Be careful.")),
+        "PUT /api/prompts/worker": json(200, prompt("worker", "Be very careful.", "edited")),
+        "DELETE /api/prompts/worker": json(200, prompt("worker", "Be careful.")),
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Prompts" }));
+    expect(await screen.findByText("Edited")).toBeDefined();
+    fireEvent.click(screen.getByRole("button", { name: "Edit Worker" }));
+    const box = (await screen.findByLabelText("Prompt worker")) as HTMLTextAreaElement;
+    expect(box.value).toBe("Be careful.");
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    fireEvent.change(box, { target: { value: "Be very careful." } });
+    await act(async () => {
+      vi.advanceTimersByTime(PROMPT_MS + 10);
+    });
+    vi.useRealTimers();
+    await waitFor(() =>
+      expect(calls.find((c) => c.method === "PUT")?.body).toEqual({ text: "Be very careful." }),
+    );
+    expect(await screen.findByText("Edited")).toBeDefined();
+    fireEvent.click(screen.getByRole("button", { name: "Reset to default" }));
+    await waitFor(() => expect((screen.getByLabelText("Prompt worker") as HTMLTextAreaElement).value).toBe("Be careful."));
+    expect(calls.some((c) => c.method === "DELETE")).toBe(true);
+  });
+
+  it("a reset waits for a save in flight, so the old words never come back", async () => {
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const order: string[] = [];
+    open(
+      reads({
+        "GET /api/prompts/worker": json(200, prompt("worker", "a")),
+        "PUT /api/prompts/worker": async () => {
+          order.push("put");
+          await gate;
+          return json(200, prompt("worker", "typed", "edited"));
+        },
+        "DELETE /api/prompts/worker": () => {
+          order.push("delete");
+          return json(200, prompt("worker", "shipped"));
+        },
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Prompts" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Edit Worker" }));
+    const box = (await screen.findByLabelText("Prompt worker")) as HTMLTextAreaElement;
+    fireEvent.change(box, { target: { value: "typed" } });
+    fireEvent.blur(box);
+    await waitFor(() => expect(order).toEqual(["put"]));
+    fireEvent.click(screen.getByRole("button", { name: "Reset to default" }));
+    // The reset button is disabled while the save is in flight, so nothing queues.
+    release?.();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Reset to default" })).toHaveProperty("disabled", false));
+    fireEvent.click(screen.getByRole("button", { name: "Reset to default" }));
+    await waitFor(() => expect(order).toEqual(["put", "delete"]));
+    await waitFor(() => expect((screen.getByLabelText("Prompt worker") as HTMLTextAreaElement).value).toBe("shipped"));
+    expect(order).toEqual(["put", "delete"]);
+  });
+
+  it("keeps the words and shows the refusal when a save is refused", async () => {
+    open(
+      reads({
+        "GET /api/prompts/worker": json(200, prompt("worker", "x")),
+        "PUT /api/prompts/worker": refusal(400, "bad_request", "a prompt cannot be empty"),
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Prompts" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Edit Worker" }));
+    const box = (await screen.findByLabelText("Prompt worker")) as HTMLTextAreaElement;
+    fireEvent.change(box, { target: { value: "" } });
+    // Back saves first; a refusal keeps the words in the box and stays.
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
+    expect((await screen.findByRole("alert")).textContent).toContain("a prompt cannot be empty");
+    const discard = await screen.findByRole("button", { name: "Discard and go back" });
+    expect((screen.getByLabelText("Prompt worker") as HTMLTextAreaElement).value).toBe("");
+    fireEvent.click(discard);
+    await waitFor(() => expect(screen.queryByLabelText("Prompt worker")).toBeNull());
+  });
+
+  it("writes words typed while a save was in flight, even when leaving at once", async () => {
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const bodies: unknown[] = [];
+    const { calls } = open(
+      reads({
+        "GET /api/prompts/worker": json(200, prompt("worker", "a")),
+        "PUT /api/prompts/worker": async (call) => {
+          bodies.push(call.body);
+          if (bodies.length === 1) {
+            await gate;
+          }
+          return json(200, prompt("worker", "stored", "edited"));
+        },
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Prompts" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Edit Worker" }));
+    const box = (await screen.findByLabelText("Prompt worker")) as HTMLTextAreaElement;
+    fireEvent.change(box, { target: { value: "draft A" } });
+    fireEvent.blur(box);
+    await waitFor(() => expect(bodies).toHaveLength(1));
+    fireEvent.change(box, { target: { value: "draft B" } });
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
+    release?.();
+    await waitFor(() => expect(bodies).toEqual([{ text: "draft A" }, { text: "draft B" }]));
+    void calls;
+  });
+
+  it("says when there are no prompts", async () => {
+    open(reads({ "GET /api/prompts": json(200, { prompts: [] }) }));
+    fireEvent.click(screen.getByRole("button", { name: "Prompts" }));
+    expect(await screen.findByText("No prompts yet.")).toBeDefined();
+    void PROMPTS;
+  });
+});
+
+describe("SettingsDialog: on a phone", () => {
+  it("opens on the page list, then a page, and back", async () => {
+    width(390);
+    open(reads());
+    const dialog = screen.getByRole("dialog", { name: "Settings" });
+    expect(dialog.getAttribute("data-view")).toBe("list");
+    expect(screen.queryByText("Worker")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /Agents/ }));
+    expect(dialog.getAttribute("data-view")).toBe("page");
+    expect(await screen.findByText("Worker (s)")).toBeDefined();
+    expect(screen.queryByRole("navigation", { name: "Settings pages" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /‹ Settings/ }));
+    expect(dialog.getAttribute("data-view")).toBe("list");
+  });
+});

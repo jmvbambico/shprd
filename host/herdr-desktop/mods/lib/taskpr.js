@@ -26,7 +26,9 @@ export const PR_WORDS = {
   merged: "Merged",
   approved: "Approved",
   notApproved: "Waiting for an approval",
-  openOnTheForge: "Open on the forge",
+  openOnGitHub: "Open on GitHub",
+  copyLink: "Copy link",
+  copied: "Copied",
 };
 
 /**
@@ -77,4 +79,25 @@ export function taskPr(task) {
  */
 export function openUrl(card) {
   return card?.kind === "pr" && typeof card.url === "string" && card.url.startsWith("http") ? card.url : null;
+}
+
+/**
+ * The size of the change as the bar says it: `4 files +12 −3`, or null before the
+ * task's changes were read (or when its branch has no files).
+ *
+ * Shepherdr's bar reads "N files +a −d" from `gh`; shprd's comes from the task's
+ * own branch (`GET /api/tasks/<id>/changes`), which is the same work the pull
+ * request holds.
+ */
+export function prSize(changes) {
+  const files = (changes?.files ?? []).length;
+  if (files === 0) return null;
+  return { files: `${files} ${files === 1 ? "file" : "files"}`, added: `+${changes.added ?? 0}`, removed: `−${changes.deleted ?? 0}` };
+}
+
+/** `head → base`, the branches a pull request joins; the base when it is known. */
+export function branchLine(card, changes) {
+  const head = card?.head ?? "";
+  const base = changes?.base ?? "";
+  return base === "" ? head : `${head} → ${base}`;
 }

@@ -26,6 +26,20 @@ pub struct RunState {
     pub agents: BTreeMap<AgentId, AgentInfo>,
     /// Escalations raised during the run, in order.
     pub escalations: Vec<Escalation>,
+    /// Sequence numbers of escalations a person dismissed.
+    pub dismissed_needs: std::collections::BTreeSet<u64>,
+    /// The subset of [`Self::dismissed_needs`] the engine retired itself because
+    /// the cause it checks was gone, as against a person's dismissal.
+    ///
+    /// A person's dismissal sticks for the same words; an engine's retirement
+    /// does not, so the same cause arising again is raised again.
+    pub retired_needs: std::collections::BTreeSet<u64>,
+    /// The reason the fold closed an escalation itself (`task landed`,
+    /// `task dropped`), keyed by its sequence number.
+    ///
+    /// Such an escalation is also in [`Self::dismissed_needs`]; this map is the
+    /// recorded reason, so a view can say why it is gone.
+    pub closed_needs: BTreeMap<u64, String>,
     /// Asks raised during the run, keyed by task and ask id.
     ///
     /// The queue's files hold the same asks; the fold is what the board and
@@ -64,6 +78,11 @@ pub struct RunState {
     /// whether the run was ever brought up to date, which a later reader of a
     /// merged pull request wants to know.
     pub last_sync: Option<(String, String, u64)>,
+    /// How each worker gate fared on the base, the newest run per command.
+    ///
+    /// A hand-in's failing gate is judged against it: no worse is
+    /// pre-existing, anything else is a regression.
+    pub gate_baselines: crate::baseline::Baselines,
     /// The run's pull request, once `shprd land` opened one.
     ///
     /// One run proposes one pull request, so the newest `PrOpened` wins and a
@@ -170,10 +189,82 @@ pub struct AskRecord {
     pub answer: Option<AskAnswerRecord>,
 }
 
+/// The reason recorded when a landing closes a task's open cards.
+pub const CLOSED_LANDED: &str = "task landed";
+/// The reason recorded when a drop closes a task's open cards.
+pub const CLOSED_DROPPED: &str = "task dropped";
+/// The reason recorded when an override answers a spent review's card.
+pub const CLOSED_OVERRIDDEN: &str = "overridden";
+/// The reason recorded when a new attempt answers a spent review's card.
+pub const CLOSED_RETRIED: &str = "retried";
+
+impl RunState {
+    /// Closes every open ask and escalation of `task`, recording `reason`.
+    fn close_task_cards(&mut self, task: &str, reason: &str, seq: u64) {
+        for record in self.asks.values_mut() {
+            if record.task == task && record.answer.is_none() {
+                record.answer = Some(AskAnswerRecord {
+                    text: reason.to_string(),
+                    seq,
+                });
+            }
+        }
+        for escalation in &self.escalations {
+            if escalation.task.as_deref() == Some(task)
+                && !self.dismissed_needs.contains(&escalation.seq)
+            {
+                self.dismissed_needs.insert(escalation.seq);
+                self.closed_needs.insert(escalation.seq, reason.to_string());
+            }
+        }
+    }
+
+    /// Closes the open out-of-rounds and stuck-review asks of `task`: the
+    /// situation they ask about was answered another way.
+    fn close_review_asks(&mut self, task: &str, reason: &str, seq: u64) {
+        for record in self.asks.values_mut() {
+            if record.task == task
+                && record.answer.is_none()
+                && (record.id.starts_with(crate::gate::ROUNDS_SPENT_ASK_PREFIX)
+                    || record.id.starts_with(crate::review::STUCK_ASK_PREFIX))
+            {
+                record.answer = Some(AskAnswerRecord {
+                    text: reason.to_string(),
+                    seq,
+                });
+            }
+        }
+    }
+}
+
 impl AskRecord {
     /// Whether it still waits for an answer at `now_ms`.
     pub fn is_open_at(&self, now_ms: u64) -> bool {
         self.answer.is_none() && self.expires_at_ms.is_none_or(|until| until > now_ms)
+    }
+
+    /// Whether a newer attempt of `task` started after this ask was raised.
+    ///
+    /// An ask belongs to the attempt that was newest when it was raised, and a
+    /// new attempt retires what the old one left open: its agent is gone, so
+    /// nobody waits on the answer, and a task that read `Needs you` for it
+    /// would keep saying so while the new attempt works. An ask raised before
+    /// any attempt started belongs to the first one.
+    pub fn is_retired_by_newer_attempt(&self, task: &Task) -> bool {
+        let spawns = |seq: Option<u64>| seq.is_some();
+        let all = task
+            .attempts
+            .iter()
+            .filter(|attempt| spawns(attempt.spawn_seq))
+            .count();
+        let before = task
+            .attempts
+            .iter()
+            .filter(|attempt| attempt.spawn_seq.is_some_and(|seq| seq < self.raised_seq))
+            .count();
+        // The ask's own attempt is the newest one at its raising, or the first
+        // when it was raised before any attempt started.
+        all > before.max(1)
     }
 }
 
@@ -236,11 +327,9 @@ pub struct Task {
     pub approved_head: Option<String>,
     /// The head a landing found nothing of its own to merge at, if one did.
     ///
-    /// It is the one landing outcome that moves nothing: the branch had no work
-    /// beyond its base, so the task is not integrated and its status is
-    /// unchanged. What it does say is that a landing already looked at this
-    /// attempt and found nothing — which is what keeps a tick from landing the
-    /// same attempt again on every pass. A new attempt clears it, because fresh
+    /// The branch had no work beyond its base, so nothing moved, but the task
+    /// is still done: the landing settles it as `Integrated`, and this says it
+    /// was "done, nothing to merge". A new attempt clears it, because fresh
     /// work is exactly what a landing has not looked at yet.
     pub nothing_to_merge: Option<String>,
     /// What the fallback ladder already did about provider cuts, in order.
@@ -249,6 +338,15 @@ pub struct Task {
     /// cut it answers, so the same one is never acted on twice, and a backup is
     /// a `Backup` record whether or not its process started.
     pub fallbacks: Vec<FallbackRecord>,
+    /// When the task was added, ms since the Unix epoch (the `TaskAdded` event's
+    /// time). A board uses it to show the newest work first and to tell a run's
+    /// old leftovers from tasks added just now.
+    pub added_at_ms: u64,
+    /// When something last happened to the task that a person or the engine
+    /// decided: any event naming it except the engine's own notes (progress lines,
+    /// escalations, nudges, backups), which a pass writes about an abandoned task
+    /// again and again and which must not make it look fresh.
+    pub touched_at_ms: u64,
 }
 
 /// One thing the fallback ladder did, as the ledger recorded it.
@@ -358,6 +456,9 @@ pub struct ReviewRequest {
     pub reviewer: AgentId,
     /// True when the reviewer shares the author's vendor.
     pub degraded: bool,
+    /// Why this reviewer and not the first choice, when the engine moved the
+    /// review on (out of quota); shown on the task's card.
+    pub note: Option<String>,
     /// The `seq` of the event that recorded this request.
     ///
     /// A restart records a second request for the same attempt, so the two are
@@ -470,6 +571,11 @@ pub struct Escalation {
     pub default_action: String,
     /// Sequence number of the event that recorded it.
     pub seq: u64,
+    /// Whether an agent (the coordinator, say) wrote it rather than the engine.
+    ///
+    /// An agent's escalation is its opinion at the time; the engine's cards are facts. A
+    /// later review that passes outranks the opinion (see `shprd_views::cards`).
+    pub by_agent: bool,
 }
 
 impl Task {
@@ -513,6 +619,23 @@ impl RunState {
     pub fn apply(&mut self, event: &Event) -> Result<(), RuleError> {
         rules::replay_as(self, &event.actor, &event.kind, event.at_ms)?;
         self.mutate(event);
+        // The engine's own notes about a task (a progress line, an escalation, a
+        // nudge, a backup) say nothing about the person's work: counting them
+        // would make an abandoned task look fresh every time a pass looked at it.
+        let engine_note = matches!(
+            event.kind,
+            EventKind::TaskStatus { .. }
+                | EventKind::Escalated { .. }
+                | EventKind::Nudged { .. }
+                | EventKind::Backup { .. }
+                | EventKind::ProviderGaveUp { .. }
+        );
+        if !engine_note
+            && let Some(id) = event.kind.task()
+            && let Some(task) = self.tasks.get_mut(id)
+        {
+            task.touched_at_ms = event.at_ms;
+        }
         self.last_seq = event.seq;
         Ok(())
     }
@@ -564,6 +687,8 @@ impl RunState {
                         approved_head: None,
                         nothing_to_merge: None,
                         fallbacks: Vec::new(),
+                        added_at_ms: event.at_ms,
+                        touched_at_ms: event.at_ms,
                     },
                 );
             }
@@ -576,6 +701,7 @@ impl RunState {
                 branch,
             } => {
                 self.agents.entry(agent.clone()).or_default();
+                self.close_review_asks(task, CLOSED_RETRIED, event.seq);
                 if let Some(entry) = self.tasks.get_mut(task) {
                     entry.status = TaskStatus::Working;
                     // A fresh attempt is fresh work, so a "nothing to merge"
@@ -608,6 +734,22 @@ impl RunState {
                 proofs,
                 ..
             } => {
+                // A hand-in the engine took answers the cards its refused
+                // attempts left open.
+                let seq = event.seq;
+                for record in self.asks.values_mut() {
+                    if record.task == *task
+                        && record.answer.is_none()
+                        && record
+                            .id
+                            .starts_with(crate::gate::HAND_IN_REFUSED_ASK_PREFIX)
+                    {
+                        record.answer = Some(AskAnswerRecord {
+                            text: String::from("handed in"),
+                            seq,
+                        });
+                    }
+                }
                 // Only a completed report moves the task on to gating; a
                 // blocked or failed one leaves it retryable, so the task goes
                 // Failed even though the report itself is recorded below.
@@ -675,7 +817,9 @@ impl RunState {
                 );
             }
             EventKind::AskAnswered { task, ask, answer } => {
-                if let Some(record) = self.asks.get_mut(&(task.clone(), ask.clone())) {
+                if let Some(record) = self.asks.get_mut(&(task.clone(), ask.clone()))
+                    && record.answer.is_none()
+                {
                     record.answer = Some(AskAnswerRecord {
                         text: answer.clone(),
                         seq: event.seq,
@@ -697,12 +841,34 @@ impl RunState {
                 ..
             } => {
                 let passed = matches!(event.kind, EventKind::GatePassed { .. });
+                if gate == crate::gate::REVIEW_GATE {
+                    // A verdict answers the card a review that ran long put up.
+                    let seq = event.seq;
+                    for record in self.asks.values_mut() {
+                        if record.task == *task
+                            && record.answer.is_none()
+                            && record.id.starts_with(crate::review::STUCK_ASK_PREFIX)
+                        {
+                            record.answer = Some(AskAnswerRecord {
+                                text: String::from("reviewed"),
+                                seq,
+                            });
+                        }
+                    }
+                }
                 if let Some(entry) = self.tasks.get_mut(task) {
-                    entry.status = if passed {
-                        TaskStatus::Passed
-                    } else {
-                        TaskStatus::Failed
-                    };
+                    // Passed is the review's verdict and nothing else: a passing
+                    // lint or test gate (a worker records its own) leaves the
+                    // status alone. The rules (`check_verdict`) are what make a
+                    // new review verdict the engine's, for the latest review
+                    // request of the attempt; a log written before they
+                    // existed still folds. A failed gate fails the task
+                    // whichever gate it is.
+                    if !passed {
+                        entry.status = TaskStatus::Failed;
+                    } else if gate == crate::gate::REVIEW_GATE {
+                        entry.status = TaskStatus::Passed;
+                    }
                     if let Some(current) = entry.attempts.last_mut() {
                         current.gates.push(GateResult {
                             gate: gate.clone(),
@@ -718,6 +884,7 @@ impl RunState {
                 task,
                 reviewer,
                 degraded,
+                note,
                 ..
             } => {
                 // A review dispatch never moves the task on: it stays Reported
@@ -728,6 +895,7 @@ impl RunState {
                     current.reviews.push(ReviewRequest {
                         reviewer: reviewer.clone(),
                         degraded: *degraded,
+                        note: note.clone(),
                         seq: event.seq,
                     });
                 }
@@ -735,6 +903,17 @@ impl RunState {
             EventKind::Integrated { task, .. } => {
                 if let Some(entry) = self.tasks.get_mut(task) {
                     entry.status = TaskStatus::Integrated;
+                }
+                self.close_task_cards(task, CLOSED_LANDED, event.seq);
+            }
+            EventKind::ScopeWidened { task, paths } => {
+                if let Some(entry) = self.tasks.get_mut(task) {
+                    for path in paths {
+                        let path = scope::normalize(path).unwrap_or_else(|_| path.clone());
+                        if !entry.scope.contains(&path) {
+                            entry.scope.push(path);
+                        }
+                    }
                 }
             }
             EventKind::TaskStopped { task, attempt } => {
@@ -758,6 +937,35 @@ impl RunState {
                     }
                 }
             }
+            EventKind::ReviewSkipped { task, attempt } => {
+                // Review is off: the hand-in's own passing checks are all the
+                // verdict there is. The rules admit it only for a Reported task
+                // with no review request.
+                if let Some(entry) = self.tasks.get_mut(task)
+                    && entry.status == TaskStatus::Reported
+                    && entry.latest_attempt().is_some_and(|a| a.n == *attempt)
+                {
+                    entry.status = TaskStatus::Passed;
+                }
+            }
+            EventKind::TaskReopened { task, attempt } => {
+                // The attempt is open again: its hand-in, its review requests
+                // and its gate results belong to the work as it was handed in,
+                // so they are cleared and the worker's next hand-in is judged
+                // afresh. The log keeps the earlier ones.
+                if let Some(entry) = self.tasks.get_mut(task) {
+                    entry.status = TaskStatus::Working;
+                    if let Some(current) = entry
+                        .attempts
+                        .iter_mut()
+                        .find(|current| current.n == *attempt)
+                    {
+                        current.report = None;
+                        current.gates.clear();
+                        current.reviews.clear();
+                    }
+                }
+            }
             EventKind::TaskDropped { task, reason } => {
                 // Terminal, and the reason is kept with it: a view that draws
                 // the task out of the folded state has to say why it is gone.
@@ -765,6 +973,7 @@ impl RunState {
                     entry.status = TaskStatus::Dropped;
                     entry.dropped_reason = Some(reason.clone());
                 }
+                self.close_task_cards(task, CLOSED_DROPPED, event.seq);
             }
             EventKind::Dry {
                 agent,
@@ -872,7 +1081,14 @@ impl RunState {
                     body: body.clone(),
                     default_action: default_action.clone(),
                     seq: event.seq,
+                    by_agent: matches!(event.actor, Actor::Agent { .. }),
                 });
+            }
+            EventKind::NeedDismissed { need } => {
+                self.dismissed_needs.insert(*need);
+                if matches!(event.actor, Actor::Engine) {
+                    self.retired_needs.insert(*need);
+                }
             }
             EventKind::Override { task, rule, reason } => {
                 // An override with an empty task is run-wide: it belongs to the
@@ -886,6 +1102,7 @@ impl RunState {
                     self.run_overrides.push(record);
                 } else if let Some(entry) = self.tasks.get_mut(task) {
                     entry.overrides.push(record);
+                    self.close_review_asks(task, CLOSED_OVERRIDDEN, event.seq);
                 }
             }
             EventKind::Resource {
@@ -1001,20 +1218,29 @@ impl RunState {
                 outcome,
                 ..
             } => {
-                // The head is kept for every outcome, because it is what says a
-                // landing already looked at this commit. Only a landing that
-                // moved something changes the status.
-                let head = Some(head.clone());
+                // A landing that merged something, and one that found nothing of
+                // its own to merge, both settle the task: it is done. The
+                // second keeps the head it looked at in `nothing_to_merge`,
+                // which is what a board reads to say "done, nothing to merge".
+                if self.tasks.contains_key(task) {
+                    self.close_task_cards(task, CLOSED_LANDED, event.seq);
+                }
                 if let Some(entry) = self.tasks.get_mut(task) {
-                    if outcome.is_landed() {
-                        entry.status = TaskStatus::Integrated;
-                        if let (Some(pr), Some(number)) = (entry.pr.as_mut(), number)
-                            && pr.number == *number
-                        {
-                            pr.merged = true;
+                    match outcome {
+                        crate::event::LandOutcome::Merged
+                        | crate::event::LandOutcome::AlreadyMerged
+                        | crate::event::LandOutcome::SquashMerged => {
+                            entry.status = TaskStatus::Integrated;
+                            if let (Some(pr), Some(number)) = (entry.pr.as_mut(), number)
+                                && pr.number == *number
+                            {
+                                pr.merged = true;
+                            }
                         }
-                    } else {
-                        entry.nothing_to_merge = head;
+                        crate::event::LandOutcome::NothingToMerge => {
+                            entry.status = TaskStatus::Integrated;
+                            entry.nothing_to_merge = Some(head.clone());
+                        }
                     }
                 }
             }
@@ -1038,11 +1264,20 @@ impl RunState {
                     process_group: *process_group,
                 });
             }
+            EventKind::GateBaselined { entries, .. } => {
+                for entry in entries {
+                    self.gate_baselines.upsert(entry.clone());
+                }
+                self.gate_baselines.stale = false;
+            }
             EventKind::OrchestratorNotified { up_to_seq } => {
                 self.notified_up_to_seq = Some(*up_to_seq);
             }
             EventKind::BaseSynced { base_sha, int_sha } => {
                 self.last_sync = Some((base_sha.clone(), int_sha.clone(), event.seq));
+                // The base moved: the baselines describe the old one until a
+                // `GateBaselined` follows.
+                self.gate_baselines.stale = true;
             }
             EventKind::RunFinished { abandoned } => {
                 self.finished = true;
@@ -1067,6 +1302,36 @@ mod tests {
             actor: Actor::Human,
             kind,
         }
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn a_task_remembers_when_it_was_added_and_last_touched_by_something_real() {
+        let mut events = log("a", "some-rule");
+        // The engine's notes about the task do not count as a touch.
+        events.push(ev(
+            40,
+            EventKind::Escalated {
+                task: Some("a".to_string()),
+                body: "agent gone".to_string(),
+                default_action: "wait".to_string(),
+            },
+        ));
+        events.push(ev(
+            50,
+            EventKind::TaskStatus {
+                task: "a".to_string(),
+                message: "Waiting: src/a is in use".to_string(),
+                progress: None,
+            },
+        ));
+        let state = RunState::fold(&events).expect("folds");
+        let task = &state.tasks["a"];
+        assert_eq!(task.added_at_ms, 2_000);
+        assert_eq!(
+            task.touched_at_ms, 3_000,
+            "the override at seq 3 was the last real event"
+        );
     }
 
     /// A started run, a task `a`, and an override of `rule` on `task`
@@ -1103,6 +1368,94 @@ mod tests {
                 },
             ),
         ]
+    }
+
+    fn spawned(seq: u64, attempt: u32) -> Event {
+        ev(
+            seq,
+            EventKind::Spawned {
+                task: "a".to_string(),
+                attempt,
+                agent: "w1".to_string(),
+                model: None,
+                worktree: "/wt/a".to_string(),
+                branch: "shprd/r1/a".to_string(),
+            },
+        )
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn an_ask_raised_before_any_attempt_belongs_to_the_first_one() {
+        let mut events = log("", "no_main_push");
+        events.truncate(2);
+        events.push(ev(
+            3,
+            EventKind::AskRaised {
+                task: "a".to_string(),
+                ask: "plan-1".to_string(),
+                ask_kind: AskKind::Plan,
+                text: "Plan to approve".to_string(),
+                options: Vec::new(),
+                created_at_ms: 3000,
+                expires_at_ms: None,
+            },
+        ));
+        events.push(spawned(4, 1));
+        let state = RunState::fold(&events).expect("folds");
+        let ask = state.asks.values().next().expect("the ask");
+        assert!(!ask.is_retired_by_newer_attempt(state.tasks.get("a").expect("a")));
+        events.push(ev(
+            5,
+            EventKind::TaskStopped {
+                task: "a".to_string(),
+                attempt: 1,
+            },
+        ));
+        events.push(spawned(6, 2));
+        let state = RunState::fold(&events).expect("folds");
+        let ask = state.asks.values().next().expect("the ask");
+        assert!(ask.is_retired_by_newer_attempt(state.tasks.get("a").expect("a")));
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn a_new_attempt_retires_the_asks_the_old_one_left_open() {
+        let raised = ev(
+            4,
+            EventKind::AskRaised {
+                task: "a".to_string(),
+                ask: "plan-1".to_string(),
+                ask_kind: AskKind::Plan,
+                text: "Plan to approve".to_string(),
+                options: Vec::new(),
+                created_at_ms: 4000,
+                expires_at_ms: None,
+            },
+        );
+        let mut events = log("", "no_main_push");
+        events.truncate(2);
+        events.push(spawned(3, 1));
+        events.push(raised);
+        let state = RunState::fold(&events).expect("folds");
+        let task = state.tasks.get("a").expect("a");
+        let ask = state.asks.values().next().expect("the ask");
+        assert!(
+            !ask.is_retired_by_newer_attempt(task),
+            "the attempt that raised it is still the newest"
+        );
+        events.push(ev(
+            5,
+            EventKind::TaskStopped {
+                task: "a".to_string(),
+                attempt: 1,
+            },
+        ));
+        events.push(spawned(6, 2));
+        let state = RunState::fold(&events).expect("folds");
+        let task = state.tasks.get("a").expect("a");
+        let ask = state.asks.values().next().expect("the ask");
+        assert!(ask.is_retired_by_newer_attempt(task));
     }
 
     #[test]
@@ -1220,25 +1573,41 @@ mod tests {
     }
 
     #[test]
-    fn a_task_gets_only_one_backup_handover() {
-        let backup = |seq: u64, to: &str| {
+    fn a_task_gets_one_handover_per_line() {
+        let backup_with = |seq: u64, from: &str, to: &str, started: bool| {
             ev(
                 seq,
                 EventKind::Backup {
                     task: "a".to_string(),
                     attempt: 1,
-                    from_agent: "claude".to_string(),
+                    from_agent: from.to_string(),
                     to_agent: to.to_string(),
                     cut: "cut-2".to_string(),
                     class: ProviderClass::Quota,
                     reason: "Out of allowance".to_string(),
                     worktree: "/tmp/wt".to_string(),
                     branch: "feature/a".to_string(),
-                    started: true,
+                    started,
                 },
             )
         };
-        let folded = fold_extra(vec![backup(3, "codex"), backup(4, "pi")]);
+        let backup = |seq: u64, from: &str, to: &str| backup_with(seq, from, to, true);
+        // A handover that never started leaves the line free: the next one from
+        // the same program is allowed.
+        assert!(
+            fold_extra(vec![
+                backup_with(3, "claude", "codex", false),
+                backup(4, "claude", "pi")
+            ])
+            .is_ok()
+        );
+        // The next line's handover is allowed.
+        assert!(fold_extra(vec![backup(3, "claude", "codex"), backup(4, "codex", "pi")]).is_ok());
+        // A second one from the same line is not.
+        let folded = fold_extra(vec![
+            backup(3, "claude", "codex"),
+            backup(4, "claude", "pi"),
+        ]);
         assert!(matches!(
             folded,
             Err(RuleError::TaskAlreadyBackedUp { ref task }) if task == "a"
@@ -1391,6 +1760,43 @@ mod tests {
             Some(("bbb222".to_string(), true, 4)),
             "the later event wins"
         );
+    }
+
+    #[test]
+    fn a_synced_base_makes_the_baselines_stale_until_they_are_recorded_again() {
+        let baselined = |seq| {
+            ev(
+                seq,
+                EventKind::GateBaselined {
+                    base_sha: "aaa111".to_string(),
+                    entries: Vec::new(),
+                },
+            )
+        };
+        let synced = ev(
+            4,
+            EventKind::BaseSynced {
+                base_sha: "aaa111".to_string(),
+                int_sha: "bbb222".to_string(),
+            },
+        );
+        let fresh = match fold_extra(vec![baselined(3)]) {
+            Ok(state) => state,
+            Err(err) => panic!("must fold: {err}"),
+        };
+        assert!(!fresh.gate_baselines.stale);
+        // The base moved and no baseline followed (the re-baseline failed).
+        let stale = match fold_extra(vec![baselined(3), synced.clone()]) {
+            Ok(state) => state,
+            Err(err) => panic!("must fold: {err}"),
+        };
+        assert!(stale.gate_baselines.stale, "fail closed after a moved base");
+        // A baseline recorded after the sync makes them current again.
+        let again = match fold_extra(vec![baselined(3), synced, baselined(5)]) {
+            Ok(state) => state,
+            Err(err) => panic!("must fold: {err}"),
+        };
+        assert!(!again.gate_baselines.stale);
     }
 
     #[test]
@@ -1624,8 +2030,175 @@ mod tests {
         assert!(pr.merged, "a merged landing marks the pull request merged");
     }
 
+    fn raise(seq: u64, id: &str) -> Event {
+        ev(
+            seq,
+            EventKind::AskRaised {
+                task: "a".to_string(),
+                ask: id.to_string(),
+                ask_kind: crate::ask::AskKind::Question,
+                text: "what now?".to_string(),
+                options: Vec::new(),
+                created_at_ms: seq * 1000,
+                expires_at_ms: None,
+            },
+        )
+    }
+
+    fn escalate(seq: u64) -> Event {
+        ev(
+            seq,
+            EventKind::Escalated {
+                task: Some("a".to_string()),
+                body: "stuck".to_string(),
+                default_action: String::new(),
+            },
+        )
+    }
+
+    fn answer_of(state: &RunState, id: &str) -> Option<String> {
+        state
+            .asks
+            .get(&("a".to_string(), id.to_string()))
+            .and_then(|ask| ask.answer.as_ref().map(|a| a.text.clone()))
+    }
+
     #[test]
-    fn a_task_landed_with_nothing_to_merge_leaves_it_unlanded() {
+    #[allow(clippy::expect_used)]
+    fn a_landing_closes_the_tasks_open_asks_and_escalations() {
+        let state = fold_extra(vec![
+            raise(3, "q-1"),
+            raise(4, "review-out-1"),
+            escalate(5),
+            ev(
+                6,
+                EventKind::TaskLanded {
+                    task: "a".to_string(),
+                    base: "main".to_string(),
+                    head: "bbb222".to_string(),
+                    number: None,
+                    outcome: LandOutcome::NothingToMerge,
+                },
+            ),
+        ])
+        .expect("folds");
+        assert_eq!(answer_of(&state, "q-1").as_deref(), Some("task landed"));
+        assert_eq!(
+            answer_of(&state, "review-out-1").as_deref(),
+            Some("task landed")
+        );
+        assert!(state.dismissed_needs.contains(&5));
+        assert_eq!(
+            state.closed_needs.get(&5).map(String::as_str),
+            Some("task landed")
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn a_drop_closes_the_tasks_open_asks_and_escalations() {
+        let state = fold_extra(vec![
+            raise(3, "review-stuck-1-1"),
+            escalate(4),
+            ev(
+                5,
+                EventKind::TaskDropped {
+                    task: "a".to_string(),
+                    reason: "no longer wanted".to_string(),
+                },
+            ),
+        ])
+        .expect("folds");
+        assert_eq!(
+            answer_of(&state, "review-stuck-1-1").as_deref(),
+            Some("task dropped")
+        );
+        assert_eq!(
+            state.closed_needs.get(&4).map(String::as_str),
+            Some("task dropped")
+        );
+    }
+
+    /// The installed log's sequence: a task is dropped (its review-out ask is
+    /// closed by the fold), then an `ask_answered` for that ask is written. The
+    /// replay takes it as a no-op and keeps the closing answer.
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn an_answer_after_a_drop_closed_the_ask_folds_as_a_no_op() {
+        let state = fold_extra(vec![
+            raise(3, "review-out-2"),
+            ev(
+                4,
+                EventKind::TaskDropped {
+                    task: "a".to_string(),
+                    reason: "no longer wanted".to_string(),
+                },
+            ),
+            ev(
+                5,
+                EventKind::AskAnswered {
+                    task: "a".to_string(),
+                    ask: "review-out-2".to_string(),
+                    answer: "late".to_string(),
+                },
+            ),
+        ])
+        .expect("a later answer for a closed ask folds");
+        assert_eq!(
+            answer_of(&state, "review-out-2").as_deref(),
+            Some("task dropped")
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn an_override_closes_the_out_of_rounds_ask_but_not_a_question() {
+        let state = fold_extra(vec![
+            raise(3, "review-out-1"),
+            raise(4, "q-1"),
+            ev(
+                5,
+                EventKind::Override {
+                    task: "a".to_string(),
+                    rule: crate::rules::INTEGRATE_AFTER_FAILED_GATE.to_string(),
+                    reason: "fine".to_string(),
+                },
+            ),
+        ])
+        .expect("folds");
+        assert_eq!(
+            answer_of(&state, "review-out-1").as_deref(),
+            Some("overridden")
+        );
+        assert_eq!(answer_of(&state, "q-1"), None);
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn a_retry_closes_the_out_of_rounds_ask() {
+        let state = fold_extra(vec![
+            raise(3, "review-out-1"),
+            ev(
+                4,
+                EventKind::Spawned {
+                    task: "a".to_string(),
+                    attempt: 1,
+                    agent: "claude".to_string(),
+                    model: None,
+                    worktree: "/tmp/wt".to_string(),
+                    branch: "feature/a".to_string(),
+                },
+            ),
+        ])
+        .expect("folds");
+        assert_eq!(
+            answer_of(&state, "review-out-1").as_deref(),
+            Some("retried")
+        );
+    }
+
+    #[test]
+    fn a_task_landed_with_nothing_to_merge_is_done() {
         let state = match fold_extra(vec![ev(
             3,
             EventKind::TaskLanded {
@@ -1645,88 +2218,14 @@ mod tests {
         };
         assert_eq!(
             task.status,
-            TaskStatus::Queued,
-            "nothing of it landed, so it is not integrated"
+            TaskStatus::Integrated,
+            "a landing that found nothing to merge still settles the task"
         );
         assert!(task.pr.is_none());
         assert_eq!(
             task.nothing_to_merge.as_deref(),
             Some("bbb222"),
-            "the landing's head is kept, so a tick does not land it again"
-        );
-    }
-
-    #[test]
-    fn a_new_attempt_clears_a_nothing_to_merge_landing() {
-        // Attempt 1 failed, a landing found nothing of its own to merge at that
-        // attempt, and attempt 2 starts: the fact belongs to attempt 1 and must
-        // not hold attempt 2 back.
-        let mut events = log("a", "no_main_push");
-        events.truncate(2);
-        for event in [
-            ev(
-                3,
-                EventKind::Spawned {
-                    task: "a".to_string(),
-                    attempt: 1,
-                    agent: "claude".to_string(),
-                    model: None,
-                    worktree: "/wt/a".to_string(),
-                    branch: "feature/a".to_string(),
-                },
-            ),
-            ev(
-                4,
-                EventKind::Reported {
-                    task: "a".to_string(),
-                    attempt: 1,
-                    status: crate::event::ReportStatus::Failed,
-                    summary: "gave up".to_string(),
-                    tests: Vec::new(),
-                    checks: Vec::new(),
-                    changed_paths: vec!["src/a/x.rs".to_string()],
-                    commit: Some("bbb222".to_string()),
-                    skills_used: Vec::new(),
-                    proofs: Vec::new(),
-                },
-            ),
-            ev(
-                5,
-                EventKind::TaskLanded {
-                    task: "a".to_string(),
-                    base: "main".to_string(),
-                    head: "bbb222".to_string(),
-                    number: None,
-                    outcome: LandOutcome::NothingToMerge,
-                },
-            ),
-            ev(
-                6,
-                EventKind::Spawned {
-                    task: "a".to_string(),
-                    attempt: 2,
-                    agent: "claude".to_string(),
-                    model: None,
-                    worktree: "/wt/a".to_string(),
-                    branch: "feature/a".to_string(),
-                },
-            ),
-        ] {
-            events.push(event);
-        }
-        let state = match RunState::fold(&events) {
-            Ok(state) => state,
-            Err(err) => panic!("the fixture must fold: {err}"),
-        };
-        let task = match state.tasks.get("a") {
-            Some(task) => task,
-            None => panic!("task a must exist"),
-        };
-        assert_eq!(task.attempts.len(), 2, "attempt 2 started");
-        assert!(
-            task.nothing_to_merge.is_none(),
-            "fresh work has not been landed yet: {:?}",
-            task.nothing_to_merge
+            "the landing's head is kept, so a board can say nothing to merge"
         );
     }
 

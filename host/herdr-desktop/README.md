@@ -6,33 +6,67 @@ This folder is shprd's set of them.
 
 ```
 layouts/shprd.json      the window: sidebar, coordinator area, tab bar, pane, board
-mods/shprd-spaces/      the sidebar: the coordinator's space, then one row a task
-                        space, with its word, its colour and what needs you
-mods/shprd-status/      the status bar: the run, its counts, the last pass's failure
+mods/shprd-spaces/      the sidebar: one 30 px line a space — a status glyph, the
+                        task, the red/green count badge — the "Spaces" heading's
+                        "+", the row's right-click menu and its close confirm, and
+                        the rail under 160 px
+mods/shprd-agents/      PROTOTYPE (SHPR-18): the sidebar's Agents pane, one two-line row per live
+                        agent, a Grouped toggle; a click opens the task's thread
+mods/shprd-status/      the status bar: This computer and the run, the shown space's branch, the red
+                        "Needs you" badge, the last pass's failure
 mods/shprd-tasks/       the board: one row a task, grouped by shprd's derived status
-mods/shprd-pane/        one pane header per terminal: agent, task, state, buttons
-mods/shprd-tabs/        the tab bar (each tab's agent, role and state) and the
-                        side panel's buttons
-mods/shprd-chrome/      the sidebar footer: settings, shprd's settings, the service
-mods/shprd-accept/      the Accept card            (M10.5)
-mods/shprd-task-pr/     the task's pull request    (M10.5)
-mods/shprd-asks/        the needs-you cards        (M10.6)
-mods/shprd-settings/    roles, agents, prompts     (M10.6)
-mods/shprd-graph/       the graph: dagr in a terminal block, or the word on
-                        where dagr is          (M10.7)
-mods/shprd-coordinator/ the coordinator's chat     (M10.8)
+mods/shprd-pane/        one pane header per terminal: agent, task, state, buttons, and
+                        an agent's Chat │ Terminal switch (M11 U4)
+mods/shprd-tabs/        the tab bar: 24 px pills (the program's icon, the name,
+                        a spinner while working, a count badge, the close mark
+                        on the shown one), the "+", the side panel's buttons and
+                        the window's; a drag moves a tab, the wheel steps them,
+                        a double-click renames, a right-click opens its menu
+mods/shprd-new-menu/    the "+" menu: Terminal, New task…, and the roster's
+                        programs (1–9, the ones this machine lacks dimmed)
+mods/shprd-menu/        the context menus: a tab's, the app's, and a terminal's
+                        right-click menu
+mods/shprd-prompt/      the one text prompt (Rename tab)
+mods/shprd-jump/        Jump (Ctrl+K): a 620 × 480 popup at the top, one find box over
+                        the coordinator, spaces and tasks; ↑ ↓ Enter Esc
+mods/shprd-keybinds/    Keybinds (Ctrl+Shift+/): a 560 × 620 dialog, every key in
+                        words, grouped, type to filter
+mods/shprd-chrome/      the sidebar footer: three 28 px rows, an icon and a word (settings, shprd's
+                        settings, the service)
+mods/shprd-accept/      the task thread's head (‹ Tasks, Review, Chat · Terminal ·
+                        Pull request) and the Accept card, a 640×640 modal dialog
+                        that Review opens                         (M10.5, M11 U3)
+mods/shprd-task-view/   the thread's read-only Terminal stream (the fallback when the agent's own
+                        terminal cannot be shown) and its Artifacts view (SHPR-28)
+mods/shprd-task-pr/     the task's pull request: state, #n, size, branches, links (M10.5)
+mods/shprd-settings/    the settings window: agents, tasks, prompts (M10.6,
+                        a dialog since M11 fix S)
+mods/shprd-chat/        the chat: bubbles, markdown, "Show more", the composer and
+                        the question / permission / plan cards in the timeline.
+                        The task thread's default view, and the pane a Chat │
+                        Terminal switch opens in an agent pane's place, the
+                        coordinator's included (M11 U4)
 mods/shprd-toasts/      toasts over the work area  (M10.4)
-mods/lib/               the shared modules: tokens, panel parts, the board's
+mods/lib/               the shared modules (`tree.js`: the sidebar tree, agent rows and graph
+                        rows, and the `spaces` / `live_agents` contract; `test/serve-fixture.mjs`
+                        serves `fixtures/proto.json` as a stand-in service): tokens, panel parts, the menus' rows
+                        (`menu.js`), the board's
                         reading (`board.js`), the sidebar's (`spaces.js`), the
                         tab bar's (`tabstrip.js`), the toasts' (`toasts.js`), the
                         service client, the change watcher, and sync-shared's
                         source. Every mod carries a copy in its own `lib/`
                         because a mod may only import files inside its own
                         folder.
-keys.json               the keys the layout expects, merged by the installer
+keys.json               the keys the layout expects, merged by the installer: Shepherdr's
+                        Alt keys globally; Ctrl+K, Ctrl+Shift+K, Ctrl+Shift+/ and ?, F2 and
+                        Shift+F2 and the layout's own under `layout:shprd`, which wins over
+                        `global` inside the shprd layout. Never one a person bound: the
+                        installer reports it as kept (their global keys are never touched)
 bin/sync-shared         copies `mods/lib/*` into each mod's `lib/`; `--check`
 bin/check               all of it: the copies, the tests, `herdr-app check`
 bin/gate-env            a private app home with the first-run screens answered
+bin/isolate             runs one command with the person's herdr stripped out
+                        of the environment: every live check goes through it
 test/                   the unit tests (node or bun, see below); `fixtures/` holds
                         a real service's answers and a real window's list
 ```
@@ -65,8 +99,8 @@ one in whichever checkout the caller happens to stand in. The order is:
 ### A file Herdr pruned
 
 Herdr resolves a layout terminal block by name when the layout loads and **writes
-the layout file back without the block** when no such terminal exists (see "The
-graph block" below). That is the app's edit, not the person's. The installer owns
+the layout file back without the block** when no such terminal exists (an older build's
+graph block did this). That is the app's edit, not the person's. The installer owns
 the file its manifest still lists, so it recognises a prune — the two documents
 are compared with their terminal blocks removed — and puts its own file back:
 
@@ -87,8 +121,15 @@ service the way Shepherdr's window does — read `service.json` from the state
 directory, confirm its `id` at `GET /api/health`, then send the bearer token from
 the `token` file beside it — and follows it with a long poll
 (`GET /api/changes`) plus the change file the service rewrites after every
-ledger write (`<state>/shprd/changes`, watched with `watchFolder`). See
+ledger write (`<state dir>/changes`, watched with `watchFolder`). See
 `mods/lib/watch.js`.
+
+Every repository has its own service and state directory
+(`<state>/shprd/repos/<name>-<hash>/`), so the client picks the one for the space
+the window shows: it lists every `repos/*/service.json` and matches the record's
+`root` with that space's folder (`pickService`). A panel that sees the shown space
+change to another repository gets a new client and re-reads everything (`attach`
+reports a restart), and its change watcher moves to the new directory.
 
 ### A service that restarted
 
@@ -107,42 +148,48 @@ throw, it just runs out of time and answers nothing, so a `null` board is treate
 as a failure. The panel drops its client, shows the failure, and the next look
 discovers the service again. Treating that `null` as "nothing new" is exactly
 what used to freeze the panels for ever (the M10 gate's bug 5).
-## The graph block
+## Settings is a window, not a tab
 
-The side panel's last row is the run's graph: a stack with a terminal block
-running `dagr view <repo>/.dagr/run.json`, and the note (`mods/shprd-graph`) that
-explains it when there is nothing to draw. dagr draws the run's tasks, attempts and
-gates, and follows the file itself — the service rewrites it atomically after
-every ledger write (`crates/shprd-server/src/service.rs`'s after-write step,
-`shprd dagr sync`), so nothing relaunches it per write. The note is also what a
-person sees when there is no dagr: the message names `graph.dagr`, the setting
-that fixes it (`[graph] dagr = "/path/to/dagr"`, or
-`shprd settings set graph.dagr /path/to/dagr`). `shprd doctor` says which probe
-found it — the setting, `PATH` or the `herdr-dagr` plugin's checkout.
+Settings opens over the window as Shepherdr's own do: `openSettings()` in
+`mods/lib/panel.js` asks Herdr for a **dialog** of `shprd-settings` with
+`frame: "none"`, 860 wide and 92% of the window's height, and the mod draws its
+own rounded panel inside it, capped at 900 px. A click beside the panel, `Esc`,
+and the window's own close button all close it, and opening it again while it is
+open keeps the one copy.
 
-`layouts/shprd.json` holds the block: the stack `graph` with `graph-note` (the
-mod) and `graph-term` (`{ "terminal": "shprd-graph" }`). The terminal is started
-**before the window loads that layout**, by `shprd serve`
-(`crates/shprd/src/cmd/graph.rs`): Herdr resolves a layout terminal block by name
-when the layout loads and **prunes the block from the file** when no such terminal
-exists (measured), so a block that had to start its own terminal would be gone
-before it could. The service is up before the window is, so it does it there —
-`hc run --bg`, one `shprd-graph` terminal per session, reusing a live one that
-already draws this run and forgetting finished ones that would shadow the name.
-The terminal runs a shell loop that waits for the document and restarts
-`dagr view` when it exits (herdr-core keeps a terminal's address for its
-lifetime, so the block's binding stays right). It is started only when the host
-probe found a Herdr desktop; a machine on the herdr TUI has no window to draw a
-block in, and asking a core anything starts one.
+It is opened from the sidebar footer's `shprd` row — the only way in, because it
+is the only way in in Shepherdr, which has no key and no palette entry for its
+settings either. Nothing in the side panel switches to it: `layouts/shprd.json`
+has no `settings` block, and the tab strip's and the tasks panel's Settings
+buttons are gone with it.
 
-The mod is the note and the fallback. It reads `GET /api/graph` for where dagr is
-and what to run, keeps its own `hc run` in case the service did not start one (a
-service started before the window's core, a terminal someone ended), and selects
-the terminal's child once it is live — a mod may not edit a layout's structure on
-this build, so it only ever selects a node the layout already holds. If Herdr
-pruned the block anyway (a window opened on a fresh install with no service
-running), the note says so and gives the recovery: `shprd install herdr-desktop`,
-which puts its own layout back (see "A file Herdr pruned" above).
+Inside, the window is Shepherdr's anatomy: a page list on the left (Agents,
+Tasks, Prompts, and a `Remote` row held for M11.7), the page on the right, and
+over each page a repository can own the `Applies to` switch between **You** and
+**This repo**. Every row is a title, one line about it, the value and the layer
+that answered it at the right, the control beside them, and — for a note or a
+prompt — the box underneath. Writes happen where they are made (a pick, a switch,
+a step, leaving a box a moment after typing stops): there is no Save button, and
+the service, never the mod, is the one writer.
+
+## The Graph is a view of the Tasks panel
+
+There is no graph panel, mod or terminal. The Tasks panel's header carries a
+**Tasks │ Graph** switch (the look of Chat │ Terminal), remembered per panel; `G`
+in the focused panel toggles it. The Graph view is drawn natively by
+`mods/shprd-tasks` from the board it already has (`graphRows` in `mods/lib/tree.js`):
+the live tasks grouped by phase, each hung under its last dependency, with a
+right-aligned word per task (`done`, `working`, `needs you`, `ready`,
+`waits SHPR-23`). A node opens the task's thread on a click and carries the same
+act pill as the list's row, and the picked space narrows it as it narrows the list.
+`Ctrl+Shift+A` shows the side panel on Tasks.
+
+Nothing runs dagr in the window any more, so the layout holds no terminal block for
+Herdr to prune, and `shprd serve` starts no terminal. `GET /api/graph` and the
+`.dagr/run.json` projection stay (the web app reads them; `graph.dagr` and
+`shprd doctor`'s Graph section still say where dagr is). An install over an older
+desktop takes back the `shprd-graph` mod's files like any mod this build no longer
+ships (see "Installing from anywhere").
 
 ## A private window for a test or a gate
 
@@ -180,6 +227,41 @@ herdr-app shot /tmp/shs/shot.png
 `frame.welcomed` into a person's own window would tell it that it had already
 shown them the welcome. `bin/check` runs that refusal as part of its own check.
 
+## Running a live check without touching the person's herdr
+
+A worker runs inside a herdr pane, and herdr exports that pane to everything it
+starts. A `shprd serve` from there drives the session the person is working in:
+it makes a workspace labelled `shprd · <repo>` in their window and starts a
+graph terminal in their core. It happened twice in one day (SHP-66's live login
+check, SHP-70's screenshot run), and both were a `serve` started with an
+inherited `HERDR_SOCKET_PATH`.
+
+Every live check, screenshot run or manual `serve` therefore goes through
+`bin/isolate`:
+
+```sh
+bin/isolate shprd --repo "$PWD" serve --port 7787
+bin/isolate --print shprd --repo "$PWD" serve      # say what it would change
+./target/debug/shprd --repo "$PWD" serve &         # wrong: your pane's socket
+```
+
+It removes every `HERDR_*`, `HC_*` and `TUIOS_*` variable, points
+`HERDR_SOCKET_PATH` at `/nonexistent/herdr.sock`, sets `HC_SESSION` to a session
+nobody runs (an unset one means the person's default), and puts
+`HERDR_APP_HOME`, `SHPRD_HOME` and the five `XDG_*` directories in a scratch
+folder of its own under `$TMPDIR`. Anything you set *after* it wins, so a check
+with a private `herdr server` of its own still gets everything else stripped:
+
+```sh
+bin/isolate env HERDR_SOCKET_PATH="$my_private_socket" shprd serve
+```
+
+`shprd serve` keeps the same rule from its own side (M11 fix Y): when its
+repository is under the temporary directory and its socket is not, it refuses to
+create a space or start the graph terminal, says so in its banner, and serves
+the API anyway. `SHPRD_ALLOW_DEFAULT_SOCKET=1` turns that off for a person whose
+own checkout really does live under `/tmp`.
+
 ## Tests
 
 The client, the change watcher and the footer's service start have unit tests
@@ -191,34 +273,72 @@ bun test --preload ./test/boot-bun.mjs test/
 ```
 
 Both run the same files, `test/lib.test.mjs`, `test/restart.test.mjs`,
-`test/chrome.test.mjs`, `test/mods.test.mjs`, `test/settings.test.mjs`,
-`test/asks.test.mjs`, `test/coordinator.test.mjs` and `test/graph.test.mjs`;
+`test/chrome.test.mjs`, `test/mods.test.mjs`, `test/menu.test.mjs`,
+`test/settings.test.mjs`, `test/asks.test.mjs`, `test/coordinator.test.mjs` and
+`test/graph.test.mjs`;
 `test/stub-herdr.js` stands in for the app's `herdr` module and
 `test/stub-gpui.js` for its element builders (`gpui-kit`, `gpui-base`).
 `test/restart.test.mjs` is the one about a `shprd serve` that restarted: the
 client's `attach` notices the new `id` in `service.json`, a board read that gets
 no answer is a failure rather than "nothing new", and the tasks panel repaints
 the new run's board without the layout being reloaded (the M10 gate's bug 5).
-`test/mods.test.mjs` drives the four view models with fixtures captured from a
+`test/menu.test.mjs` reads the four menus — the "+" menu, a tab's, the app's and a
+pane's — off the same roster and window fixtures: the rows, their order, their
+words, the 1–9 keys, the dim *Not installed* line, and the height a popup is
+asked for. `test/mods.test.mjs` drives the four view models with fixtures captured from a
 real `shprd serve` (`test/fixtures/state.json`, `changes.json`) and a real
 `herdr-app ls` of the window that showed it (`spaces.json`): the sidebar's rows,
 the tab bar's pills, the toasts' news and the status bar's counts are all pure
 functions of those, so what a screenshot shows is what a test asserts.
 `test/settings.test.mjs` and `test/asks.test.mjs` do the same for the settings
-page and the needs-you cards, from the same service's `GET /api/settings`,
+window and the needs-you cards, from the same service's `GET /api/settings`,
 `GET /api/roster`, `GET /api/prompts`, `GET /api/state` and `GET /api/asks`
 (`test/fixtures/settings.json`, `roster.json`, `prompts.json`, `needs-state.json`,
-`needs-asks.json`): the rows, the layers, the picker choices, a refusal's words
-and the cards are all read off those answers.
+`needs-asks.json`): the pages, the level switch, the roles and workflow rows, the
+layers, the picker choices, a refusal's words, `Esc` closing what is open before
+it closes the window, and the cards are all read off those answers. It also reads
+`layouts/shprd.json` to prove the panel keeps no settings block for a tab to
+switch to.
+
+## The end-to-end run (before every desktop merge)
+
+`test/e2e/scenario.py` is one uninterrupted add-folder -> close the space -> re-add the
+same folder -> chat -> tasks -> Accept run in a private window (SHPR-79), with a screenshot at each step and a table of
+expected against seen:
+
+```
+cargo build -p shprd
+python3 host/herdr-desktop/test/e2e/scenario.py --shprd target/debug/shprd \
+    --mods host/herdr-desktop --out /tmp/e2e-out        # real agents: ~8 minutes
+python3 host/herdr-desktop/test/e2e/scenario.py --cleanup /private/tmp/shpe2e-XXXX   # a run that died
+```
+
+It copies the person's `~/.config/herdr-app` (their Settings and Shepherdr mods,
+`spaces.picked` and every other key kept as it is, SHPR-80) and `~/.config/shprd` into a private home under
+`/private/tmp`, installs this checkout's mods into it, and drives what the
+window's own flows run (the New space dialog's commands, the chat pane's
+`POST /api/chat`, a card's answer and the Accept button's `POST /api/action`):
+the window has no command for a click or a keystroke. It tears the window down
+by recorded pid and stops the private core (`hc server stop`); never pkill by
+name. Closing a space and adding the same folder again (a new Herdr id) is a step of the run: the window tells
+the service again when the shown Herdr space changes, and the service prepares the space (its coordinator)
+each time it is shown, not once. Run it against the base mods (`--mods` a `git archive` of the base's
+`host/herdr-desktop`) to see a failing step: step f fails there.
 
 ## Starting the service
 
-The footer's third row starts it with **`hc run --bg`**, never the app's `exec`.
+The footer's third row says which repository's service the shown space uses and
+whether it is up, and **starts it by itself** when there is none (a click on a repo's
+space is enough; nobody types `shprd serve`). A failed start shows its reason in the
+row (the dead terminal's last words), is not retried for a minute, and a click on the
+row tries again. Other panels read how it is going from the shared key
+`service.status` (`downNotice` in `lib/client.js`). It starts the service with
+**`hc run --bg`**, never the app's `exec`.
 `exec` is `machine.exec`, which the Herdr docs and the M7ef spike both describe as
 "no terminal, ≤600 s, everything it starts dies with it" — a server started
 through it would be gone when the call ended. `hc run --bg` starts a herdr-core
 terminal and returns at once, so the service outlives the click and keeps a
-terminal called `shprd-serve` where a person can read its output. Measured in a
+terminal per repository (`sv-<name>-<hash>`) where a person can read its output. Measured in a
 private session: the call returned in 0.3 s, and the service was still answering
 `GET /api/health` minutes later.
 

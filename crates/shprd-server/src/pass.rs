@@ -282,6 +282,12 @@ impl Failures {
     }
 }
 
+/// A per-repository record's file name, `<prefix><hash>.json`, beside the last
+/// pass's.
+pub(crate) fn sibling_file_name(repo: &Path, prefix: &str) -> String {
+    format!("{prefix}{}", &file_name(repo)[PREFIX.len()..])
+}
+
 /// The failure record's file name for `repo`, beside the last pass's.
 fn failures_file_name(repo: &Path) -> String {
     format!("repeats-{}", &file_name(repo)[PREFIX.len()..])

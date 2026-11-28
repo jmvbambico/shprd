@@ -21,7 +21,7 @@ use tempfile::TempDir;
 
 mod support;
 
-use support::herdr::isolate;
+use support::isolate;
 
 /// The binary under test, built by cargo for this integration test.
 const BIN: &str = env!("CARGO_BIN_EXE_shprd");
@@ -206,6 +206,9 @@ impl Fixture {
 
     /// Starts run `r1` on `main`.
     fn start(&self) {
+        // The run lands on `main`, which git lets one worktree hold: the
+        // checkout lets go of it first, as `run start` asks of a person.
+        self.git(&["switch", "--detach"]);
         self.ok(&[
             "run",
             "start",
@@ -282,6 +285,7 @@ impl Fixture {
                 attempt,
                 reviewer: reviewer.to_string(),
                 degraded: false,
+                note: None,
             },
         };
         let line = serde_json::to_string(&event).expect("serialize the request");
@@ -739,4 +743,53 @@ fn the_pass_prints_a_document_a_script_can_read() {
     // The human line, without `--json`, says the same thing in one line.
     let line = fixture.ok(&["tick", "--once"]);
     assert!(line.starts_with("ok nothing to advance"), "{line:?}");
+}
+
+/// Two passes at the same moment plan the same start. One starts the task; the
+/// other finds it running and leaves it alone, quietly: exactly one spawn, no
+/// failed step and no "Waiting:" line.
+#[test]
+fn two_passes_at_once_start_a_queued_task_exactly_once() {
+    for round in 0..12 {
+        let fixture = Fixture::new("auto");
+        fixture.start();
+        fixture.add_task(&format!("A{round}"), "task-A.txt", None);
+        fixture.script_forge(&serde_json::json!({}));
+        let spawn = || {
+            fixture
+                .command(&["tick", "--once", "--json"])
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .expect("the binary starts")
+        };
+        let (first, second) = (spawn(), spawn());
+        for child in [first, second] {
+            let output = child.wait_with_output().expect("the pass ends");
+            let text = String::from_utf8_lossy(&output.stdout).to_string();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let value: Value = serde_json::from_str(&text).expect("the tick document");
+            let steps = value["steps"].as_array().cloned().unwrap_or_default();
+            assert!(
+                steps
+                    .iter()
+                    .all(|step| step["ok"].as_bool().unwrap_or(false)),
+                "no step failed: {text}"
+            );
+        }
+        let events = fixture.events();
+        let spawned = events
+            .iter()
+            .filter(|event| matches!(event.kind, EventKind::Spawned { .. }))
+            .count();
+        assert_eq!(spawned, 1, "exactly one spawn: {events:?}");
+        let waiting = events.iter().any(|event| {
+            matches!(&event.kind, EventKind::TaskStatus { message, .. } if message.starts_with("Waiting:"))
+        });
+        assert!(!waiting, "no Waiting line: {events:?}");
+    }
 }

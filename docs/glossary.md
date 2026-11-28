@@ -3,8 +3,9 @@
 | Term | Meaning |
 |---|---|
 | **run** | one shprd session on one repo, from `shprd up` to land; has an id like `7f3a` |
-| **task** | one unit of work with a scope, acceptance criteria and tags; runs in its own worktree |
-| **scope** | the paths a task may change; overlapping scopes don't run in parallel |
+| **task** | one unit of work with declared paths, acceptance criteria and tags; runs in its own worktree |
+| **declared paths** | where a task expects to work: a hint for its worker, never a limit. A task may change what it needs |
+| **protected path** | a path on AGENTS.md's "Don't touch" list (kept in `.agents/orchestration.yaml` `high_risk_paths`, plus built-ins). A task touching one it did not declare waits for your Accept, even under auto-merge |
 | **orchestrator** (★) | the one CLI that talks to you and plans |
 | **worker** (●) | a CLI implementing one task |
 | **reviewer** (◇) | a CLI reviewing a diff; always a different vendor than the implementer |
@@ -22,4 +23,11 @@
 | **host adapter** | the thin layer that talks to herdr or tuios |
 | **mux** | terminal multiplexer: herdr or tuios |
 | **relay** | herdr-mobile-relay, phone and browser access on herdr |
+| **space** | one per repo, labelled `shprd · <repo>`; holds the coordinator. A task gets no space of its own |
+| **coordinator** | the CLI the service starts in the space; shown as the space's Assistant chat |
+| **live agent** | a worker, reviewer or coordinator the host lists (`live_agents`); finished ones stay in the Agents pane for 30 minutes |
+| **thread** | a task's view, switching between Chat and Terminal |
+| **session** | a browser's login: a cookie naming a stored hash, ended by idle, age or `shprd web sessions --revoke` |
+| **gate (remote)** | the checks in front of every API route but health and login: `Host`, credential, `Origin`, `x-shprd`, rate limits |
+| **tunnel** | a provider's way of putting the loopback port at an address: Tailscale serve, cloudflared, ngrok, tunnl.gg |
 | **dagr** | the task-graph viewer; shprd writes its run file |

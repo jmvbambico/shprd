@@ -9,7 +9,7 @@ use crate::config::Review;
 use crate::event::{EventKind, Finding, ReviewSource, Severity};
 use crate::hash;
 use crate::rules::INTEGRATE_AFTER_FAILED_GATE;
-use crate::state::{GateResult, RunState, Task, TaskStatus};
+use crate::state::{Escalation, GateResult, RunState, Task, TaskStatus};
 
 /// The gate name review results are recorded under.
 pub const REVIEW_GATE: &str = "review";
@@ -162,7 +162,10 @@ pub fn rounds_spent_ask(attempt: u32) -> String {
 /// writing, so one failure is told once. It names the attempt, so a second
 /// failure after another round is a new card rather than a repeat.
 pub fn rounds_spent_prefix(task: &str, attempt: u32, rounds: u32) -> String {
-    format!("{task}: its review of attempt {attempt} failed {rounds} time(s) and no round is left")
+    format!(
+        "{task}: its review of {} failed {rounds} time(s) and no round is left",
+        crate::event::attempt_label(task, attempt)
+    )
 }
 
 /// The attempt a card's body names, when `body` is one about `task`.
@@ -172,27 +175,34 @@ pub fn rounds_spent_prefix(task: &str, attempt: u32, rounds: u32) -> String {
 /// so one rule covers a review that spent its rounds, a send-back that did not
 /// start, and a step that keeps failing.
 pub fn card_attempt(task: &str, body: &str) -> Option<u32> {
+    // A name is `<task>·a<n>` now; bodies written before that said `attempt <n>`.
     let named = |prefix: &str, tail: &str| -> Option<u32> {
         let rest = body.strip_prefix(prefix)?;
         let (digits, rest) = rest.split_once(' ')?;
+        let digits = digits.strip_prefix(&format!("{task}·a")).unwrap_or(digits);
         let attempt: u32 = digits.parse().ok()?;
         rest.starts_with(tail).then_some(attempt)
     };
     if !body.starts_with(task) {
         return None;
     }
-    named(&format!("{task}: its review of attempt "), "failed ")
+    named(&format!("{task}: its review of "), "failed ")
+        .or_else(|| named(&format!("{task}: its review of attempt "), "failed "))
+        .or_else(|| named(&format!("{task}: sending "), "back did not start: "))
         .or_else(|| named(&format!("{task}: sending attempt "), "back did not start: "))
         // A step that keeps failing names its attempt in parentheses, after the
-        // words that say what failed: `… 3 passes in a row (attempt 2): …`.
-        .or_else(|| tagged_attempt(body))
+        // words that say what failed: `… 3 passes in a row (T1·a2): …`.
+        .or_else(|| tagged_attempt(task, body))
 }
 
-/// The attempt a body marks with `(attempt N)`, when it does.
-fn tagged_attempt(body: &str) -> Option<u32> {
-    let (_, rest) = body.split_once("(attempt ")?;
-    let (digits, rest) = rest.split_once(')')?;
-    rest.starts_with(':').then(|| digits.parse().ok())?
+/// The attempt a body marks with `(<task>·a<n>)` (or the older `(attempt <n>)`).
+fn tagged_attempt(task: &str, body: &str) -> Option<u32> {
+    let after = |open: &str| -> Option<u32> {
+        let (_, rest) = body.split_once(open)?;
+        let (digits, rest) = rest.split_once(')')?;
+        rest.starts_with(':').then(|| digits.parse().ok())?
+    };
+    after(&format!("({task}·a")).or_else(|| after("(attempt "))
 }
 
 /// The card a review that spent its rounds puts in front of a person.
@@ -202,13 +212,9 @@ fn tagged_attempt(body: &str) -> Option<u32> {
 /// choice so the card answers itself.
 pub fn rounds_spent_body(task: &Task, attempt: u32, rounds: u32) -> String {
     let found = findings_line(task);
-    let id = &task.id;
     format!(
-        "{}: {found}; answer the card `{}`: retry with another round, take it as it is, or drop \
-         it (by hand: `shprd agent spawn --task {id}`, `shprd override --task {id} --rule \
-         integrate_after_failed_gate --reason …` then `shprd land {id}`, or `shprd drop {id} \
-         --reason …`)",
-        rounds_spent_prefix(id, attempt, rounds),
+        "{}: {found}; answer the card `{}`: retry with another round, take it as it is, or drop it",
+        rounds_spent_prefix(&task.id, attempt, rounds),
         rounds_spent_ask(attempt),
     )
 }
@@ -241,30 +247,146 @@ fn findings_line(task: &Task) -> String {
 /// `answer` is the answer as the log recorded it, so `drop it` reads as *you
 /// answered `drop it`: run `shprd drop T1 --reason …`*.
 pub fn answered_rounds_body(task: &Task, attempt: u32, rounds: u32, answer: &str) -> String {
-    let id = &task.id;
     let found = findings_line(task);
     let choice = answer.trim();
-    let lower = choice.to_ascii_lowercase();
-    let verb = if lower.starts_with("drop") {
-        format!("`shprd drop {id} --reason …`")
-    } else if lower.starts_with("take") {
-        format!(
-            "`shprd override --task {id} --rule integrate_after_failed_gate --reason …` then \
-             `shprd land {id}`"
-        )
-    } else {
-        // An answer in the person's own words names no choice, so the card
-        // names every by-hand verb instead of guessing which one they meant.
-        format!(
-            "`shprd agent spawn --task {id}`, or `shprd override --task {id} --rule \
-             integrate_after_failed_gate --reason …` then `shprd land {id}`, or `shprd drop {id} \
-             --reason …`"
-        )
-    };
     format!(
-        "{}: {found}; you answered `{choice}`, so run {verb}",
-        rounds_spent_prefix(id, attempt, rounds),
+        "{}: {found}; you answered `{choice}`, which has not been carried out yet: send the task \
+         back, accept it or drop it from its row",
+        rounds_spent_prefix(&task.id, attempt, rounds),
     )
+}
+
+/// What the id of a refused hand-in's card begins with. Builds before declared
+/// paths became a hint raised these; a log may still hold one, open or not.
+pub const HAND_IN_REFUSED_ASK_PREFIX: &str = "hand-in-refused-";
+
+/// Whether `path` is protected: deploy workflows, `AGENTS.md`,
+/// `go.mod`/`go.sum`, `package.json`, anything under `.agents/`, and anything
+/// matching one of the repo's own `globs` (the `high_risk_paths` of its
+/// `.agents/orchestration.yaml`, see [`crate::ask::high_risk_globs_in`]).
+///
+/// This is the one protected list. A task may change a protected path; when
+/// it did not declare it, the path is flagged where the person decides (the
+/// review contract, the Accept card, the pull request), never refused.
+pub fn is_high_risk_path(path: &str, globs: &[String]) -> bool {
+    let path = path.trim_start_matches("./");
+    let name = path.rsplit('/').next().unwrap_or_default();
+    let builtin = path.starts_with(".agents/")
+        || (path.starts_with(".github/workflows/") && path.to_lowercase().contains("deploy"))
+        || matches!(name, "AGENTS.md" | "go.mod" | "go.sum" | "package.json");
+    builtin || globs.iter().any(|glob| glob_matches(glob, path))
+}
+
+/// The protected paths in `changed` that `declared` does not name, sorted and
+/// without repeats: what a task touched in the protected list without saying
+/// so. Naming a path (or a folder above it) in the task is the "says so".
+pub fn protected_undeclared(
+    changed: &[String],
+    declared: &[String],
+    globs: &[String],
+) -> Vec<String> {
+    let declared: Vec<String> = declared
+        .iter()
+        .filter_map(|entry| crate::scope::normalize(entry).ok())
+        .collect();
+    let mut out: Vec<String> = changed
+        .iter()
+        .filter_map(|path| crate::scope::normalize(path).ok())
+        .filter(|path| is_high_risk_path(path, globs))
+        .filter(|path| !crate::scope::within(path, &declared))
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// What a flagged task's review contract, Accept card and pull request say:
+/// `Touches protected paths: a, b`, or `None` when nothing is flagged.
+pub fn protected_line(paths: &[String]) -> Option<String> {
+    (!paths.is_empty()).then(|| format!("Touches protected paths: {}", paths.join(", ")))
+}
+
+/// A small glob: `*` matches within a segment, `**` across segments, and a
+/// pattern ending in `/` matches everything under it.
+fn glob_matches(glob: &str, path: &str) -> bool {
+    fn go(pattern: &[u8], text: &[u8]) -> bool {
+        match pattern.split_first() {
+            None => text.is_empty(),
+            Some((b'*', rest)) if rest.first() == Some(&b'*') => {
+                let rest = &rest[1..];
+                let rest = rest.strip_prefix(b"/").unwrap_or(rest);
+                (0..=text.len()).any(|at| go(rest, &text[at..]))
+            }
+            Some((b'*', rest)) => {
+                let end = text.iter().position(|c| *c == b'/').unwrap_or(text.len());
+                (0..=end).any(|at| go(rest, &text[at..]))
+            }
+            Some((c, rest)) => text.first() == Some(c) && go(rest, &text[1..]),
+        }
+    }
+    let glob = glob.trim().trim_start_matches("./");
+    if let Some(dir) = glob.strip_suffix('/') {
+        return path.starts_with(&format!("{dir}/"));
+    }
+    go(glob.as_bytes(), path.as_bytes())
+}
+
+/// The `high_risk_paths` globs of an `.agents/orchestration.yaml` text.
+///
+/// Reads only the one block list under that key; a missing key is no globs.
+pub fn high_risk_globs_from_yaml(text: &str) -> Vec<String> {
+    let mut globs = Vec::new();
+    let mut inside = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("high_risk_paths:") {
+            inside = true;
+            continue;
+        }
+        if !inside || trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let Some(item) = trimmed.strip_prefix("- ") else {
+            break;
+        };
+        let item = item.split(" #").next().unwrap_or(item);
+        let item = item.trim().trim_matches(|c| c == '"' || c == '\'');
+        if !item.is_empty() {
+            globs.push(item.to_string());
+        }
+    }
+    globs
+}
+
+/// The event a person's answer to a spent review's card carries out, if it has one.
+///
+/// The card's answer is the person's own decision, so no second confirmation is
+/// asked: `take it as it is` is the `integrate_after_failed_gate` override the
+/// `shprd override` verb would record (after which the task lands on the policy
+/// it is configured with), and `drop it` is the drop. `retry` is not an event
+/// of the person's: the engine spends the round it grants. `None` for any other
+/// ask, any other answer, or a task the run no longer holds open.
+pub fn rounds_spent_followup(task: &Task, ask: &str, answer: &str) -> Option<EventKind> {
+    let stuck = ask.starts_with(crate::review::STUCK_ASK_PREFIX);
+    if !ask.starts_with(ROUNDS_SPENT_ASK_PREFIX) && !stuck {
+        return None;
+    }
+    let choice = answer.trim();
+    let lower = choice.to_ascii_lowercase();
+    if lower.starts_with("take") && !stuck {
+        return Some(EventKind::Override {
+            task: task.id.clone(),
+            rule: INTEGRATE_AFTER_FAILED_GATE.to_string(),
+            reason: format!("the person answered `{choice}` on the card `{ask}`"),
+        });
+    }
+    if lower.starts_with("drop") {
+        return Some(EventKind::TaskDropped {
+            task: task.id.clone(),
+            reason: format!("the person answered `{choice}` on the card `{ask}`"),
+        });
+    }
+    None
 }
 
 /// Whether a card's answer asks for one more review round.
@@ -347,12 +469,89 @@ pub fn allowance(state: &RunState, task: &Task, configured: u32) -> u32 {
     configured.saturating_add(granted_rounds(state, task))
 }
 
+/// The default actions a failed self-update's card carries.
+///
+/// A failed update is a run-wide escalation with no task, so its default action
+/// is what tells it from any other run-wide card. They mirror the three the
+/// self-update pipeline raises (`shprd_server::self_update`).
+pub const UPDATE_FAILED_ACTIONS: [&str; 3] = [
+    "nothing needs doing; shprd is as it was",
+    "nothing needs doing; shprd is back on the version it had",
+    "start shprd again by hand: it may not be running",
+];
+
+/// The words a settled-update record begins with.
+pub const UPDATE_SETTLED_PREFIX: &str = "shprd updated and is running version ";
+
+/// The body of the record a successful update leaves: it settles every failed
+/// update's card raised before it, and is itself no card.
+pub fn update_settled_body(version: &str) -> String {
+    format!("{UPDATE_SETTLED_PREFIX}{version}; earlier update failures are settled")
+}
+
+/// Whether `escalation` is the record a successful update leaves.
+pub fn is_update_settled(escalation: &Escalation) -> bool {
+    escalation.task.is_none() && escalation.body.starts_with(UPDATE_SETTLED_PREFIX)
+}
+
+/// `body` marked as concerning `repo`, the way every update card and settle
+/// record is written, so a success settles only its own repository's failures.
+pub fn tag_update_repo(body: &str, repo: &str) -> String {
+    format!("{body} (repository {repo})")
+}
+
+/// The repository an update card or settle record names, when it was tagged by
+/// [`tag_update_repo`]; `None` for one written before the tag existed.
+pub fn update_repo(escalation: &Escalation) -> Option<&str> {
+    let body = escalation.body.strip_suffix(')')?;
+    let at = body.rfind(" (repository ")?;
+    Some(&body[at + " (repository ".len()..])
+}
+
+/// Whether `settle` (a successful update's record) settles `failed`: it is
+/// newer, and it is for the same repository. An untagged failure belongs to the
+/// log it sits in, so any later success settles it.
+fn settles(settle: &Escalation, failed: &Escalation) -> bool {
+    settle.seq > failed.seq
+        && is_update_settled(settle)
+        && match update_repo(failed) {
+            Some(repo) => update_repo(settle) == Some(repo),
+            None => true,
+        }
+}
+
+/// Whether `escalation` is a failed update's card that a later successful
+/// update of the same repository has settled. A failure newer than that
+/// repository's last success stays open, and so does another repository's.
+pub fn update_failure_settled(state: &RunState, escalation: &Escalation) -> bool {
+    escalation.task.is_none()
+        && UPDATE_FAILED_ACTIONS.contains(&escalation.default_action.as_str())
+        && state
+            .escalations
+            .iter()
+            .any(|later| settles(later, escalation))
+}
+
+/// Whether a failed update's card for `repo` is open in `state`: raised, and
+/// not yet settled by a later success of that repository.
+pub fn has_open_update_failure(state: &RunState, repo: &str) -> bool {
+    state.escalations.iter().any(|escalation| {
+        escalation.task.is_none()
+            && UPDATE_FAILED_ACTIONS.contains(&escalation.default_action.as_str())
+            && update_repo(escalation).is_none_or(|named| named == repo)
+            && !update_failure_settled(state, escalation)
+    })
+}
+
 /// The words every escalation about a send-back that did not start begins with.
 ///
 /// It names the attempt, so a second failure of the same attempt is one card and
 /// the attempt after it is a new one.
 pub fn send_back_failure_prefix(task: &str, attempt: u32) -> String {
-    format!("{task}: sending attempt {attempt} back did not start: ")
+    format!(
+        "{task}: sending {} back did not start: ",
+        crate::event::attempt_label(task, attempt)
+    )
 }
 
 /// What recording a review's verdict comes to.
@@ -442,8 +641,10 @@ mod tests {
     use super::{
         ESCALATION_ACTION, Next, REVIEW_GATE, ROUNDS_SPENT_OPTIONS, after_failure,
         answer_leaves_a_verb, answered_rounds_body, card_attempt, decide, failed_review_rounds,
-        latest_failed_review, provenance, rounds_spent_answer, rounds_spent_ask, rounds_spent_body,
-        rounds_spent_prefix, rounds_spent_verb_ran, send_back_failure_prefix, verdict,
+        high_risk_globs_from_yaml, latest_failed_review, protected_line, protected_undeclared,
+        provenance, rounds_spent_answer, rounds_spent_ask, rounds_spent_body,
+        rounds_spent_followup, rounds_spent_prefix, rounds_spent_verb_ran,
+        send_back_failure_prefix, verdict,
     };
     use crate::config::Review;
     use crate::event::{EventKind, Finding, ReviewSource, Severity};
@@ -506,6 +707,8 @@ mod tests {
             last_status: None,
             nothing_to_merge: None,
             fallbacks: Vec::new(),
+            added_at_ms: 0,
+            touched_at_ms: 0,
         }
     }
 
@@ -606,6 +809,7 @@ mod tests {
         attempt.reviews.push(crate::state::ReviewRequest {
             reviewer: String::from("reviewer"),
             degraded: false,
+            note: None,
             seq: 7,
         });
         let mut reviewed = task(vec![attempt]);
@@ -691,8 +895,7 @@ mod tests {
                 assert!(body.starts_with(&prefix), "{body}");
                 assert!(body.contains("a finding"), "it names what failed: {body}");
                 assert!(body.contains("retry with another round"), "{body}");
-                assert!(body.contains("shprd agent spawn --task T1"), "{body}");
-                assert!(body.contains("shprd drop T1"), "{body}");
+                assert!(!body.contains("shprd "), "no CLI commands: {body}");
                 assert_eq!(default_action, ESCALATION_ACTION);
             }
             other => panic!("the last round asks for a human, got {other:?}"),
@@ -747,6 +950,18 @@ mod tests {
         assert_eq!(card_attempt("T1", repeated), Some(2));
         // Anything else is not a card about an attempt, and a card for another
         // task is not this task's.
+        assert_eq!(
+            card_attempt("T1", &rounds_spent_prefix("T1", 3, 2)),
+            Some(3)
+        );
+        assert_eq!(
+            card_attempt("T1", &send_back_failure_prefix("T1", 4)),
+            Some(4)
+        );
+        assert_eq!(
+            card_attempt("T1", "T1: its `start` step failed (T1·a2): x"),
+            Some(2)
+        );
         assert_eq!(card_attempt("T1", "T1 is ready to land"), None);
         assert_eq!(card_attempt("T2", &spent), None);
         assert_eq!(
@@ -827,46 +1042,71 @@ mod tests {
     }
 
     #[test]
-    fn an_answered_card_names_the_verb_the_answer_leaves() {
-        // Bug 1 of gate run #4: a card answered with `drop it` kept pointing at
-        // an ask that had been consumed, so every click on it was refused. Once
-        // the answer is known the card stops offering choices and says the verb
-        // that is left.
+    fn an_answered_card_names_no_cli_verb() {
         let found = spent("T1", 2);
-        let drop = answered_rounds_body(&found, 2, 2, "drop it");
-        assert!(drop.starts_with(&rounds_spent_prefix("T1", 2, 2)), "{drop}");
-        assert!(!drop.contains("answer the card"), "{drop}");
-        assert!(drop.contains("you answered `drop it`"), "{drop}");
-        assert!(drop.contains("`shprd drop T1 --reason …`"), "{drop}");
-        assert!(
-            !drop.contains("`shprd agent spawn --task T1`"),
-            "one verb, not every one: {drop}"
-        );
-        // It names the failure it is about, exactly as the offered card did.
-        assert!(
-            drop.contains("No evidence that test_calc.py still passes"),
-            "{drop}"
-        );
-
-        let take = answered_rounds_body(&found, 2, 2, "take it as it is");
-        assert!(take.contains("you answered `take it as it is`"), "{take}");
-        assert!(
-            take.contains("`shprd override --task T1 --rule integrate_after_failed_gate"),
-            "{take}"
-        );
-        assert!(take.contains("`shprd land T1`"), "{take}");
-    }
-
-    #[test]
-    fn an_answer_in_the_persons_own_words_names_every_by_hand_verb() {
-        let found = spent("T1", 1);
-        let body = answered_rounds_body(&found, 1, 1, "I will look at it tomorrow");
+        let body = answered_rounds_body(&found, 2, 2, "I will look at it tomorrow");
+        assert!(body.starts_with(&rounds_spent_prefix("T1", 2, 2)), "{body}");
+        assert!(!body.contains("answer the card"), "{body}");
         assert!(
             body.contains("you answered `I will look at it tomorrow`"),
             "{body}"
         );
-        assert!(body.contains("`shprd agent spawn --task T1`"), "{body}");
-        assert!(body.contains("`shprd drop T1 --reason …`"), "{body}");
+        assert!(!body.contains("shprd "), "no CLI commands: {body}");
+        assert!(
+            body.contains("No evidence that test_calc.py still passes"),
+            "{body}"
+        );
+    }
+
+    #[test]
+    fn take_and_drop_answers_carry_themselves_out() {
+        let found = spent("T1", 1);
+        let ask = rounds_spent_ask(1);
+        match rounds_spent_followup(&found, &ask, " Take it as it is ") {
+            Some(EventKind::Override { task, rule, reason }) => {
+                assert_eq!(task, "T1");
+                assert_eq!(rule, INTEGRATE_AFTER_FAILED_GATE);
+                assert!(reason.contains("person answered"), "{reason}");
+            }
+            other => panic!("take it is an override, got {other:?}"),
+        }
+        assert!(matches!(
+            rounds_spent_followup(&found, &ask, "drop it"),
+            Some(EventKind::TaskDropped { .. })
+        ));
+        // A retry is the engine's own work; another ask is not this card.
+        assert!(rounds_spent_followup(&found, &ask, "retry with another round").is_none());
+        assert!(rounds_spent_followup(&found, "plan-1", "take it as it is").is_none());
+    }
+
+    #[test]
+    fn the_orchestration_yaml_gives_its_high_risk_globs() {
+        let yaml = "name: x\nhigh_risk_paths:\n  - \"infra/**\"  # prod\n  - '*.lock'\nother: 1\n";
+        assert_eq!(high_risk_globs_from_yaml(yaml), ["infra/**", "*.lock"]);
+        assert!(high_risk_globs_from_yaml("name: x\n").is_empty());
+    }
+
+    #[test]
+    fn this_repos_own_list_flags_docs_and_github_but_not_crates() {
+        let globs = high_risk_globs_from_yaml(include_str!("../../../.agents/orchestration.yaml"));
+        for path in [
+            "docs/plan.md",
+            ".github/workflows/ci.yml",
+            "assets/logo.svg",
+            "LICENSE",
+            "README.md",
+            "data/skills/compat.toml",
+            "rust-toolchain.toml",
+        ] {
+            let flagged = protected_undeclared(&[path.to_string()], &[], &globs);
+            assert_eq!(flagged, [path], "{path} is protected");
+            assert_eq!(
+                protected_line(&flagged),
+                Some(format!("Touches protected paths: {path}"))
+            );
+        }
+        let crates = ["crates/shprd-core/src/gate.rs".to_string()];
+        assert!(protected_undeclared(&crates, &[], &globs).is_empty());
     }
 
     #[test]
@@ -922,5 +1162,128 @@ mod tests {
             &dropped,
             "I will look at it tomorrow"
         ));
+    }
+
+    fn run_wide(seq: u64, body: &str, action: &str) -> super::Escalation {
+        super::Escalation {
+            task: None,
+            body: body.to_string(),
+            default_action: action.to_string(),
+            seq,
+            by_agent: false,
+        }
+    }
+
+    fn state_of(escalations: Vec<super::Escalation>) -> super::RunState {
+        super::RunState {
+            escalations,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_failed_update_card_is_settled_only_by_a_later_success() {
+        use super::{UPDATE_FAILED_ACTIONS, update_failure_settled, update_settled_body};
+        let failed = run_wide(
+            1,
+            "shprd could not build the accepted change",
+            UPDATE_FAILED_ACTIONS[0],
+        );
+        // Failed update alone: one open card.
+        let alone = state_of(vec![failed.clone()]);
+        assert!(!update_failure_settled(&alone, &failed));
+        // A later success settles it.
+        let ok = run_wide(2, &update_settled_body("1.2.3"), "nothing needs doing");
+        let settled = state_of(vec![failed.clone(), ok.clone()]);
+        assert!(update_failure_settled(&settled, &failed));
+        assert!(super::is_update_settled(&ok));
+        // A failure after the success stays open.
+        let again = run_wide(
+            3,
+            "shprd could not build the accepted change",
+            UPDATE_FAILED_ACTIONS[0],
+        );
+        let after = state_of(vec![failed.clone(), ok, again.clone()]);
+        assert!(update_failure_settled(&after, &failed));
+        assert!(!update_failure_settled(&after, &again));
+    }
+
+    #[test]
+    fn a_success_settles_only_its_own_repositorys_failures() {
+        use super::{
+            UPDATE_FAILED_ACTIONS, has_open_update_failure, tag_update_repo,
+            update_failure_settled, update_settled_body,
+        };
+        let fail = |seq, repo: &str| {
+            run_wide(
+                seq,
+                &tag_update_repo("shprd could not build", repo),
+                UPDATE_FAILED_ACTIONS[0],
+            )
+        };
+        let (a_fail, b_fail) = (fail(1, "/repo/a"), fail(2, "/repo/b"));
+        let a_ok = run_wide(
+            3,
+            &tag_update_repo(&update_settled_body("1.0"), "/repo/a"),
+            "nothing needs doing",
+        );
+        let state = state_of(vec![a_fail.clone(), b_fail.clone(), a_ok]);
+        assert!(update_failure_settled(&state, &a_fail));
+        assert!(!update_failure_settled(&state, &b_fail));
+        assert!(!has_open_update_failure(&state, "/repo/a"));
+        assert!(has_open_update_failure(&state, "/repo/b"));
+    }
+
+    /// The recogniser's strings are the pipeline's: a drift in either side
+    /// would leave the fix inert.
+    #[test]
+    fn the_failed_update_actions_are_the_pipelines() {
+        let source = include_str!("../../shprd-server/src/self_update.rs");
+        for action in super::UPDATE_FAILED_ACTIONS {
+            assert!(
+                source.contains(&format!("\"{action}\"")),
+                "the pipeline no longer raises {action:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_success_leaves_other_run_wide_cards_alone() {
+        use super::{update_failure_settled, update_settled_body};
+        let other = run_wide(1, "something else needs you", "do nothing");
+        let ok = run_wide(2, &update_settled_body("1.2.3"), "nothing needs doing");
+        assert!(!update_failure_settled(
+            &state_of(vec![other.clone(), ok]),
+            &other
+        ));
+    }
+
+    #[test]
+    fn an_undeclared_protected_path_is_flagged_and_a_declared_one_is_not() {
+        let globs = vec!["docs/".to_string(), ".github/**".to_string()];
+        let changed = vec![
+            "src/a.rs".to_string(),
+            "docs/plan.md".to_string(),
+            "AGENTS.md".to_string(),
+            ".github/workflows/ci.yml".to_string(),
+            "Cargo.lock".to_string(),
+        ];
+        assert_eq!(
+            protected_undeclared(&changed, &["src".to_string()], &globs),
+            vec![".github/workflows/ci.yml", "AGENTS.md", "docs/plan.md"]
+        );
+        assert_eq!(
+            protected_undeclared(
+                &changed,
+                &["docs".to_string(), "AGENTS.md".to_string()],
+                &globs
+            ),
+            vec![".github/workflows/ci.yml"]
+        );
+        assert_eq!(
+            protected_line(&["AGENTS.md".to_string()]).as_deref(),
+            Some("Touches protected paths: AGENTS.md")
+        );
+        assert_eq!(protected_line(&[]), None);
     }
 }

@@ -192,6 +192,18 @@ pub enum AskError {
         /// When it stopped being answerable.
         expires_at_ms: u64,
     },
+    /// The ask offers choices and the answer is none of them.
+    #[error("{answer:?} is not one of the choices for ask {ask:?} of task {task:?}: {}", .options.join(", "))]
+    NotAChoice {
+        /// The task.
+        task: TaskId,
+        /// The ask.
+        ask: AskId,
+        /// What was answered.
+        answer: String,
+        /// The choices the card offers.
+        options: Vec<String>,
+    },
     /// A task or ask id may not be used as a file name.
     #[error("{field} {value:?} is not usable as an ask file name")]
     InvalidName {
@@ -275,6 +287,21 @@ impl AskQueue {
                 expires_at_ms: until,
             });
         }
+        // An ask with choices takes one of them (trimmed, any case); a
+        // free-text ask takes anything.
+        if !raised.options.is_empty()
+            && !raised
+                .options
+                .iter()
+                .any(|option| option.trim().eq_ignore_ascii_case(text.trim()))
+        {
+            return Err(AskError::NotAChoice {
+                task: task.to_string(),
+                ask: ask.to_string(),
+                answer: text.to_string(),
+                options: raised.options.clone(),
+            });
+        }
         let path = self.answer_path(task, ask)?;
         let answer = AskAnswer {
             text: text.to_string(),
@@ -342,6 +369,15 @@ impl AskQueue {
 
     /// Every ask still open at `now_ms`, oldest first.
     pub fn open(&self, now_ms: u64) -> Result<Vec<Ask>, AskError> {
+        Ok(self
+            .all()?
+            .into_iter()
+            .filter(|ask| ask.is_open_at(now_ms))
+            .collect())
+    }
+
+    /// Every ask in the queue, answered or not, oldest first.
+    pub fn all(&self) -> Result<Vec<Ask>, AskError> {
         let mut open = Vec::new();
         let tasks = match fs::read_dir(&self.root) {
             Ok(tasks) => tasks,
@@ -383,10 +419,7 @@ impl AskQueue {
                 if id.ends_with(".answer") || name.starts_with('.') {
                     continue;
                 }
-                let ask = self.read(task, id)?;
-                if ask.is_open_at(now_ms) {
-                    open.push(ask);
-                }
+                open.push(self.read(task, id)?);
             }
         }
         open.sort_by(|left, right| {
@@ -526,6 +559,168 @@ pub fn by_task(asks: &[Ask]) -> BTreeMap<TaskId, Vec<Ask>> {
     grouped
 }
 
+/// What the id of a scope-widening card begins with. Builds before declared
+/// paths became a hint raised these; a log may still hold one, open or not.
+pub const SCOPE_WIDEN_ASK_PREFIX: &str = "scope-widen-";
+
+/// Whether `ask` is a scope card (a refused hand-in's or a widening's) an older
+/// build raised. Declared paths are a hint now, so every such card is moot: no
+/// client draws one as open (only `shprd ask list --all` still lists it, as
+/// history), and every client asks this to agree.
+pub fn is_scope_card(ask: &str) -> bool {
+    ask.starts_with(SCOPE_WIDEN_ASK_PREFIX)
+        || ask.starts_with(crate::gate::HAND_IN_REFUSED_ASK_PREFIX)
+}
+
+/// The repo's own `high_risk_paths` globs, from `<root>/.agents/orchestration.yaml`
+/// (none when the file or the key is missing).
+pub fn high_risk_globs_in(root: &Path) -> Vec<String> {
+    fs::read_to_string(root.join(".agents").join("orchestration.yaml"))
+        .map(|text| crate::gate::high_risk_globs_from_yaml(&text))
+        .unwrap_or_default()
+}
+
+/// Words that name something only the engine does: a task's state, its scope, a
+/// sync or a landing. An option that has the answerer promise one of these is
+/// not an action the answerer can take on the board.
+const ENGINE_ACTIONS: &[&str] = &[
+    "set ",
+    "setting ",
+    "widen",
+    "apply",
+    "reopen",
+    "re-open",
+    "restart",
+    "resume",
+    "unblock",
+    "drop ",
+    "dropping",
+    "sync",
+    "land ",
+    "landing",
+    "mark ",
+    "move ",
+    "put ",
+    "change the status",
+    "back to ",
+];
+
+/// Why a raised ask's option is refused, or `None` when it is fine.
+///
+/// An option is a button the answerer presses. It must be an action the
+/// answerer can take on the board or one the worker takes itself. One phrased
+/// as the answerer promising an engine action (`I'll set T1 back to Working`,
+/// `I'm applying the widening`) cannot be kept: pressing it changes nothing.
+/// State problems the worker cannot fix belong on an engine card with real
+/// buttons (reopen, sync, drop).
+pub fn option_refusal(option: &str) -> Option<String> {
+    let lower = option.trim().to_lowercase().replace('\u{2019}', "'");
+    let promise = [
+        "i'll ", "i will ", "i'm ", "i am ", "we'll ", "we will ", "i can ", "i'd ",
+    ]
+    .iter()
+    .any(|lead| lower.starts_with(lead));
+    if promise && ENGINE_ACTIONS.iter().any(|word| lower.contains(word)) {
+        return Some(format!(
+            "option {option:?} has the answerer promise an engine action; nothing will do it \
+             when it is pressed. Offer a choice the person can make on the board, or one you take \
+             yourself (`widen the scope to <paths>`, `keep the scope`, `wait`), and put a state \
+             problem you cannot fix in your summary for the engine's own card"
+        ));
+    }
+    None
+}
+
+/// One message waiting to be typed into a task's live worker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerNote {
+    /// The task whose worker is told.
+    pub task: TaskId,
+    /// Where the note's file lives.
+    pub path: PathBuf,
+    /// What is typed.
+    pub text: String,
+}
+
+/// The messages queued for tasks' live workers: `<repo>/.shprd/worker-notes`.
+///
+/// A service writes a note when a decision changes what a running worker may
+/// do; the next step that can reach a terminal types it and marks it `.sent`,
+/// or `.skipped` when no worker was live (the next attempt's brief carries what
+/// the note says). A note is never typed twice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerNotes {
+    root: PathBuf,
+}
+
+impl WorkerNotes {
+    /// The queue beside a repository's event log.
+    pub fn for_repo(repo: &Path) -> Self {
+        Self {
+            root: repo.join(".shprd").join("worker-notes"),
+        }
+    }
+
+    /// Queues `text` for `task`'s worker.
+    pub fn queue(&self, task: &str, text: &str) -> Result<PathBuf, AskError> {
+        let task_name = check_name("task", task)?;
+        let dir = self.root.join(task_name);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_millis());
+        loop {
+            let n = NEXT_NOTE.fetch_add(1, Ordering::Relaxed);
+            let path = dir.join(format!("{now}-{n}.note"));
+            if write_new(&path, text.as_bytes())? {
+                return Ok(path);
+            }
+        }
+    }
+
+    /// Every note still waiting, oldest first.
+    pub fn pending(&self) -> Vec<WorkerNote> {
+        let mut found = Vec::new();
+        let Ok(tasks) = fs::read_dir(&self.root) else {
+            return found;
+        };
+        for task in tasks.flatten() {
+            let Some(name) = task.file_name().to_str().map(str::to_string) else {
+                continue;
+            };
+            let Ok(files) = fs::read_dir(task.path()) else {
+                continue;
+            };
+            for file in files.flatten() {
+                let path = file.path();
+                if path.extension().and_then(|ext| ext.to_str()) != Some("note") {
+                    continue;
+                }
+                if let Ok(text) = fs::read_to_string(&path) {
+                    found.push(WorkerNote {
+                        task: name.clone(),
+                        path,
+                        text,
+                    });
+                }
+            }
+        }
+        found.sort_by(|a, b| a.path.cmp(&b.path));
+        found
+    }
+
+    /// Marks a note handled: `.sent` when it was typed, `.skipped` when it was not.
+    pub fn settle(&self, note: &WorkerNote, sent: bool) {
+        let _ = fs::rename(
+            &note.path,
+            note.path
+                .with_extension(if sent { "sent" } else { "skipped" }),
+        );
+    }
+}
+
+/// Keeps two notes queued in the same millisecond apart.
+static NEXT_NOTE: AtomicU64 = AtomicU64::new(0);
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -533,7 +728,41 @@ mod tests {
     use std::sync::{Arc, Barrier};
     use std::thread;
 
-    use super::{Ask, AskError, AskKind, AskQueue};
+    use super::{
+        Ask, AskError, AskKind, AskQueue, WorkerNotes, high_risk_globs_in, option_refusal,
+    };
+
+    #[test]
+    fn the_repos_own_protected_globs_are_read_from_its_orchestration_file() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(high_risk_globs_in(dir.path()).is_empty());
+        std::fs::create_dir_all(dir.path().join(".agents")).unwrap();
+        std::fs::write(
+            dir.path().join(".agents/orchestration.yaml"),
+            "high_risk_paths:\n  - infra/**\n",
+        )
+        .unwrap();
+        assert_eq!(high_risk_globs_in(dir.path()), vec!["infra/**".to_string()]);
+    }
+
+    #[test]
+    fn options_promising_an_engine_action_are_refused() {
+        for bad in [
+            "I'll set T1 back to Working",
+            "I\u{2019}m applying the widening",
+            "I will reopen the task",
+        ] {
+            assert!(option_refusal(bad).is_some(), "{bad}");
+        }
+        for ok in [
+            "widen the scope to crates/a.rs",
+            "keep the scope",
+            "I'll carry on without it",
+            "Reopen T1",
+        ] {
+            assert!(option_refusal(ok).is_none(), "{ok}");
+        }
+    }
 
     fn queue() -> (tempfile::TempDir, AskQueue) {
         let dir = tempfile::tempdir().expect("temp dir");
@@ -626,6 +855,44 @@ mod tests {
     }
 
     #[test]
+    fn an_answer_must_be_one_of_the_choices_when_there_are_some() {
+        let (_dir, queue) = queue();
+        let card = ask("a1").with_options(vec![
+            "confirm override integrate_after_failed_gate".to_string(),
+            "leave it".to_string(),
+        ]);
+        queue.raise(&card).expect("raise");
+        match queue.answer("T1", "a1", "confirm override", 2_000) {
+            Err(AskError::NotAChoice { options, .. }) => assert_eq!(options.len(), 2),
+            other => panic!("expected NotAChoice, got {other:?}"),
+        }
+        // Refused, so the card is still open.
+        assert!(queue.answer_of("T1", "a1").expect("read").is_none());
+        let done = queue
+            .answer("T1", "a1", "  Leave It ", 2_001)
+            .expect("a trimmed, any-case choice is accepted");
+        assert!(done.answer.is_some());
+    }
+
+    #[test]
+    fn exact_choice_is_accepted() {
+        let (_dir, queue) = queue();
+        queue
+            .raise(&ask("a1").with_options(vec!["leave it".to_string()]))
+            .expect("raise");
+        queue.answer("T1", "a1", "leave it", 2_000).expect("answer");
+    }
+
+    #[test]
+    fn a_free_text_ask_takes_any_answer() {
+        let (_dir, queue) = queue();
+        queue.raise(&ask("a1")).expect("raise");
+        queue
+            .answer("T1", "a1", "anything at all", 2_000)
+            .expect("answer");
+    }
+
+    #[test]
     fn an_unknown_ask_cannot_be_answered() {
         let (_dir, queue) = queue();
         match queue.answer("T1", "missing", "allow", 2_000) {
@@ -665,5 +932,30 @@ mod tests {
             Err(AskError::InvalidName { field, .. }) => assert_eq!(field, "task"),
             other => panic!("expected InvalidName, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_queued_note_is_listed_once_and_settled_once() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let notes = WorkerNotes::for_repo(dir.path());
+        notes.queue("T1", "hello").expect("queue");
+        let pending = notes.pending();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].text, "hello");
+        notes.settle(&pending[0], true);
+        assert!(notes.pending().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod scope_card_tests {
+    use super::is_scope_card;
+
+    #[test]
+    fn both_old_scope_cards_are_scope_cards_and_nothing_else_is() {
+        assert!(is_scope_card("scope-widen-1"));
+        assert!(is_scope_card("hand-in-refused-1-1"));
+        assert!(!is_scope_card("ask-1"));
+        assert!(!is_scope_card("review-out-1"));
     }
 }

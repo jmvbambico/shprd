@@ -138,7 +138,7 @@ impl HerdrMux {
         argv: &[String],
         env: &[(String, Option<String>)],
     ) -> Result<()> {
-        let line = shell::line(argv, env)?;
+        let line = shell::typed_line(argv, env, &std::env::temp_dir())?;
         self.type_text(pane, &line)?;
         self.press_keys(pane, &[Key::Enter])
     }

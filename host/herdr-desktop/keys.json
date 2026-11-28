@@ -1,6 +1,36 @@
 {
+  "global": {
+    "alt-1": "tab.select:1",
+    "alt-2": "tab.select:2",
+    "alt-3": "tab.select:3",
+    "alt-4": "tab.select:4",
+    "alt-5": "tab.select:5",
+    "alt-6": "tab.select:6",
+    "alt-7": "tab.select:7",
+    "alt-8": "tab.select:8",
+    "alt-9": "tab.select:9",
+    "alt-left": "tab.prev",
+    "alt-right": "tab.next",
+    "alt-down": "space.next",
+    "alt-up": "space.prev",
+    "alt-enter": "pane.split:right",
+    "alt-shift-enter": "pane.split:down",
+    "alt-escape": "pane.close",
+    "ctrl-alt-left": "pane.go:left",
+    "ctrl-alt-down": "pane.go:down",
+    "ctrl-alt-up": "pane.go:up",
+    "ctrl-alt-right": "pane.go:right"
+  },
   "layout:shprd": {
+    "ctrl-k": "mod.open:shprd-jump",
+    "ctrl-shift-k": "mod.open:shprd-jump",
+    "ctrl-shift-/": "mod.open:shprd-keybinds",
+    "ctrl-shift-?": "mod.open:shprd-keybinds",
+    "f2": "shprd-tabs.rename-tab",
+    "shift-f2": "shprd-tabs.rename-space",
     "ctrl-shift-b": "layout.toggle:panel",
-    "ctrl-shift-a": "layout.show:asks"
+    "ctrl-shift-a": "shprd-tabs.show-tasks",
+    "ctrl-shift-w": "tab.close",
+    "ctrl-shift-n": "shprd-tabs.new-task"
   }
 }

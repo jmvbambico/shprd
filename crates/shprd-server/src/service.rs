@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use shprd_agents::data::DataDir;
 use tokio::net::TcpListener;
 
-use crate::api::{App, Paths};
+use crate::api::Paths;
 use crate::error::ServerError;
 
 /// The version every answer reports.
@@ -27,6 +27,46 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// so the service never reads `$XDG_STATE_HOME` or `$HOME` for itself.
 pub fn state_dir(state_home: &Path) -> PathBuf {
     state_home.join("shprd")
+}
+
+/// Where one repository's own files live under the service: `<state_home>/shprd/repos/<name>-<hash>`.
+///
+/// One service serves every repository (SHPR-77), so this directory holds only
+/// what belongs to one repository: its change file and its last pass. The
+/// discovery record, the token, the web password, the sessions and the tunnel's
+/// record are the service's own and live in [`state_dir`]. The name is the
+/// folder's name, for a person looking at the disk; the hash (FNV-1a over the
+/// whole path) keeps two folders of the same name apart.
+pub fn repo_state_dir(state_home: &Path, root: &Path) -> PathBuf {
+    repo_dir_in(&state_dir(state_home), root)
+}
+
+/// The data directory of the repository at `root` inside the service's state
+/// directory `state_dir`: `<state_dir>/repos/<name>-<hash>`. Its name is also the
+/// repository's stable id in the API.
+pub fn repo_dir_in(state_dir: &Path, root: &Path) -> PathBuf {
+    // The same folder reached through a symlink (macOS's `/var` and `/private/var`)
+    // is one repository, so it is one directory.
+    let root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in root.display().to_string().as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    let name: String = root
+        .file_name()
+        .and_then(OsStr::to_str)
+        .unwrap_or("repo")
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    state_dir.join("repos").join(format!("{name}-{hash:016x}"))
 }
 
 /// The state home for `home`: `xdg_state_home` (the `$XDG_STATE_HOME` the caller
@@ -58,6 +98,11 @@ pub struct ServiceRecord {
     pub pid: u32,
     /// The service's version.
     pub version: String,
+    /// The repository this service serves (an absolute path), so a client with
+    /// several services running picks the one for the space it shows. Empty in a
+    /// record an older service wrote.
+    #[serde(default)]
+    pub root: String,
 }
 
 /// A step the binary runs after an action appended an event.
@@ -94,6 +139,8 @@ pub struct ServiceFiles {
     dir: PathBuf,
     token: String,
     id: String,
+    /// The repository this service serves, written into the record.
+    root: String,
     /// The lock this service holds for its state directory, for its whole life.
     ///
     /// Only one service can be found through one `service.json`, so only one is
@@ -132,8 +179,17 @@ impl ServiceFiles {
             dir: dir.to_path_buf(),
             token,
             id: random_hex(16)?,
+            root: String::new(),
             _lock: lock,
         })
+    }
+
+    /// Names the repository this service serves, so `service.json` carries it.
+    #[must_use]
+    pub fn with_root(mut self, root: &Path) -> Self {
+        let root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+        self.root = root.display().to_string();
+        self
     }
 
     /// The directory the files live in.
@@ -168,6 +224,7 @@ impl ServiceFiles {
             id: self.id.clone(),
             pid: std::process::id(),
             version: VERSION.to_string(),
+            root: self.root.clone(),
         };
         let text = serde_json::to_string(&record).map_err(|source| ServerError::Json {
             what: "service.json",
@@ -458,7 +515,10 @@ pub struct ServiceInfo {
 /// Everything a service is started with.
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// The repository whose run log the service reads and writes.
+    /// The repository the service serves from the start, built from this
+    /// config's own `engine`, `chat`, `terminal`, `agents`, `live`, `tick`,
+    /// `hub` and `after_write`; empty for a service that is only told its
+    /// repositories as they are registered ([`Config::service`]).
     pub repo: PathBuf,
     /// The state directory holding `service.json` and the token.
     pub state_dir: PathBuf,
@@ -533,6 +593,18 @@ pub struct Config {
     /// started without one answers `POST /api/chat` with a refusal rather than
     /// pretending the line went somewhere.
     pub chat: crate::chat::ChatHost,
+    /// What the terminal socket watches and types through, when the binary has a
+    /// host. A service started without one refuses `GET /api/terminal`.
+    pub terminal: crate::terminal::TerminalPort,
+    /// What starts a program in a new tab, when the binary has a host.
+    ///
+    /// "Start an agent" is a tab and a CLI, so the binary passes the adapter that
+    /// owns the harness table and the host ([`crate::AgentOpener`]). A service
+    /// started without one answers `POST /api/agents` with a refusal rather than
+    /// pretending a tab exists.
+    pub agents: crate::agents::Agents,
+    /// The agents the host lists. A service started without one lists none.
+    pub live: crate::live::LiveAgents,
     /// The home and data home the agent CLIs run with, when the binary resolved
     /// them.
     ///
@@ -542,6 +614,16 @@ pub struct Config {
     /// `SHPRD_HOME`. `None` is a service nobody told, which the chat's route
     /// says rather than looking in the wrong directory.
     pub transcript_roots: Option<shprd_agents::transcript::Roots>,
+    /// The hostnames this service answers to besides loopback.
+    ///
+    /// The tunnel task adds its hostname here when a tunnel starts and removes it
+    /// when it stops ([`shprd_remote::AllowedHosts`]); the gate reads the set on
+    /// every request, and an unknown `Host` is a `421`. The default is loopback
+    /// only, so a service nothing put on the internet answers to nothing else.
+    pub allowed_hosts: shprd_remote::AllowedHosts,
+    /// What makes a repository's slot when one is registered, when the binary
+    /// supplies one. A service without it serves only [`Config::repo`].
+    pub factory: Option<std::sync::Arc<dyn crate::repos::RepoFactory>>,
 }
 
 /// Told what a pass did, after it did it, for the caller's own output.
@@ -597,15 +679,52 @@ impl Config {
             dagr: None,
             engine: None,
             chat: crate::chat::ChatHost::new(),
+            terminal: crate::terminal::TerminalPort::new(),
+            agents: crate::agents::Agents::new(),
+            live: crate::live::LiveAgents::new(),
             transcript_roots: None,
+            allowed_hosts: shprd_remote::AllowedHosts::loopback_only(),
+            factory: None,
         }
+    }
+
+    /// A config for the one service every repository shares: no repository of
+    /// its own, its repositories made by `factory` as they are registered.
+    pub fn service(
+        state_dir: impl Into<PathBuf>,
+        factory: std::sync::Arc<dyn crate::repos::RepoFactory>,
+    ) -> Self {
+        let mut config = Self::new(PathBuf::new(), state_dir);
+        config.factory = Some(factory);
+        config
+    }
+
+    /// The names this service answers to, as a shared handle.
+    ///
+    /// The tunnel task keeps the handle and adds or removes its hostname; the
+    /// running service reads the set on every request.
+    pub fn allowed_hosts(&self) -> shprd_remote::AllowedHosts {
+        self.allowed_hosts.clone()
+    }
+}
+
+impl Service {
+    /// The names this running service answers to, as a shared handle.
+    pub fn allowed_hosts(&self) -> shprd_remote::AllowedHosts {
+        self.registry.base().remote.hosts()
+    }
+
+    /// The repositories this service serves, and the way to add one.
+    pub fn registry(&self) -> std::sync::Arc<crate::repos::Registry> {
+        std::sync::Arc::clone(&self.registry)
     }
 }
 
 /// A service whose socket is bound and whose discovery files are written.
 #[derive(Debug)]
 pub struct Service {
-    app: App,
+    registry: std::sync::Arc<crate::repos::Registry>,
+    files: ServiceFiles,
     listener: TcpListener,
     info: ServiceInfo,
     tick: Option<TickConfig>,
@@ -625,13 +744,11 @@ impl Service {
             .local_addr()
             .map_err(ServerError::NoAddress)?
             .port();
-        let app = App::prepare_all(
-            &config.repo,
+        let has_repo = !config.repo.as_os_str().is_empty();
+        let (files, base) = crate::api::Shared::prepare(
+            &config.state_dir,
             port,
             &config.actor,
-            &config.state_dir,
-            config.after_write.clone(),
-            config.hub.clone(),
             // Everything the service reads from the machine was resolved by the
             // binary and carried here, so the service never consults the
             // environment for a path of its own.
@@ -642,21 +759,51 @@ impl Service {
                 path_env: config.path_env.clone(),
                 dagr: config.dagr.clone(),
                 transcript_roots: config.transcript_roots.clone(),
+                allowed_hosts: config.allowed_hosts.clone(),
             },
-        )?
-        // The spawn and the close are the binary's, wired exactly as the tick's
-        // steps are; a service without them refuses the three actions that need
-        // a host.
-        .with_engine_opt(config.engine.clone())
-        // The chat's writer is that same host. Attaching it rebuilds the router,
-        // which a client never sees: the record is written before either is
-        // wired, and a request cannot arrive until the listener is serving.
-        .with_chat_opt(config.chat.get().cloned());
-        let info = app.info();
+            has_repo.then_some(config.repo.as_path()),
+        )?;
+        let registry = crate::repos::Registry::new(base.clone(), config.factory.clone());
+        if has_repo {
+            // The repository the config names is served as the service always
+            // served one: its pieces come from this config.
+            let state = crate::api::AppState {
+                repo: config.repo.clone(),
+                hub: config.hub.clone(),
+                after_write: config.after_write.clone(),
+                engine: config.engine.clone(),
+                chat: config.chat.clone(),
+                terminal: config.terminal.clone(),
+                agents: config.agents.clone(),
+                live: config.live.clone(),
+                ..base
+            };
+            registry.register_state(state, config.tick.clone());
+        }
+        let info = ServiceInfo {
+            port,
+            id: files.id().to_string(),
+            version: VERSION.to_string(),
+            pid: std::process::id(),
+            token_path: files.token_path(),
+            service_json: files.service_json_path(),
+        };
         let tick = config.tick.clone();
         tracing::info!(port, id = %info.id, "shprd service listening on loopback");
+        // The page is served from this same port. Saying whether this binary
+        // embedded a build is the one thing a person opening it needs to know
+        // when there is no app to see.
+        if crate::web::built() {
+            tracing::info!(port, "the web app is embedded");
+        } else {
+            tracing::warn!(
+                port,
+                "this build has no web app; run `npm ci && npm run build` in web/, then build shprd again"
+            );
+        }
         Ok(Self {
-            app,
+            registry,
+            files,
             listener,
             info,
             tick,
@@ -680,50 +827,46 @@ impl Service {
         self.run_with_tick(shutdown, tick).await
     }
 
-    /// Serves, running `tick` beside the API until `shutdown`.
+    /// Serves, running every repository's tick beside the API until `shutdown`.
     ///
-    /// The tick is one more task in the same runtime, so stopping the service
-    /// stops it: a pass in flight finishes, and no pass starts after the
-    /// shutdown resolves.
+    /// `tick` is the tick of the one repository a config named (a repository
+    /// registered later brings its own). Each tick is one more task in the same
+    /// runtime, so stopping the service stops them: a pass in flight finishes,
+    /// and no pass starts after the shutdown resolves.
     pub async fn run_with_tick(
         self,
         shutdown: impl Future<Output = ()> + Send + 'static,
         tick: Option<TickConfig>,
     ) -> Result<(), ServerError> {
         let Self {
-            app,
+            registry,
+            files,
             listener,
             info,
             tick: _,
         } = self;
-        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
         // Writers outside this process — a program's ask hook, the CLI — append
         // to the same log. Watching its stamp is what wakes a long poll for an
         // ask raised that way, so a card arrives without waiting for a client
         // to poll the file.
-        let watcher = tokio::spawn(watch_log(app.repo().to_path_buf(), app.hub()));
-        let ticker = tick.map(|tick| {
-            let worker = std::sync::Arc::clone(&tick.worker);
-            let interval = tick.interval;
-            let notice = tick.notice.clone();
-            tokio::spawn(async move {
-                crate::tick::run(worker, interval, notice, async {
-                    // The service's own shutdown is awaited here, so the
-                    // loop ends with it rather than with the socket.
-                    let _ = stopped.await;
-                })
-                .await;
-            })
-        });
-        let served = axum::serve(listener, app.router())
-            .with_graceful_shutdown(shutdown)
-            .await;
-        let _ = stop.send(());
-        watcher.abort();
-        if let Some(ticker) = ticker {
-            let _ = ticker.await;
-        }
-        let removed = app.remove_record();
+        registry.start_ticks(tick);
+        // The peer address is the kernel's, and it is what every rate limit is
+        // keyed on: `X-Forwarded-For` is a header a client writes, and is ignored
+        // until the tunnel task decides when it may be trusted.
+        let served = axum::serve(
+            listener,
+            registry
+                .router()
+                .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .with_graceful_shutdown(shutdown)
+        .await;
+        registry.stop_all().await;
+        // The tunnel dies with the service: stopped here, so a Tailscale mapping
+        // is removed too (a child process would also die with the runtime, but
+        // `tailscale serve` outlives its command).
+        registry.base().tunnels.shutdown().await;
+        let removed = files.remove_record();
         tracing::info!(port = info.port, "shprd service stopped");
         served.map_err(ServerError::Serve)?;
         removed
@@ -734,7 +877,7 @@ impl Service {
 ///
 /// The log is re-read only when its stamp changes, so a quiet run costs a
 /// `stat` per tick; the publish is what wakes long polls and sockets.
-async fn watch_log(repo: std::path::PathBuf, hub: crate::hub::Hub) {
+pub(crate) async fn watch_log(repo: std::path::PathBuf, hub: crate::hub::Hub) {
     let mut seen: Option<crate::ledger::Stamp> = None;
     let mut last = 0;
     loop {
@@ -764,28 +907,41 @@ pub async fn serve(
 }
 
 /// Resolves when the process is asked to stop: `SIGINT` or `SIGTERM`.
-pub async fn shutdown_signal() {
+///
+/// The handlers are installed when this is *called*, not when the future is
+/// first polled, so a caller that takes the future before it announces itself
+/// (writes its record) can be signalled at once and still stop quietly rather
+/// than die of the default action. It must be called inside a Tokio runtime.
+pub fn shutdown_signal() -> impl Future<Output = ()> + Send + 'static {
     #[cfg(unix)]
     {
-        let terminate = async {
-            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-                Ok(mut signal) => {
-                    signal.recv().await;
+        use tokio::signal::unix::{SignalKind, signal};
+        let interrupt = signal(SignalKind::interrupt());
+        let terminate = signal(SignalKind::terminate());
+        async move {
+            let wait = |listener: std::io::Result<tokio::signal::unix::Signal>,
+                        name: &'static str| async move {
+                match listener {
+                    Ok(mut signal) => {
+                        signal.recv().await;
+                    }
+                    Err(err) => {
+                        tracing::warn!(%err, "could not listen for {name}");
+                        std::future::pending::<()>().await;
+                    }
                 }
-                Err(err) => {
-                    tracing::warn!(%err, "could not listen for SIGTERM; waiting for SIGINT only");
-                    std::future::pending::<()>().await;
-                }
+            };
+            tokio::select! {
+                _ = wait(interrupt, "SIGINT") => {}
+                _ = wait(terminate, "SIGTERM") => {}
             }
-        };
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            _ = terminate => {}
         }
     }
     #[cfg(not(unix))]
     {
-        let _ = tokio::signal::ctrl_c().await;
+        async {
+            let _ = tokio::signal::ctrl_c().await;
+        }
     }
 }
 
@@ -853,7 +1009,29 @@ mod tests {
         // The first one still owns it, and dropping it frees it for the next.
         assert!(first.owns_record() || !first.service_json_path().exists());
         drop(first);
-        ServiceFiles::prepare(dir.path()).expect("the lock is released when the service ends");
+        prepare_once_released(dir.path()).expect("the lock is released when the service ends");
+    }
+
+    /// Prepares `dir` once a dropped service's lock is really free.
+    ///
+    /// Closing the lock holder's file frees its `flock` only when the last
+    /// reference to the open file goes. A parallel test that spawns a child
+    /// (`process_alive` runs `kill(1)`) forks while the holder's descriptor is
+    /// open, and the child keeps the lock alive until it execs, a few
+    /// milliseconds later. The record here names this test's own live pid, so
+    /// [`take_lock`] rightly refuses at once instead of waiting: the refusal
+    /// is correct, and what the test must do is wait for the release. It still
+    /// fails if the lock is never released: the wait is bounded.
+    fn prepare_once_released(dir: &Path) -> Result<ServiceFiles, ServerError> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            match ServiceFiles::prepare(dir) {
+                Err(_) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                other => return other,
+            }
+        }
     }
 
     #[test]
@@ -869,6 +1047,7 @@ mod tests {
             id: String::from("a-start-that-died"),
             pid: dead,
             version: VERSION.to_string(),
+            root: String::new(),
         };
         let path = dir.path().join("service.json");
         fs::write(
@@ -903,6 +1082,7 @@ mod tests {
             id: String::from("a-start-that-is-dying"),
             pid: dead_pid(),
             version: VERSION.to_string(),
+            root: String::new(),
         };
         fs::write(
             dir.path().join("service.json"),
@@ -934,6 +1114,7 @@ mod tests {
             id: String::from("a-live-start"),
             pid: std::process::id(),
             version: VERSION.to_string(),
+            root: String::new(),
         };
         fs::write(
             dir.path().join("service.json"),
@@ -1041,5 +1222,40 @@ mod tests {
             !info.service_json.exists(),
             "service.json is removed on a clean shutdown"
         );
+    }
+
+    #[test]
+    fn each_repository_gets_its_own_state_directory_under_the_one_home() {
+        let home = Path::new("/state");
+        let one = repo_state_dir(home, Path::new("/work/shop"));
+        let two = repo_state_dir(home, Path::new("/work/scratchpad"));
+        let same_name = repo_state_dir(home, Path::new("/other/shop"));
+        assert!(one.starts_with("/state/shprd/repos"), "{one:?}");
+        assert_ne!(one, two);
+        assert_ne!(one, same_name, "two folders of one name stay apart");
+        assert_eq!(one, repo_state_dir(home, Path::new("/work/shop")));
+        // A golden vector: the path-to-folder rule is a contract the docs name.
+        assert_eq!(
+            one.file_name().and_then(|n| n.to_str()),
+            Some("shop-55b59e8ddb35f8b8")
+        );
+    }
+
+    #[test]
+    fn two_repositories_are_served_from_one_state_home_at_once() {
+        let home = tempfile::tempdir().expect("home");
+        let a = repo_state_dir(home.path(), Path::new("/work/a"));
+        let b = repo_state_dir(home.path(), Path::new("/work/b"));
+        let first = ServiceFiles::prepare(&a)
+            .expect("the first repository's service")
+            .with_root(Path::new("/work/a"));
+        let second = ServiceFiles::prepare(&b)
+            .expect("a second repository never needs the first one stopped")
+            .with_root(Path::new("/work/b"));
+        let one = first.write_record(1111).expect("write one");
+        let two = second.write_record(2222).expect("write two");
+        assert_eq!(one.root, "/work/a");
+        assert_eq!(two.root, "/work/b");
+        assert!(first.owns_record() && second.owns_record());
     }
 }

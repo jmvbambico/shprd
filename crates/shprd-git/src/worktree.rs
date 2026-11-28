@@ -13,6 +13,8 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
+use shprd_core::settings::{Key, Loaded, Source, TaskKey, Tasks};
+
 use crate::git::{Git, GitError};
 
 /// Where worktrees live, and what their branches are called.
@@ -22,6 +24,10 @@ pub struct Layout {
     pub root: PathBuf,
     /// Prefix every shprd branch carries.
     pub namespace: String,
+    /// What follows the namespace in a branch's name, with `{run}`, `{task}`,
+    /// `{n}` and `{slug}` filled in (`tasks.branch`). [`None`] names a branch
+    /// `<run>/<task>`.
+    pub pattern: Option<String>,
 }
 
 impl Layout {
@@ -31,12 +37,104 @@ impl Layout {
         Self {
             root: home.into().join(".shprd").join("wt"),
             namespace: "shprd/".to_string(),
+            pattern: None,
         }
     }
 
-    /// The branch a task attempt commits on: `<namespace><run>/<task>`.
+    /// The layout the settings describe for `repo`, read afresh: the namespace is
+    /// `tasks.archive_namespace` and the branch pattern `tasks.branch`.
+    ///
+    /// Every verb and every pass builds its layout here, so a change saved in the
+    /// settings is the next branch's name and the next janitor's prefix. A
+    /// settings file that cannot be read leaves the default layout.
+    pub fn from_settings(home: &Path, repo: &Path) -> Self {
+        let layout = Self::default_for_home(home);
+        // The old `config.toml` files (the person's, then the repository's own)
+        // stand where no settings layer names the namespace: a repository's file
+        // predates the settings model and is not one of its layers.
+        let global = home.join(".config").join("shprd").join("config.toml");
+        let local = repo.join(".shprd").join("config.toml");
+        let legacy = shprd_core::config::load(Some(&global), Some(&local))
+            .map(|config| config.janitor.namespace)
+            .unwrap_or_else(|_| layout.namespace.clone());
+        let Ok(loaded) = Loaded::read(home, Some(repo)) else {
+            return layout.with_settings(&legacy, "");
+        };
+        let resolved = loaded.resolve(None);
+        let tasks = resolved.tasks();
+        let named = resolved
+            .get(&Key::Task(TaskKey::ArchiveNamespace))
+            .is_some_and(|sourced| sourced.source != Source::BuiltIn);
+        let namespace = if named {
+            tasks.archive_namespace.as_str()
+        } else {
+            legacy.as_str()
+        };
+        layout.with_settings(namespace, &tasks.branch)
+    }
+
+    /// This layout with the resolved workflow values applied.
+    #[must_use]
+    pub fn for_tasks(self, tasks: &Tasks) -> Self {
+        self.with_settings(&tasks.archive_namespace, &tasks.branch)
+    }
+
+    /// This layout with the settings' namespace (`tasks.archive_namespace`) and
+    /// branch pattern (`tasks.branch`) applied.
+    ///
+    /// A namespace that does not end in `/` gets one, and an empty one keeps the
+    /// current namespace, so the janitor can never be handed a prefix that
+    /// matches branches shprd did not make. A pattern git could not take as part
+    /// of a branch name is ignored, and the plain `<run>/<task>` name stands.
+    #[must_use]
+    pub fn with_settings(mut self, namespace: &str, pattern: &str) -> Self {
+        let namespace = namespace.trim();
+        if !namespace.is_empty() {
+            self.namespace = if namespace.ends_with('/') {
+                namespace.to_owned()
+            } else {
+                format!("{namespace}/")
+            };
+        }
+        let pattern = pattern.trim();
+        self.pattern = valid_pattern(pattern).then(|| pattern.to_owned());
+        self
+    }
+
+    /// The branch a task attempt commits on: `<namespace><pattern>`, which is
+    /// `<namespace><run>/<task>` when no pattern is set.
+    ///
+    /// `{n}` is the last run of digits in the task id (the whole id when it has
+    /// none) and `{slug}` is the id lowercased with every other character a `-`,
+    /// so the name follows from the ids alone and the janitor can recompute it.
     pub fn branch_name(&self, run: &str, task: &str) -> String {
-        format!("{}{run}/{task}", self.namespace)
+        let Some(pattern) = &self.pattern else {
+            return format!("{}{run}/{task}", self.namespace);
+        };
+        let reversed: String = task
+            .chars()
+            .rev()
+            .skip_while(|c| !c.is_ascii_digit())
+            .take_while(char::is_ascii_digit)
+            .collect();
+        let digits: String = reversed.chars().rev().collect();
+        let n = if digits.is_empty() { task } else { &digits };
+        let slug: String = task
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() {
+                    c.to_ascii_lowercase()
+                } else {
+                    '-'
+                }
+            })
+            .collect();
+        let name = pattern
+            .replace("{run}", run)
+            .replace("{task}", task)
+            .replace("{n}", n)
+            .replace("{slug}", &slug);
+        format!("{}{name}", self.namespace)
     }
 
     /// The directory a task attempt works in:
@@ -49,6 +147,36 @@ impl Layout {
     pub fn owns_branch(&self, branch: &str) -> bool {
         branch.starts_with(&self.namespace)
     }
+}
+
+/// True when `pattern` can be the tail of a branch name once its tokens are
+/// filled in: non-empty, no whitespace or characters git refuses, no empty,
+/// dotted or `.lock` components, and a `{task}` or `{slug}` so two tasks never
+/// share a branch.
+fn valid_pattern(pattern: &str) -> bool {
+    if pattern.is_empty() || pattern.starts_with('/') || pattern.ends_with('/') {
+        return false;
+    }
+    if pattern.contains("..") || pattern.contains("//") || pattern.contains("@{") {
+        return false;
+    }
+    // Two tasks must never share a branch: the id or its slug has to be in the
+    // name (`{n}` alone is the same for `T1` and `SHPR-1`).
+    if !pattern.contains("{task}") && !pattern.contains("{slug}") {
+        return false;
+    }
+    let mut rest = pattern.to_owned();
+    for token in ["{run}", "{task}", "{n}", "{slug}"] {
+        rest = rest.replace(token, "x");
+    }
+    if rest
+        .chars()
+        .any(|c| c.is_whitespace() || c.is_control() || "~^:?*[\\{}".contains(c))
+    {
+        return false;
+    }
+    rest.split('/')
+        .all(|part| !part.starts_with('.') && !part.ends_with('.') && !part.ends_with(".lock"))
 }
 
 /// A worktree shprd created.
@@ -243,9 +371,56 @@ pub fn ensure_state_excluded(worktree: &Path) -> Result<(), WorktreeError> {
 /// Whether the repository has a remote a landing could push to.
 ///
 /// A repository with no remote lands locally: its task branches are merged into
-/// the run's integration branch in shprd's own worktree, and nothing is pushed.
+/// the run's integration branch in shprd's own worktree.
 pub fn has_remote(git: &Git) -> bool {
     remote_of(git).is_some()
+}
+
+/// The host each of the repository's remotes points at, in `git remote` order.
+///
+/// A remote that is a path, a `file://` URL or anything else without a host
+/// (a local bare repository, say) has no entry: there is no forge behind it.
+pub fn remote_hosts(git: &Git) -> Vec<String> {
+    let Ok(names) = git.run(&["remote"]) else {
+        return Vec::new();
+    };
+    let mut hosts = Vec::new();
+    for name in names.lines().map(str::trim).filter(|name| !name.is_empty()) {
+        let Ok(url) = git.run(&["remote", "get-url", name]) else {
+            continue;
+        };
+        if let Some(host) = host_of_url(&url)
+            && !hosts.contains(&host)
+        {
+            hosts.push(host);
+        }
+    }
+    hosts
+}
+
+/// The host of a git remote URL, lower-cased: `https://h/…`, `ssh://git@h/…` or
+/// scp-style `git@h:owner/repo`. A path or `file://` URL has none.
+pub fn host_of_url(url: &str) -> Option<String> {
+    let url = url.trim();
+    let authority = if let Some((scheme, rest)) = url.split_once("://") {
+        if scheme.eq_ignore_ascii_case("file") {
+            return None;
+        }
+        rest.split('/').next()?
+    } else if url.starts_with('/') || url.starts_with('.') || url.starts_with('~') {
+        return None;
+    } else {
+        // scp-style: `[user@]host:path`; a colon must come before any slash.
+        let (host_part, _) = url.split_once(':')?;
+        if host_part.contains('/') {
+            return None;
+        }
+        host_part
+    };
+    let host = authority.rsplit('@').next()?;
+    let host = host.split(':').next()?.trim().to_ascii_lowercase();
+    // A Windows drive letter (`C:\repo`) is a path, not a host.
+    (host.len() > 1 && !host.is_empty()).then_some(host)
 }
 
 /// The remote a landing fetches from and pushes to: `origin` when the
@@ -299,7 +474,9 @@ pub fn fresh_start(git: &Git, base: &str) -> String {
     let behind = git
         .run(&["merge-base", "--is-ancestor", base, &tracking])
         .is_ok();
-    if behind {
+    // With a forge, origin is the truth even when the local ref has commits of
+    // its own: those are a landing that never reached the forge.
+    if behind || crate::land::forge_expected(git) {
         format!("{remote}/{base}")
     } else {
         base.to_string()
@@ -349,7 +526,7 @@ pub fn remove_worktree_only(
             root: layout.root.clone(),
         });
     }
-    if path.exists() && !Git::new(path).is_clean()? && !force {
+    if !force && path.exists() && !Git::new(path).is_clean()? {
         return Err(WorktreeError::Dirty {
             path: path.to_path_buf(),
         });
@@ -361,7 +538,23 @@ pub fn remove_worktree_only(
         args.push("--force");
     }
     args.push(&path_text);
-    git.run(&args)?;
+    if let Err(err) = git.run(&args) {
+        // `git worktree remove` fails half-way when something is still writing
+        // into the tree (a build's output, a process that has not quit) and says
+        // the directory is not empty, or when the directory is already gone and
+        // only git's record is left. Both are finished by hand: a forced removal
+        // deletes the folder itself, and either way git's record is pruned.
+        if !force && path.exists() {
+            return Err(err.into());
+        }
+        if path.exists() && std::fs::remove_dir_all(path).is_err() {
+            return Err(err.into());
+        }
+        git.run(&["worktree", "prune"])?;
+        if path.exists() {
+            return Err(err.into());
+        }
+    }
     Ok(())
 }
 
@@ -383,6 +576,25 @@ pub fn delete_branch(repo: &Path, layout: &Layout, branch: &str) -> Result<(), W
     }
     git.run(&["branch", "-D", branch])?;
     Ok(())
+}
+
+/// The worktree that has `branch` checked out, when one does.
+///
+/// Git lets a branch be checked out in one worktree at a time, the person's own
+/// checkout included, so this is where shprd looks before it needs the branch
+/// for itself. `None` when no worktree holds it, or when git cannot say.
+pub fn checked_out_at(git: &Git, branch: &str) -> Option<PathBuf> {
+    let listing = git.run(&["worktree", "list", "--porcelain"]).ok()?;
+    let wanted = format!("refs/heads/{branch}");
+    let mut path: Option<PathBuf> = None;
+    for line in listing.lines() {
+        if let Some(found) = line.strip_prefix("worktree ") {
+            path = Some(PathBuf::from(found));
+        } else if line.strip_prefix("branch ") == Some(wanted.as_str()) {
+            return path;
+        }
+    }
+    None
 }
 
 /// Rejects an id that is empty, uses anything but `[A-Za-z0-9._-]`, or
@@ -464,6 +676,192 @@ fn path_string(path: &Path) -> Result<String, WorktreeError> {
     }
 }
 
+/// How one `tasks.worktree_files` entry reaches a worktree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SeedMode {
+    /// The file is copied, so the worker's edits stay in its worktree.
+    Copy,
+    /// The file is a symlink to the main checkout's, so both see one file.
+    Link,
+}
+
+/// One parsed `tasks.worktree_files` entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SeedEntry {
+    /// The path relative to the repository root.
+    pub path: String,
+    /// Whether it is copied or linked.
+    pub mode: SeedMode,
+}
+
+/// What seeding one entry did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SeedOutcome {
+    /// The entry reached the worktree.
+    Placed(SeedEntry),
+    /// The entry did not, for the reason given; the worker will not see it.
+    Skipped(SeedEntry, String),
+}
+
+/// Reads a `tasks.worktree_files` value: entries separated by newlines or
+/// commas, a leading `link:` making an entry a symlink rather than a copy.
+/// Blank entries are dropped.
+pub fn parse_seed_entries(text: &str) -> Vec<SeedEntry> {
+    text.split(['\n', ','])
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| match entry.strip_prefix("link:") {
+            Some(path) => SeedEntry {
+                path: path.trim().to_owned(),
+                mode: SeedMode::Link,
+            },
+            None => SeedEntry {
+                path: entry.to_owned(),
+                mode: SeedMode::Copy,
+            },
+        })
+        .collect()
+}
+
+/// Why `path` may not be seeded, or [`None`] when it may: it must stay inside
+/// the repository and clear of git's and shprd's own directories.
+fn seed_refusal(path: &str) -> Option<&'static str> {
+    let path = Path::new(path);
+    let mut first = true;
+    for part in path.components() {
+        match part {
+            std::path::Component::Normal(name) => {
+                // `.git` is refused at any depth (a nested repository's
+                // metadata); shprd's own directories only at the top.
+                if name == ".git" || (first && (name == ".shprd" || name == ".dagr")) {
+                    return Some("a state directory is never seeded");
+                }
+            }
+            std::path::Component::CurDir => continue,
+            _ => return Some("the path must be relative and stay inside the repository"),
+        }
+        first = false;
+    }
+    if path.as_os_str().is_empty() {
+        return Some("the path is empty");
+    }
+    None
+}
+
+/// Copies a file or a directory tree.
+fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
+    if from.is_dir() {
+        std::fs::create_dir_all(to)?;
+        for entry in std::fs::read_dir(from)? {
+            let entry = entry?;
+            copy_tree(&entry.path(), &to.join(entry.file_name()))?;
+        }
+        Ok(())
+    } else {
+        std::fs::copy(from, to).map(|_| ())
+    }
+}
+
+/// Copies or links the `entries` from the main checkout `repo` into
+/// `worktree` (`tasks.worktree_files`).
+///
+/// An entry that is missing in the main checkout, already present in the
+/// worktree (a tracked file wins), outside the repository, or that cannot be
+/// written is skipped with its reason and never fails the spawn.
+pub fn seed_files(repo: &Path, worktree: &Path, entries: &[SeedEntry]) -> Vec<SeedOutcome> {
+    entries
+        .iter()
+        .map(|entry| {
+            let skip = |why: String| SeedOutcome::Skipped(entry.clone(), why);
+            if let Some(why) = seed_refusal(&entry.path) {
+                return skip(why.to_owned());
+            }
+            let from = repo.join(&entry.path);
+            let to = worktree.join(&entry.path);
+            if std::fs::symlink_metadata(&from).is_err() {
+                return skip("it is not in the main checkout".to_owned());
+            }
+            if std::fs::symlink_metadata(&to).is_ok() {
+                return skip("the worktree already has it".to_owned());
+            }
+            if let Some(parent) = to.parent()
+                && let Err(err) = std::fs::create_dir_all(parent)
+            {
+                return skip(format!("cannot make {}: {err}", parent.display()));
+            }
+            let placed = match entry.mode {
+                SeedMode::Copy => copy_tree(&from, &to),
+                #[cfg(unix)]
+                SeedMode::Link => std::os::unix::fs::symlink(&from, &to),
+                #[cfg(not(unix))]
+                SeedMode::Link => copy_tree(&from, &to),
+            };
+            match placed {
+                Ok(()) => SeedOutcome::Placed(entry.clone()),
+                Err(err) => skip(err.to_string()),
+            }
+        })
+        .collect()
+}
+
+/// The untracked and git-ignored paths of `repo` that any of `texts` (a task's
+/// scope and words) names, minus those `seeded` already provides.
+///
+/// A worker's worktree is cut from a branch, so these are silently absent
+/// there. A directory is listed whole (`docs/`) and matches a text that names
+/// anything beneath it. Returns an empty list when git cannot say.
+pub fn unseen_mentions(repo: &Path, texts: &[&str], seeded: &[SeedEntry]) -> Vec<String> {
+    let git = Git::new(repo);
+    let mut found: Vec<String> = Vec::new();
+    for ignored in [false, true] {
+        let mut args = vec!["ls-files", "--others", "--exclude-standard", "--directory"];
+        if ignored {
+            args.push("--ignored");
+        }
+        let Ok(listed) = git.run(&args) else {
+            continue;
+        };
+        for path in listed
+            .lines()
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+        {
+            if found.iter().any(|known| known == path) {
+                continue;
+            }
+            let bare = path.trim_end_matches('/');
+            let covered = seeded.iter().any(|entry| {
+                let entry = entry.path.trim_end_matches('/');
+                bare == entry || bare.starts_with(&format!("{entry}/"))
+            });
+            if !covered && texts.iter().any(|text| names_path(text, path)) {
+                found.push(path.to_owned());
+            }
+        }
+    }
+    found
+}
+
+/// Whether `text` names `path`: the whole path, not the tail of a longer one.
+fn names_path(text: &str, path: &str) -> bool {
+    let word = |c: char| c.is_alphanumeric() || matches!(c, '_' | '-' | '.' | '/');
+    // A directory path ends in `/`, which is its own boundary.
+    let dir = path.ends_with('/');
+    text.match_indices(path).any(|(at, _)| {
+        let before = text[..at].chars().next_back().is_none_or(|c| !word(c));
+        let rest = &text[at + path.len()..];
+        let mut chars = rest.chars();
+        let after = dir
+            || match chars.next() {
+                None => true,
+                // a sentence's full stop is not part of the name
+                Some('.') => chars.next().is_none_or(|c| !word(c)),
+                Some(c) => !word(c),
+            };
+        before && after
+    })
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -498,6 +896,72 @@ mod tests {
             .run(&["rev-parse", "--git-path", "info/exclude"])
             .expect("git path");
         repo.join(listed.trim())
+    }
+
+    #[test]
+    fn seed_refusal_covers_nested_git_and_names_path_trailing_boundary() {
+        assert!(seed_refusal("vendor/repo/.git/config").is_some());
+        assert!(seed_refusal("config/.env").is_none());
+        assert!(names_path("edit .env now", ".env"));
+        assert!(names_path("see .env.", ".env"));
+        assert!(!names_path("edit .env.bak", ".env"));
+        assert!(!names_path("in secrets2/x", "secrets/"));
+        assert!(names_path("in secrets/x", "secrets/"));
+    }
+
+    #[test]
+    fn worktree_files_are_copied_and_linked_into_a_new_worktree() {
+        let (repo, home) = fixture();
+        std::fs::write(repo.path().join(".gitignore"), ".env\nsecrets/\n").unwrap();
+        let git = Git::new(repo.path());
+        git.run(&["add", ".gitignore"]).unwrap();
+        git.run(&["commit", "-m", "ignore"]).unwrap();
+        std::fs::write(repo.path().join(".env"), "KEY=1\n").unwrap();
+        std::fs::create_dir_all(repo.path().join("secrets")).unwrap();
+        std::fs::write(repo.path().join("secrets/a.txt"), "a").unwrap();
+        let layout = Layout::default_for_home(home.path());
+        let created = create(repo.path(), &layout, "m9", "T1", "main").unwrap();
+        let entries = parse_seed_entries(".env\nlink:secrets, missing.txt,../escape, calc.py");
+        let outcomes = seed_files(repo.path(), &created.path, &entries);
+        assert_eq!(outcomes.len(), 5);
+        assert!(matches!(outcomes[0], SeedOutcome::Placed(_)));
+        assert!(matches!(outcomes[1], SeedOutcome::Placed(_)));
+        assert!(
+            matches!(&outcomes[2], SeedOutcome::Skipped(_, why) if why.contains("main checkout"))
+        );
+        assert!(matches!(&outcomes[3], SeedOutcome::Skipped(_, why) if why.contains("inside")));
+        assert!(matches!(&outcomes[4], SeedOutcome::Skipped(_, why) if why.contains("already")));
+        let env = created.path.join(".env");
+        assert!(!env.is_symlink());
+        assert_eq!(std::fs::read_to_string(env).unwrap(), "KEY=1\n");
+        let linked = created.path.join("secrets");
+        assert!(linked.is_symlink());
+        assert_eq!(std::fs::read_to_string(linked.join("a.txt")).unwrap(), "a");
+        assert!(!created.path.parent().unwrap().join("escape").exists());
+    }
+
+    #[test]
+    fn untracked_and_ignored_files_a_task_names_are_listed() {
+        let (repo, _home) = fixture();
+        std::fs::write(repo.path().join(".gitignore"), ".env\n").unwrap();
+        let git = Git::new(repo.path());
+        git.run(&["add", ".gitignore"]).unwrap();
+        git.run(&["commit", "-m", "ignore"]).unwrap();
+        std::fs::write(repo.path().join(".env"), "K=1").unwrap();
+        std::fs::create_dir_all(repo.path().join("docs")).unwrap();
+        std::fs::write(repo.path().join("docs/new.md"), "x").unwrap();
+        std::fs::write(repo.path().join("other.txt"), "x").unwrap();
+        let texts = ["read docs/new.md and run with .env", "calc.py"];
+        let none: Vec<SeedEntry> = Vec::new();
+        let mut found = unseen_mentions(repo.path(), &texts, &none);
+        found.sort();
+        assert_eq!(found, vec![".env".to_owned(), "docs/".to_owned()]);
+        let seeded = parse_seed_entries(".env");
+        assert_eq!(
+            unseen_mentions(repo.path(), &texts, &seeded),
+            vec!["docs/".to_owned()]
+        );
+        assert!(unseen_mentions(repo.path(), &["myother.txt"], &none).is_empty());
     }
 
     #[test]
@@ -604,5 +1068,48 @@ mod tests {
         assert!(text.contains("# mine\n*.local\n"), "{text}");
         assert!(text.contains("/.shprd/"), "{text}");
         assert!(text.contains("/.dagr/"), "{text}");
+    }
+
+    #[test]
+    fn the_branch_pattern_and_namespace_name_the_branch_and_the_worktree_uses_it() {
+        let (repo, home) = fixture();
+        let layout = Layout::default_for_home(home.path()).with_settings("work", "task/{n}-{slug}");
+        assert_eq!(layout.branch_name("m9", "SHPR-24"), "work/task/24-shpr-24");
+        let created = create(repo.path(), &layout, "m9", "SHPR-24", "main").expect("a worktree");
+        assert_eq!(created.branch, "work/task/24-shpr-24");
+        assert!(layout.owns_branch(&created.branch));
+        // Unset, the name is what it always was.
+        let plain = Layout::default_for_home(home.path()).with_settings("", "");
+        assert_eq!(plain.branch_name("m9", "T1"), "shprd/m9/T1");
+    }
+
+    #[test]
+    fn a_hyphenated_prefix_id_makes_a_branch_and_a_worktree() {
+        let (repo, home) = fixture();
+        let layout = Layout::default_for_home(home.path());
+        assert_eq!(layout.branch_name("m11", "SHP-12"), "shprd/m11/SHP-12");
+        let created = create(repo.path(), &layout, "m11", "SHP-12", "main").expect("a worktree");
+        assert_eq!(created.branch, "shprd/m11/SHP-12");
+        assert!(created.path.ends_with("SHP-12"), "{:?}", created.path);
+        assert!(layout.owns_branch(&created.branch));
+    }
+
+    #[test]
+    fn a_pattern_git_would_refuse_is_ignored() {
+        for bad in [
+            "a b",
+            "x..y",
+            "/x",
+            "x/",
+            "a:{task}",
+            "{task}.lock",
+            "a~{task}",
+            "fixed",
+            "{n}",
+            "{run}",
+        ] {
+            let layout = Layout::default_for_home("/h").with_settings("shprd/", bad);
+            assert_eq!(layout.branch_name("r", "T1"), "shprd/r/T1", "{bad}");
+        }
     }
 }

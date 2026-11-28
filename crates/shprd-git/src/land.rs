@@ -28,8 +28,9 @@
 //! A repository with no remote, or with no forge to drive, lands through
 //! [`land_local`] instead: the same checks and the same merge policy, but the
 //! task's branch is merged into the run's integration branch inside shprd's own
-//! integration worktree. Nothing is pushed and the user's checkout is never
-//! touched.
+//! integration worktree. The user's checkout is never touched. The merge is
+//! pushed afterwards only to a remote that is not GitHub, and only as a courtesy:
+//! a refusal leaves the merge standing.
 
 use std::path::Path;
 
@@ -41,7 +42,7 @@ use shprd_core::event::LandOutcome;
 use crate::forge::{Forge, ForgeError, Pr};
 use crate::git::{Git, GitError};
 use crate::integrate::IntegrationWorktree;
-use crate::worktree::remote_of;
+use crate::worktree::{remote_hosts, remote_of};
 
 /// The remote named when a repository has none to pick from: every failure
 /// then says which remote git could not reach.
@@ -318,6 +319,9 @@ pub enum LandError {
         commit: String,
         /// The files git reported as unmerged.
         files: Vec<String>,
+        /// The pull request that carries the stale branch, when the conflict
+        /// was found on a forge landing; a local landing has none.
+        pr: Option<u64>,
     },
     /// A failed merge could not be undone, so the integration branch is not
     /// where the caller may assume it is.
@@ -326,6 +330,122 @@ pub enum LandError {
         /// The head that should have been restored.
         expected: String,
     },
+}
+
+impl LandError {
+    /// The failure's real cause for a log or a record: the command, its exit
+    /// code and the last lines of its stderr, never shown to a person.
+    pub fn cause(&self) -> String {
+        tail_lines(&self.to_string())
+    }
+
+    /// The failure as one plain sentence a person can read: no command line, no
+    /// forge advice, no "run X".
+    pub fn plain(&self, task: &str) -> String {
+        if matches!(self, LandError::Conflict { .. }) {
+            return conflict_words(task);
+        }
+        let reason = match self {
+            LandError::Git(_) => String::from("git could not finish the merge"),
+            LandError::Forge(ForgeError::Failed { stderr, .. }) => forge_reason(stderr),
+            LandError::Forge(_) => String::from("the code host could not be reached"),
+            LandError::HeadMoved { .. } => {
+                String::from("the task changed after it was accepted, so it needs accepting again")
+            }
+            LandError::NotMerged { .. } => String::from("the code host did not confirm the merge"),
+            LandError::ChecksFailed { .. } => String::from("its checks failed"),
+            LandError::Dirty { .. } => {
+                String::from("the integration branch has changes nobody saved")
+            }
+            LandError::Conflict { .. } => conflict_words(task),
+            LandError::NotRestored { .. } => {
+                String::from("a failed merge could not be undone cleanly")
+            }
+        };
+        format!("Couldn't merge {task}: {reason}")
+    }
+}
+
+/// What a person is told when a task's branch clashes with work that landed
+/// after it was cut: the cause, and that it is already being put right.
+pub fn conflict_words(task: &str) -> String {
+    format!(
+        "{task} clashed with work that landed after it; it is being redone on top of the latest"
+    )
+}
+
+/// How many trailing lines of a failure's own text a record keeps.
+const CAUSE_LINES: usize = 20;
+
+/// The last [`CAUSE_LINES`] lines of `text`: what a record keeps of a command's
+/// complaint, so one failure cannot fill a file.
+pub fn tail_lines(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let from = lines.len().saturating_sub(CAUSE_LINES);
+    lines[from..].join("\n")
+}
+
+/// The finding a clashing landing records on the failed `integrate` gate: the
+/// part of the new attempt's brief that says to carry the earlier commits over
+/// and resolve these files. `files` empty means the forge said so without
+/// naming any.
+pub fn conflict_finding(base: &str, files: &[String]) -> shprd_core::event::Finding {
+    let which = if files.is_empty() {
+        String::from("the files it touches")
+    } else {
+        files.join(", ")
+    };
+    shprd_core::event::Finding {
+        severity: shprd_core::event::Severity::Major,
+        title: String::from(
+            "clashed with work that landed after it; it is being redone on top of the latest",
+        ),
+        location: files.first().cloned(),
+        detail: format!(
+            "clashes with {base} in {which}. Bring the previous attempt's commits onto the \
+             latest {base} (merge it, or cherry-pick the archive named above), resolve \
+             keeping both sides' work, hand in again"
+        ),
+    }
+}
+
+/// What a forge client's own complaint comes to, in plain words.
+///
+/// The forge's own error is never swallowed: a complaint shprd cannot name
+/// (a missing repository, a read-only account) is shown as GitHub said it.
+fn forge_reason(stderr: &str) -> String {
+    let said = stderr.to_ascii_lowercase();
+    let real = forge_words(stderr);
+    if said.contains("known github host") || said.contains("not a github") {
+        String::from("this repository has no GitHub remote")
+    } else if said.contains("auth") || said.contains("log in") || said.contains("login") {
+        if real.is_empty() {
+            String::from("GitHub is not signed in on this machine")
+        } else {
+            format!("GitHub is not signed in on this machine (GitHub said: {real})")
+        }
+    } else if real.is_empty() {
+        String::from("GitHub did not accept it and gave no reason")
+    } else {
+        format!("GitHub said: {real}")
+    }
+}
+
+/// The most telling line of a forge client's stderr: the last non-empty one,
+/// with the `gh:` prefix, backticks and runs of spaces taken out, cut at 240
+/// characters. Empty when it said nothing.
+fn forge_words(stderr: &str) -> String {
+    let line = stderr
+        .lines()
+        .map(str::trim)
+        .rfind(|line| !line.is_empty())
+        .unwrap_or_default();
+    let line = line.strip_prefix("gh:").unwrap_or(line).replace('`', "");
+    let line = line.split_whitespace().collect::<Vec<_>>().join(" ");
+    match line.char_indices().nth(240) {
+        Some((at, _)) => format!("{}...", &line[..at]),
+        None => line,
+    }
 }
 
 /// A landing that found the work already in the base cannot be told apart from
@@ -401,8 +521,107 @@ pub fn land(
     };
     match reason {
         Some(reason) => Ok(Landed::Waiting { pr, reason, head }),
-        None => merge_now(forge, pr, head),
+        None => {
+            // A branch that clashes with what landed after it can never merge:
+            // say so, with the files, rather than let the forge refuse it.
+            if let Some(files) = trial_conflicts(git, &base, &head) {
+                return Err(LandError::Conflict {
+                    commit: head,
+                    files,
+                    pr: Some(pr.number),
+                });
+            }
+            let number = pr.number;
+            match merge_now(forge, pr, head.clone()) {
+                Err(LandError::Forge(refused)) => {
+                    // The forge works out "mergeable" lazily, so a refusal is
+                    // the moment it may finally know.
+                    match clash(forge, git, &base, number, &head) {
+                        Some(files) => Err(LandError::Conflict {
+                            commit: head,
+                            files,
+                            pr: Some(number),
+                        }),
+                        None => Err(LandError::Forge(refused)),
+                    }
+                }
+                other => other,
+            }
+        }
     }
+}
+
+/// The files `head` would conflict in against `base`, when it would: a trial
+/// merge git runs without a worktree, or else the forge's own word that the
+/// pull request conflicts (then no file is known). `None` means it merges
+/// cleanly, or that nobody can say.
+fn clash(forge: &dyn Forge, git: &Git, base: &str, number: u64, head: &str) -> Option<Vec<String>> {
+    trial_conflicts(git, base, head)
+        .or_else(|| (forge.mergeable(number).ok().flatten() == Some(false)).then(Vec::new))
+}
+
+/// The ref `branch` would clash with if it landed on `base` now, and the files
+/// it would conflict in, or `None` when it merges cleanly or git cannot tell.
+///
+/// It is asked before a review is requested, so a task that clashes with work
+/// that landed after it was cut goes back at once, before any review round or
+/// Accept is spent on it. The base is the freshest one known: the local ref and
+/// `origin/<base>` (fetched first, best effort) are both tried, so a landing
+/// merged on the forge is not missed. The ref is the one the worker has to
+/// bring its work onto: `origin/<base>` when only the forge holds the landing.
+pub fn clash_before_review(
+    repo: &std::path::Path,
+    base: &str,
+    branch: &str,
+) -> Option<(String, Vec<String>)> {
+    let git = Git::new(repo);
+    crate::sync::refresh_base(&git, base);
+    let tracking = format!("refs/remotes/{}", crate::sync::remote_ref(base));
+    let mut bases = vec![base.to_string()];
+    if git
+        .run(&[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{tracking}^{{commit}}"),
+        ])
+        .is_ok()
+    {
+        bases.push(tracking);
+    }
+    bases.into_iter().find_map(|candidate| {
+        let files = trial_conflicts(&git, &candidate, branch)?;
+        let named = candidate
+            .strip_prefix("refs/remotes/")
+            .map_or_else(|| candidate.clone(), str::to_string);
+        Some((named, files))
+    })
+}
+
+/// The files a merge of `head` into `base` would leave unmerged, found with
+/// `git merge-tree`, which writes objects but touches no worktree and no ref.
+/// `None` when the merge is clean or git could not tell.
+fn trial_conflicts(git: &Git, base: &str, head: &str) -> Option<Vec<String>> {
+    let mut command = std::process::Command::new("git");
+    command
+        .args(["merge-tree", "--write-tree", "--name-only", base, head])
+        .current_dir(git.dir())
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("LC_ALL", "C")
+        .stdin(std::process::Stdio::null());
+    let output = shprd_core::spawn::output(&mut command).ok()?;
+    if output.status.code() != Some(1) {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    // The first line is the tree; the unmerged names follow until a blank line.
+    Some(
+        text.lines()
+            .skip(1)
+            .take_while(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect(),
+    )
 }
 
 /// Lands one task into its integration branch, with no forge involved.
@@ -463,7 +682,92 @@ pub fn land_local(
         return Ok(LocalLanded::Waiting { reason, head });
     }
     let merged = merge_local(&git, &base, &head, landing)?;
+    push_integration(&git, landing.base);
     Ok(LocalLanded::Merged { head: merged })
+}
+
+/// Pushes the integration branch to the repository's remote, when it has one.
+///
+/// Best effort and never forced: a repository with no remote has nothing to
+/// push to, and a remote that refuses (a diverged branch, a hook, no network)
+/// leaves the merge where it is, because the merge is already the person's
+/// decision and is recorded locally. Nothing here is an error.
+fn push_integration(git: &Git, branch: &str) {
+    let Some(remote) = remote_of(git) else {
+        return;
+    };
+    // A GitHub remote without a signed-in client lands locally too, and the
+    // person never agreed to put the integration branch on GitHub that way.
+    let to_github = git
+        .run(&["remote", "get-url", &remote])
+        .ok()
+        .and_then(|url| crate::worktree::host_of_url(&url))
+        .is_some_and(|host| host.contains("github"));
+    if to_github {
+        return;
+    }
+    let _ = git.run(&["push", &remote, &format!("HEAD:refs/heads/{branch}")]);
+}
+
+/// Whether the repository has a remote at a GitHub host, or at a host `gh` is
+/// signed in for, where a landing must go through the forge whether or not
+/// `gh` answers right now.
+///
+/// A landing that cannot reach the forge fails; it never falls back to merging
+/// in a local worktree, which moves the local integration ref apart from the
+/// remote's.
+pub fn forge_expected(git: &Git) -> bool {
+    forge_expected_with(git, |host| gh_authed(git.dir(), host))
+}
+
+/// [`forge_expected`] with the forge-client check given: a GitHub remote always
+/// counts; a remote at any other host counts when `authed` says a forge client
+/// can drive that host. `authed` is never asked for a GitHub host.
+pub fn forge_expected_with(git: &Git, authed: impl Fn(&str) -> bool) -> bool {
+    // The configured URL, not `get-url`: a `url.<base>.insteadOf` rewrite is
+    // a transport detail, and the remote still names GitHub.
+    let Ok(names) = git.run(&["remote"]) else {
+        return false;
+    };
+    let hosts: Vec<String> = names
+        .lines()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .filter_map(|name| {
+            git.run(&["config", "--get", &format!("remote.{name}.url")])
+                .ok()
+        })
+        .filter_map(|url| crate::worktree::host_of_url(&url))
+        .map(|host| host.to_ascii_lowercase())
+        .collect();
+    hosts.iter().any(|host| host.contains("github")) || hosts.iter().any(|host| authed(host))
+}
+
+/// Whether `gh` is installed and signed in for `host`, asked in `dir`.
+///
+/// `gh auth status` answers from the local configuration, so it makes no
+/// network call; anything it cannot answer counts as "no forge".
+pub fn gh_authed(dir: &Path, host: &str) -> bool {
+    std::process::Command::new("gh")
+        .args(["auth", "status", "--hostname", host])
+        .current_dir(dir)
+        .env("GH_PROMPT_DISABLED", "1")
+        .env("LC_ALL", "C")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// Whether landing in `git`'s repository goes through a forge's pull request.
+///
+/// Only a remote at a host `authed` says a forge client can drive counts:
+/// a repository with no remote, a remote that is a local path or a bare
+/// repository, or one at a host the forge client does not know, lands locally.
+/// `authed` is asked once per distinct remote host, never for a hostless remote.
+pub fn uses_forge(git: &Git, authed: impl Fn(&str) -> bool) -> bool {
+    remote_hosts(git).iter().any(|host| authed(host))
 }
 
 /// Merges `head` into the integration worktree, fast-forwarding when it can.
@@ -522,6 +826,7 @@ fn undo_failed_merge(git: &Git, base: &str, commit: &str) -> LandError {
     LandError::Conflict {
         commit: commit.to_string(),
         files,
+        pr: None,
     }
 }
 
@@ -1454,5 +1759,168 @@ mod tests {
             other_head,
             "the task's branch was never touched"
         );
+    }
+
+    #[test]
+    fn a_repo_with_no_remote_uses_no_forge() {
+        let fixture = LocalFixture::new("the task's work\n");
+        let git = Git::new(&fixture.root);
+        assert!(!uses_forge(&git, |host| panic!("asked about {host}")));
+    }
+
+    #[test]
+    fn a_local_bare_remote_uses_no_forge_and_never_asks_one() {
+        let fixture = Fixture::new("shprd/r1/T1");
+        let git = Git::new(&fixture.root);
+        assert!(!uses_forge(&git, |host| panic!("asked about {host}")));
+    }
+
+    #[test]
+    fn a_non_github_url_uses_no_forge() {
+        let fixture = Fixture::new("shprd/r1/T1");
+        let git = Git::new(&fixture.root);
+        fixture.git(&["remote", "set-url", "origin", "git@git.example.org:o/r.git"]);
+        let asked = std::cell::RefCell::new(Vec::new());
+        let forge = uses_forge(&git, |host| {
+            asked.borrow_mut().push(host.to_string());
+            false
+        });
+        assert!(!forge);
+        assert_eq!(asked.into_inner(), vec!["git.example.org".to_string()]);
+    }
+
+    #[test]
+    fn a_github_remote_keeps_the_pull_request_path() {
+        let fixture = Fixture::new("shprd/r1/T1");
+        let git = Git::new(&fixture.root);
+        fixture.git(&["remote", "set-url", "origin", "https://github.com/o/r.git"]);
+        assert!(uses_forge(&git, |host| host == "github.com"));
+        // Not signed in: nothing can drive it, so it lands locally.
+        assert!(!uses_forge(&git, |_| false));
+    }
+
+    #[test]
+    fn remote_urls_are_read_for_their_host() {
+        use crate::worktree::host_of_url;
+        assert_eq!(
+            host_of_url("https://GitHub.com/o/r"),
+            Some("github.com".into())
+        );
+        assert_eq!(
+            host_of_url("ssh://git@ghe.corp:2222/o/r"),
+            Some("ghe.corp".into())
+        );
+        assert_eq!(
+            host_of_url("git@github.com:o/r.git"),
+            Some("github.com".into())
+        );
+        assert_eq!(host_of_url("/Users/x/scratchpad-remote.git"), None);
+        assert_eq!(host_of_url("../remote.git"), None);
+        assert_eq!(host_of_url("file:///tmp/remote.git"), None);
+        assert_eq!(host_of_url("C:\\repos\\r"), None);
+    }
+
+    #[test]
+    fn a_land_failure_reads_as_one_plain_sentence() {
+        let raw = LandError::Forge(ForgeError::Failed {
+            args: vec!["pr".into(), "list".into(), "--head".into(), "x".into()],
+            code: Some(1),
+            stderr: "none of the git remotes configured for this repository point to a known GitHub host. To tell gh about a new GitHub host, please use `gh auth login`".into(),
+        });
+        let line = raw.plain("T1");
+        assert_eq!(
+            line,
+            "Couldn't merge T1: this repository has no GitHub remote"
+        );
+        let conflict = LandError::Conflict {
+            commit: "abc".into(),
+            files: vec!["a".into(), "b".into()],
+            pr: None,
+        };
+        assert_eq!(
+            conflict.plain("T2"),
+            "T2 clashed with work that landed after it; it is being redone on top of the latest"
+        );
+        for text in [line, conflict.plain("T2")] {
+            assert!(
+                !text.contains('`') && !text.contains("gh ") && !text.contains("run "),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_land_failure_shows_the_forges_own_words() {
+        for said in [
+            "GraphQL: Could not resolve to a Repository with the name 'o/r'. (repository)",
+            "pull request create failed: GraphQL: o (createPullRequest)\nmust be a collaborator (createPullRequest)",
+        ] {
+            let line = LandError::Forge(ForgeError::Failed {
+                args: vec!["pr".into(), "create".into()],
+                code: Some(1),
+                stderr: said.into(),
+            })
+            .plain("T1");
+            let last = said.lines().last().unwrap_or_default();
+            assert!(line.contains(last), "{line}");
+            assert!(!line.contains("did not accept it"), "{line}");
+        }
+        let silent = LandError::Forge(ForgeError::Failed {
+            args: vec![],
+            code: Some(1),
+            stderr: String::new(),
+        })
+        .plain("T1");
+        assert!(silent.contains("gave no reason"), "{silent}");
+    }
+
+    #[test]
+    fn an_accepted_local_landing_is_pushed_to_a_remote_that_takes_it() {
+        let fixture = LocalFixture::new("the task's work\n");
+        let bare = fixture
+            .root
+            .parent()
+            .map(|p| p.join("remote.git"))
+            .unwrap_or_default();
+        fixture.git_in(
+            &fixture.root,
+            &["init", "--bare", "-q", bare.to_str().unwrap_or("")],
+        );
+        fixture.git_in(
+            &fixture.root,
+            &["remote", "add", "origin", bare.to_str().unwrap_or("")],
+        );
+        match land_local(
+            &fixture.int,
+            &fixture.landing("shprd/r1/T1"),
+            MergePolicy::Ask,
+            true,
+            true,
+        ) {
+            Ok(LocalLanded::Merged { .. }) => {}
+            other => panic!("expected a merge, got {other:?}"),
+        }
+        let there = fixture.git_in(&bare, &["rev-parse", "integration/m9"]);
+        assert_eq!(there, fixture.task_head);
+    }
+
+    #[test]
+    fn a_remote_that_refuses_the_push_does_not_undo_the_merge() {
+        let fixture = LocalFixture::new("the task's work\n");
+        fixture.git_in(
+            &fixture.root,
+            &["remote", "add", "origin", "/nonexistent/remote.git"],
+        );
+        match land_local(
+            &fixture.int,
+            &fixture.landing("shprd/r1/T1"),
+            MergePolicy::Ask,
+            true,
+            true,
+        ) {
+            Ok(LocalLanded::Merged { .. }) => {}
+            other => panic!("expected a merge, got {other:?}"),
+        }
+        assert_eq!(fixture.integration_head(), fixture.task_head);
     }
 }

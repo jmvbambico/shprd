@@ -137,10 +137,13 @@ sources = ["hook", "screen"]
 #   ────…
 #    ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents   ◐ medium · /effort
 #
-# so the placeholder prompt is the line. The trust dialog that comes first names
+# so the placeholder prompt is the line. The placeholder is a different example each
+# start (SHPR-28 saw `Try "refactor <filepath>"`) and "for agents" drops out of a
+# narrow pane (a thread's Terminal view is narrow), but the mode footer under the
+# prompt always ends `(shift+tab to cycle)` or `? for shortcuts`, so those count too. The trust dialog that comes first names
 # itself in [[blocking_prompts]] below, which is reported as blocked rather than
 # waited out.
-screen = ["Try \"how do I log an error?\"", "for agents"]
+screen = ["Try \"how do I log an error?\"", "for agents", "(shift+tab to cycle)", "? for shortcuts"]
 
 [asks]
 # Claude Code fires one `PermissionRequest` hook for a permission, a question
@@ -167,6 +170,24 @@ event = "PermissionRequest"
 kind = "plan"
 event = "PermissionRequest"
 
+# G5: Claude reports `blocked` for a permission or a question and does not report
+# again until its next status, so an answered prompt left the header and the
+# sidebar on "Needs you". These hooks write the status word to the agent's own
+# terminal (OSC 7501 through /dev/tty): a tool that runs after an answer says
+# working, a turn that ends says idle. PermissionRequest is never listed, so a
+# prompt that is still open stays blocked.
+# Checked for the others: pi and opencode have no ask hook (`supported = false`), so
+# nothing sets `blocked` for them and there is nothing to settle; Codex's only
+# hook is PermissionRequest and it reports no status of its own, so the status
+# word comes from its screen and clears when the prompt does.
+[[asks.settle]]
+event = "PostToolUse"
+state = "working"
+
+[[asks.settle]]
+event = "Stop"
+state = "idle"
+
 [records]
 kind = "jsonl"
 location = "~/.claude/projects/{cwd_slug}/{session}.jsonl"
@@ -192,3 +213,8 @@ project_dirs = []
 [[blocking_prompts]]
 name = "folder trust"
 pattern = "Is this a project you created or one you trust"
+# shprd launches a worker or reviewer in a folder it made itself, so the folder is the
+# person's own. The dialog opens on "No, exit" in current builds (older ones opened on
+# "Yes"), so shprd moves the highlight to the line naming this choice, then presses
+# Enter. Without it a worker sat on the dialog until someone opened its terminal.
+answer = "Yes, I trust this folder"

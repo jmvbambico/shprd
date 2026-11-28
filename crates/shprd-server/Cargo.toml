@@ -9,15 +9,18 @@ version.workspace = true
 [dependencies]
 axum.workspace = true
 futures-util.workspace = true
+rust-embed.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 shprd-agents = { path = "../shprd-agents" }
 shprd-core = { path = "../shprd-core" }
 shprd-git = { path = "../shprd-git" }
+shprd-remote = { path = "../shprd-remote" }
 shprd-views = { path = "../shprd-views" }
 shprd-watch = { path = "../shprd-watch" }
 thiserror.workspace = true
 tokio.workspace = true
+tower.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
 ts-rs.workspace = true
@@ -27,7 +30,7 @@ http-body-util.workspace = true
 rusqlite.workspace = true
 tempfile.workspace = true
 tokio-tungstenite.workspace = true
-tower.workspace = true
+ureq.workspace = true
 
 [lints]
 workspace = true

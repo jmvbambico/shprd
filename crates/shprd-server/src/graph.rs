@@ -22,6 +22,8 @@
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
+use serde_json::Value;
+
 /// The settings key that names the program.
 pub const SETTING: &str = "graph.dagr";
 
@@ -334,6 +336,98 @@ pub fn run_json(repo: &Path) -> PathBuf {
     repo.join(".dagr").join("run.json")
 }
 
+/// Why the run document could not be read.
+#[derive(Debug, thiserror::Error)]
+pub enum DocumentError {
+    /// Nothing has written the document yet.
+    ///
+    /// The service's post-write step writes it, so this is the answer for a run
+    /// that has just started (or a repository that has never run one), not a
+    /// failure: `GET /api/graph/run` says so with a `404`.
+    #[error("no run document yet: {path} is written after the run's first ledger write")]
+    Missing {
+        /// The file that is not there.
+        path: PathBuf,
+    },
+    /// The file exists but could not be read.
+    #[error("reading {path}: {source}")]
+    Io {
+        /// The file being read.
+        path: PathBuf,
+        /// The underlying I/O error.
+        #[source]
+        source: std::io::Error,
+    },
+    /// The file is not a dagr v3 run document.
+    ///
+    /// It is refused rather than answered: a client that draws a half-written or
+    /// hand-broken file would show a run that does not exist, and a person reading
+    /// it has no way to tell.
+    #[error("{path} is not a dagr run document: {why}")]
+    NotADocument {
+        /// The file that was read.
+        path: PathBuf,
+        /// What was wrong with it, in one line.
+        why: String,
+    },
+}
+
+/// Reads the document the window's graph block draws: `<repo>/.dagr/run.json`.
+///
+/// The file is answered **verbatim** (as parsed JSON), because it is the same
+/// document the desktop's block hands to `dagr view`: a second projection here
+/// would be a second answer to "what is this run", and the two could disagree.
+/// What this adds is the check — an object with a `dagr` version, a `run` with an
+/// `id`, and a `tasks` list — so a file that is not a run document is refused by
+/// the service rather than drawn as an empty graph by the page.
+///
+/// # Errors
+///
+/// [`DocumentError::Missing`] when no document has been written, and
+/// [`DocumentError::NotADocument`] when the file is not one.
+pub fn read_document(repo: &Path) -> Result<Value, DocumentError> {
+    let path = run_json(repo);
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Err(DocumentError::Missing { path });
+        }
+        Err(source) => return Err(DocumentError::Io { path, source }),
+    };
+    let value: Value =
+        serde_json::from_slice(&bytes).map_err(|err| DocumentError::NotADocument {
+            path: path.clone(),
+            why: format!("it is not JSON: {err}"),
+        })?;
+    if let Some(why) = document_problem(&value) {
+        return Err(DocumentError::NotADocument { path, why });
+    }
+    Ok(value)
+}
+
+/// Why `value` is not a dagr run document, or `None` when it is one.
+///
+/// Only the spine is checked — the version, the run's identity and the task list
+/// — because that is what drawing the graph needs: a document with those is one
+/// the page can read field by field, and anything finer would duplicate dagr's
+/// own `check` in a language that cannot run it.
+fn document_problem(value: &Value) -> Option<String> {
+    let Some(object) = value.as_object() else {
+        return Some("it is not a JSON object".to_string());
+    };
+    if !object.get("dagr").is_some_and(Value::is_number) {
+        return Some("it has no `dagr` version".to_string());
+    }
+    let run = object.get("run").and_then(Value::as_object);
+    if !run.is_some_and(|run| run.get("id").is_some_and(Value::is_string)) {
+        return Some("it has no `run` with an `id`".to_string());
+    }
+    if !object.get("tasks").is_some_and(Value::is_array) {
+        return Some("it has no `tasks` list".to_string());
+    }
+    None
+}
+
 /// What the binary found when it looked for dagr, as the service reports it.
 ///
 /// The service does not probe the machine itself: the binary resolves this once
@@ -549,6 +643,83 @@ mod tests {
             std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(0o755))
                 .expect("executable");
             assert_eq!(first_on_path(path_env), Some(candidate));
+        }
+    }
+
+    /// A document with the spine every drawing needs.
+    fn document() -> Value {
+        serde_json::json!({
+            "dagr": 3,
+            "run": { "id": "r1", "title": "shprd · r1", "started_at": "2026-11-16T00:00:00Z" },
+            "generated_at": "2026-11-16T00:00:01Z",
+            "projects": [{ "id": "crates", "title": "crates" }],
+            "tasks": [{
+                "id": "T1",
+                "title": "one",
+                "kind": "impl",
+                "state": "queued",
+                "deps": [],
+                "criteria": "works",
+                "attempts": [],
+            }],
+            "events": [],
+        })
+    }
+
+    #[test]
+    fn a_document_is_read_back_verbatim() {
+        let repo = tempfile::tempdir().expect("repo dir");
+        std::fs::create_dir_all(repo.path().join(".dagr")).expect("the graph folder");
+        let written = document();
+        std::fs::write(
+            run_json(repo.path()),
+            serde_json::to_vec(&written).expect("it serializes"),
+        )
+        .expect("the document writes");
+
+        let read = read_document(repo.path()).expect("it reads");
+        assert_eq!(
+            read, written,
+            "the answer is the file, not a reshaping of it"
+        );
+    }
+
+    #[test]
+    fn no_document_yet_is_a_missing_answer() {
+        let repo = tempfile::tempdir().expect("repo dir");
+        match read_document(repo.path()) {
+            Err(DocumentError::Missing { path }) => assert_eq!(path, run_json(repo.path())),
+            other => panic!("expected a missing document, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_file_that_is_not_a_run_document_is_refused() {
+        let repo = tempfile::tempdir().expect("repo dir");
+        std::fs::create_dir_all(repo.path().join(".dagr")).expect("the graph folder");
+        for (contents, why) in [
+            ("not json at all".to_string(), "not JSON"),
+            (serde_json::json!([1, 2, 3]).to_string(), "JSON object"),
+            (
+                serde_json::json!({ "run": { "id": "r1" }, "tasks": [] }).to_string(),
+                "dagr",
+            ),
+            (
+                serde_json::json!({ "dagr": 3, "tasks": [] }).to_string(),
+                "run",
+            ),
+            (
+                serde_json::json!({ "dagr": 3, "run": { "id": "r1" }, "tasks": 7 }).to_string(),
+                "tasks",
+            ),
+        ] {
+            std::fs::write(run_json(repo.path()), &contents).expect("the file writes");
+            match read_document(repo.path()) {
+                Err(DocumentError::NotADocument { why: found, .. }) => {
+                    assert!(found.contains(why), "{found:?} names {why}")
+                }
+                other => panic!("expected a refusal for {contents}, got {other:?}"),
+            }
         }
     }
 }

@@ -143,6 +143,24 @@ impl Ctx {
         }
     }
 
+    /// Refuses unless the actor this context acts as is a human.
+    ///
+    /// This is the one actor rule of every human verb (`sync`, `drop`,
+    /// `override`, `approve`, `readmit`): the actor is what `--as` says, else
+    /// what `$SHPRD_ACTOR` says, else `human`, resolved once at the edge, so
+    /// the two spellings can never disagree between verbs. The terminal is the
+    /// barrier that holds on top of it. `act` completes "only a human ..."
+    /// and `advice` says what the reader does instead.
+    pub fn require_human(&self, act: &str, advice: &str) -> Result<(), CliError> {
+        if matches!(self.actor, Actor::Human) {
+            return Ok(());
+        }
+        let name = actor_name(&self.actor);
+        Err(CliError::Invalid(anyhow!(
+            "only a human {act}, and the actor {ACTOR_ENV}={name} (or --as {name}) is not one: {advice}"
+        )))
+    }
+
     /// The folded state of the run, or the empty state when no log exists yet.
     pub fn state(&self) -> Result<RunState, CliError> {
         Ok(self.load()?.0)
@@ -207,6 +225,34 @@ impl Ctx {
             })?;
         Ok(event)
     }
+
+    /// Appends a `TaskAdded` event, naming it the next free `<PREFIX>-<n>` (e.g. `SHP-12`) when `task`
+    /// is `None`; the id is picked under the log's lock, so two adders at once
+    /// never share one. `kind` must be a `TaskAdded`; its `task` is replaced.
+    pub fn commit_task_added(
+        &self,
+        task: Option<String>,
+        kind: EventKind,
+    ) -> Result<Event, CliError> {
+        let prefix = shprd_core::settings::task_id_prefix(self.home.as_deref(), &self.root);
+        let mut log = EventLog::open(&self.log_path)
+            .map_err(|err| CliError::other(anyhow!(err).context("opening the event log")))?;
+        let actor = self.actor.clone();
+        log.append_built(self.actor.clone(), &SystemClock, move |events| {
+            let mut kind = kind;
+            if let EventKind::TaskAdded { task: slot, .. } = &mut kind {
+                *slot = task.unwrap_or_else(|| shprd_core::event::next_task_id(events, &prefix));
+            }
+            RunState::fold(events)?.check_as(&actor, &kind, SystemClock.now_ms())?;
+            Ok(kind)
+        })
+        .map_err(|err| match err {
+            AppendError::Refused(refused) => CliError::Refused(refused),
+            AppendError::Log(err) => {
+                CliError::other(anyhow!(err).context("appending to the event log"))
+            }
+        })
+    }
 }
 
 /// Resolves the repo root: `--repo`, then `$SHPRD_REPO`, then the git top level.
@@ -218,6 +264,67 @@ impl Ctx {
 /// that is where the run's log, config and worktrees live; see [`run_repo`].
 pub fn resolve_root(explicit: Option<&Path>) -> Result<PathBuf, CliError> {
     Ok(run_repo(&resolve_checkout(explicit)?))
+}
+
+/// The root `shprd serve` works on: the repository the named folder (or the
+/// working directory) is inside, else the folder itself.
+///
+/// Every other verb needs a repository and refuses without one; the service
+/// starts for a folder the person only just added, which becomes a repository at
+/// their first chat message ([`crate::cmd::adopt`]). A folder inside a
+/// repository serves that repository, never a second one.
+pub fn resolve_serve_root(explicit: Option<&Path>) -> Result<PathBuf, CliError> {
+    let named = explicit.map(Path::to_path_buf).or_else(|| {
+        std::env::var_os(REPO_ENV)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+    });
+    let folder = match named {
+        Some(path) => path,
+        None => std::env::current_dir()
+            .map_err(|err| CliError::other(anyhow!("the current folder cannot be read: {err}")))?,
+    };
+    Ok(serve_root_of(&folder))
+}
+
+/// Whether a `shprd serve` start names a repository: `--repo`, `$SHPRD_REPO`, or
+/// a working directory inside one. The window's own launch names none, and the
+/// service then waits to be told its repositories rather than serving whatever
+/// folder it was started in.
+pub fn serve_names_a_repo(explicit: Option<&Path>) -> bool {
+    if explicit.is_some() || std::env::var_os(REPO_ENV).is_some_and(|value| !value.is_empty()) {
+        return true;
+    }
+    let Ok(folder) = std::env::current_dir() else {
+        return false;
+    };
+    let mut command = std::process::Command::new("git");
+    command
+        .arg("-C")
+        .arg(folder)
+        .args(["rev-parse", "--show-toplevel"]);
+    shprd_core::spawn::output(&mut command)
+        .ok()
+        .is_some_and(|output| output.status.success())
+}
+
+/// The repository a folder belongs to, else the folder itself: what the one
+/// service registers for a space's folder.
+pub fn serve_root_of(folder: &Path) -> PathBuf {
+    let mut command = std::process::Command::new("git");
+    command
+        .arg("-C")
+        .arg(folder)
+        .args(["rev-parse", "--show-toplevel"]);
+    let top = shprd_core::spawn::output(&mut command)
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .filter(|text| !text.is_empty());
+    match top {
+        Some(top) => run_repo(Path::new(&top)),
+        None => run_repo(folder),
+    }
 }
 
 /// Resolves the checkout the caller works in, without leaving a worktree.
@@ -421,15 +528,15 @@ pub fn resolve_data_dir() -> DataDir {
     DataDir::resolve(explicit.as_deref(), data_home.as_deref())
 }
 
-/// Resolves the layout shprd's git state lives in, with `namespace` as the
-/// branch prefix and archive namespace.
+/// Resolves the layout shprd's git state lives in for `repo`: the settings'
+/// `tasks.archive_namespace` is the branch prefix and archive namespace, and
+/// `tasks.branch` names the branches.
 ///
-/// The worktree root and the namespace both come from here, so a janitor can
-/// never be pointed at someone else's branches by a stale flag.
-pub fn resolve_layout(home: Option<&Path>, namespace: &str) -> Result<Layout, CliError> {
-    let mut layout = Layout::default_for_home(resolve_home(home)?);
-    layout.namespace = namespace.to_string();
-    Ok(layout)
+/// The worktree root, the namespace and the pattern all come from here, so a
+/// janitor can never be pointed at someone else's branches by a stale flag, and
+/// a spawn and the janitor never disagree about what a task's branch is called.
+pub fn resolve_layout(home: Option<&Path>, repo: &Path) -> Result<Layout, CliError> {
+    Ok(Layout::from_settings(&resolve_home(home)?, repo))
 }
 
 /// Parses `--as`, falling back to `$SHPRD_ACTOR`, then to `human`.
@@ -442,6 +549,16 @@ pub fn resolve_actor(explicit: Option<&str>) -> Result<Actor, CliError> {
         },
     };
     parse_actor(&raw)
+}
+
+/// The spelling [`parse_actor`] reads back for `actor`.
+pub fn actor_name(actor: &Actor) -> String {
+    match actor {
+        Actor::Engine => "engine".to_string(),
+        Actor::Orchestrator => "orchestrator".to_string(),
+        Actor::Human => "human".to_string(),
+        Actor::Agent { id } => format!("agent:{id}"),
+    }
 }
 
 /// Parses one actor spelling.

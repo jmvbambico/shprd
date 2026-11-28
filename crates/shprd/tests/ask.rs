@@ -18,7 +18,7 @@ use tempfile::TempDir;
 
 mod support;
 
-use support::herdr::isolate;
+use support::isolate;
 
 /// The binary under test, built by cargo for this integration test.
 const BIN: &str = env!("CARGO_BIN_EXE_shprd");
@@ -116,10 +116,10 @@ impl Service {
 
     /// Polls for `service.json`, which the service writes after it binds.
     fn wait_for_record(&self, state: &Path) {
-        let path = record_path(state);
-        wait_until(&format!("the service wrote {}", path.display()), || {
-            path.exists()
-        });
+        wait_until(
+            &format!("the service wrote {}", record_path(state).display()),
+            || record_path(state).exists(),
+        );
     }
 
     /// Stops the service with `SIGTERM`, as a supervisor would, and waits.
@@ -149,7 +149,7 @@ impl Drop for Service {
 
 /// Where the service writes its discovery file.
 fn record_path(state: &Path) -> PathBuf {
-    state.join("shprd").join("service.json")
+    service_dir(state).join("service.json")
 }
 
 /// Runs the binary with `--repo <root> --no-dagr` and the given arguments.
@@ -298,7 +298,7 @@ fn repo_with_a_task() -> (TempDir, TempDir, TempDir) {
 
 /// The token a client reads from the state directory.
 fn read_token(state: &Path) -> String {
-    fs::read_to_string(state.join("shprd").join("token"))
+    fs::read_to_string(service_dir(state).join("token"))
         .expect("the token is there")
         .trim()
         .to_string()
@@ -1014,4 +1014,105 @@ fn a_programs_harness_says_how_long_its_hook_waits() {
         1_000,
         "the ask expires when the harness's timeout says"
     );
+}
+
+/// The one service's directory under this state home.
+fn service_dir(state: &Path) -> PathBuf {
+    state.join("shprd")
+}
+
+/// A card with choices refuses an answer that is none of them and stays open,
+/// so the waiting verb keeps waiting; a choice in other case is accepted. An ask
+/// without choices takes free text.
+#[test]
+fn a_raise_refuses_an_off_list_answer_and_takes_a_choice_or_free_text() {
+    let (repo, state, home) = repo_with_a_task();
+    let service = Service::start(repo.path(), state.path(), home.path());
+    let record: Value = serde_json::from_str(
+        &fs::read_to_string(record_path(state.path())).expect("the record is there"),
+    )
+    .expect("the record is JSON");
+    let port = record["port"].as_u64().expect("a port");
+    let base = format!("http://127.0.0.1:{port}");
+    let token = read_token(state.path());
+    let wait = hook_timeout_secs().to_string();
+    let env = [("SHPRD_TASK", "T1"), ("SHPRD_ACTOR", "agent:pi")];
+
+    let mut child = spawn_env(
+        repo.path(),
+        &[
+            "ask",
+            "raise",
+            "--kind",
+            "question",
+            "--text",
+            "Override?",
+            "--option",
+            "confirm override",
+            "--option",
+            "leave it",
+            "--id",
+            "choice-1",
+            "--timeout-secs",
+            &wait,
+        ],
+        &env,
+    );
+    wait_until("the raise reaches the ledger", || {
+        raised_count(repo.path()) == 1
+    });
+
+    let off_list = json!({"task": "T1", "ask": "choice-1", "answer": "confirm"});
+    let (status, body) = post_answer(&format!("{base}/api/asks/answer"), &token, &off_list);
+    assert!(status >= 400, "{status} {body}");
+    assert!(body.contains("confirm override"), "{body}");
+    assert!(body.contains("leave it"), "{body}");
+    let answered = |repo: &Path| {
+        events(repo)
+            .iter()
+            .filter(|event| event["kind"] == "ask_answered")
+            .count()
+    };
+    assert_eq!(answered(repo.path()), 0, "an off-list answer was recorded");
+    assert!(
+        matches!(child.try_wait(), Ok(None)),
+        "the verb stopped waiting"
+    );
+
+    let exact = json!({"task": "T1", "ask": "choice-1", "answer": " Confirm Override "});
+    let (status, body) = post_answer(&format!("{base}/api/asks/answer"), &token, &exact);
+    assert_eq!(status, 200, "{body}");
+    let output = wait_for_child(child);
+    assert!(output.status.success());
+    assert_eq!(answered(repo.path()), 1);
+
+    // No choices: free text is taken as before.
+    let child = spawn_env(
+        repo.path(),
+        &[
+            "ask",
+            "raise",
+            "--kind",
+            "question",
+            "--text",
+            "Which name?",
+            "--id",
+            "free-1",
+            "--timeout-secs",
+            &wait,
+        ],
+        &env,
+    );
+    wait_until("the free-text raise reaches the ledger", || {
+        raised_count(repo.path()) == 2
+    });
+    let free = json!({"task": "T1", "ask": "free-1", "answer": "anything at all"});
+    let (status, body) = post_answer(&format!("{base}/api/asks/answer"), &token, &free);
+    assert_eq!(status, 200, "{body}");
+    let output = wait_for_child(child);
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "anything at all"
+    );
+    service.stop();
 }

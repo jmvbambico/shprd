@@ -17,6 +17,7 @@ import assert from "node:assert/strict";
 
 import * as herdr from "herdr";
 import Tasks from "../mods/shprd-tasks/main.js";
+import { RepoCache } from "../mods/lib/client.js";
 import {
   Client,
   alive,
@@ -95,9 +96,13 @@ function context() {
  * restart replaces: the record, the token and the health answer behind it.
  */
 function serve(id, port = 7788) {
-  herdr.putFile(serviceFile(DIR), JSON.stringify({ port, id, pid: 42 }));
+  herdr.putFile(serviceFile(DIR), JSON.stringify({ port, id, pid: 42, root: "/work/shop" }));
   herdr.putFile(tokenFile(DIR), "token-1\n");
-  return { "/api/health": { body: { ok: true, id, version: "0.0.0" } } };
+  return {
+    "/api/health": { body: { ok: true, id, version: "0.0.0" } },
+    // The window registers the shown repository once per service: it answers at once.
+    "/api/repos": { body: { id: "shop-1", root: "/work/shop", dir: `${DIR}/repos/shop-1` } },
+  };
 }
 
 /** The board a service answers with: one task per id, at `seq`. */
@@ -231,6 +236,11 @@ function panel() {
   run.cx.sleep = (ms) => new Promise((resolve) => setTimeout(resolve, Math.min(ms, 20)));
   const view = new Tasks();
   view.cx = run.cx;
+  view.cache = new RepoCache();
+  view.shownKey = view.cache.key();
+  view.counts = new Map();
+  view.countsAt = Date.now();
+  view.busy = new Map();
   view.state = null;
   view.failure = null;
   view.client = null;
@@ -300,7 +310,8 @@ test("a panel whose service stopped says so instead of keeping the old board", a
 
     assert.equal(view.state, null, "no old board is left to paint");
     assert.equal(view.client, null);
-    assert.equal(view.failure, "shprd serve is not running");
+    assert.match(view.failure, /space|service/);
+    assert.doesNotMatch(view.failure, /shprd serve/, "the panel never tells a person to run a command");
   } finally {
     globalThis.fetch = real;
   }

@@ -5,7 +5,7 @@
 //! Each built-in role has a prompt the build carries (`data/templates/`): the
 //! coordinator's (`assistant.md`, the name Shepherdr uses for it and the one
 //! M9.3's `prompt:assistant` default names), the worker's, the reviewer's and
-//! the backup's. A role's `prompt` field is either `prompt:<id>`, which names a
+//! the takeover's (the opening of a handover brief; it is not a role). A role's `prompt` field is either `prompt:<id>`, which names a
 //! file in the person's prompts directory, or a path.
 //!
 //! # Where the files live
@@ -119,6 +119,55 @@ const WORKER_M10_PROOF: &str = include_str!("../../../data/templates/history/wor
 const WORKER_M10_PROOF_DIGEST: &str =
     "39c27a0d0d261505d9cf2663e11c4f724c9a33f52ce826a6bbf4d9b65895eb50";
 
+/// The worker wording before it opened with an identity line. With another
+/// product's session note in the same CLI (Shepherdr's), an agent could answer
+/// as that product, so today's words say first who it is.
+#[cfg(test)]
+const WORKER_PRE_IDENTITY: &str =
+    include_str!("../../../data/templates/history/worker-pre-identity.md");
+
+/// The SHA-256 of [`WORKER_PRE_IDENTITY`].
+const WORKER_PRE_IDENTITY_DIGEST: &str =
+    "4349b51d144d5377b3036cbf48c7af6a9e3af29db67e27a090641fde320116ba";
+
+/// The worker wording before the condensed rewrite: it named another product
+/// and said some rules twice (once here, once in the brief).
+#[cfg(test)]
+const WORKER_M11_LONG: &str = include_str!("../../../data/templates/history/worker-m11-long.md");
+
+/// The SHA-256 of [`WORKER_M11_LONG`].
+const WORKER_M11_LONG_DIGEST: &str =
+    "d9a7bb2a42b8245b45d85b172eb659138329186079b7d4bd2303a202e48df9fa";
+
+/// The worker wording that told it to stay within the task's scope. Declared
+/// paths are a hint now, and obeying them as a limit left work unwired.
+#[cfg(test)]
+const WORKER_M11_SCOPE: &str = include_str!("../../../data/templates/history/worker-m11-scope.md");
+
+/// The SHA-256 of [`WORKER_M11_SCOPE`].
+const WORKER_M11_SCOPE_DIGEST: &str =
+    "d0d28c2a06ec40f4a62ac5ca0ce6bd59b8ebbca5851aa174ba8c678e781b28ca";
+
+/// The worker wording before it banned real or shared data in proofs and said
+/// an ask's options are things the person does on the board.
+#[cfg(test)]
+const WORKER_M11_PRE_REAL_DATA: &str =
+    include_str!("../../../data/templates/history/worker-m11-pre-real-data.md");
+
+/// The SHA-256 of [`WORKER_M11_PRE_REAL_DATA`].
+const WORKER_M11_PRE_REAL_DATA_DIGEST: &str =
+    "b9ca850ee72a94477eed2b230fe28d36e93029e73223b2a5a53e5aac13da761a";
+
+/// The worker wording before it asked for a screenshot of any change the person
+/// sees (or the reason there is none) and for temp cleanup by literal path.
+#[cfg(test)]
+const WORKER_M11_PRE_PROOF_UI: &str =
+    include_str!("../../../data/templates/history/worker-m11-pre-proof-ui.md");
+
+/// The SHA-256 of [`WORKER_M11_PRE_PROOF_UI`].
+const WORKER_M11_PRE_PROOF_UI_DIGEST: &str =
+    "ab87d69308fd98f689bade382009f5a76a09d9bc864157359c08ef44b8c7caa5";
+
 /// The worker's retired defaults.
 const WORKER_OLD: &[&str] = &[
     WORKER_FIRST_DIGEST,
@@ -126,6 +175,11 @@ const WORKER_OLD: &[&str] = &[
     WORKER_M9_ASKS_DIGEST,
     WORKER_M9_PROOF_DIGEST,
     WORKER_M10_PROOF_DIGEST,
+    WORKER_PRE_IDENTITY_DIGEST,
+    WORKER_M11_LONG_DIGEST,
+    WORKER_M11_SCOPE_DIGEST,
+    WORKER_M11_PRE_REAL_DATA_DIGEST,
+    WORKER_M11_PRE_PROOF_UI_DIGEST,
 ];
 
 /// The backup wording M9.5 shipped, retired for the same reason as the worker's:
@@ -137,8 +191,17 @@ const BACKUP_M9_ASKS: &str = include_str!("../../../data/templates/history/backu
 const BACKUP_M9_ASKS_DIGEST: &str =
     "870902264b1bcf1c89e6fddb66dd04728fcfca510aa0722c639d1236023670f4";
 
+/// The backup wording before it was cut to the takeover's own rules: it
+/// repeated the worker's rules, which the brief now carries after it.
+#[cfg(test)]
+const BACKUP_M11_LONG: &str = include_str!("../../../data/templates/history/backup-m11-long.md");
+
+/// The SHA-256 of [`BACKUP_M11_LONG`].
+const BACKUP_M11_LONG_DIGEST: &str =
+    "4cbcd2fd8c152a6c734421c5831cafb33c5a9549bcbfa5d255302f011761c485";
+
 /// The backup's retired defaults.
-const BACKUP_OLD: &[&str] = &[BACKUP_M9_ASKS_DIGEST];
+const BACKUP_OLD: &[&str] = &[BACKUP_M9_ASKS_DIGEST, BACKUP_M11_LONG_DIGEST];
 
 /// The coordinator wording M9.5 shipped, retired because it named only the
 /// CLI's own question tool, which a program with no ask hook does not have.
@@ -165,8 +228,115 @@ const ASSISTANT_ASKS_RAISE: &str =
 const ASSISTANT_ASKS_RAISE_DIGEST: &str =
     "5759b6e936356e985db7ef39f21037b9e68a2d0a955714be3bd65c1d327af027";
 
+/// The assistant wording before it opened with an identity line. With another
+/// product's session note in the same CLI (Shepherdr's), an agent could answer
+/// as that product, so today's words say first who it is.
+#[cfg(test)]
+const ASSISTANT_PRE_IDENTITY: &str =
+    include_str!("../../../data/templates/history/assistant-pre-identity.md");
+
+/// The SHA-256 of [`ASSISTANT_PRE_IDENTITY`].
+const ASSISTANT_PRE_IDENTITY_DIGEST: &str =
+    "41298d28d3c74f5dfb9844e5ae33254dfc940a61e3b327b1411e83498b46e185";
+
+/// The coordinator wording that opened with its identity but only said "never
+/// write code yourself": a Sonnet coordinator asked "add a hello.py that prints
+/// hi" wrote the file. Today's words say every ask that changes the repository
+/// is a task, however it is worded.
+#[cfg(test)]
+const ASSISTANT_M11_IDENTITY: &str =
+    include_str!("../../../data/templates/history/assistant-m11-identity.md");
+
+/// The SHA-256 of [`ASSISTANT_M11_IDENTITY`].
+const ASSISTANT_M11_IDENTITY_DIGEST: &str =
+    "7845593091f7af65662ce6df93571183751c0d5e15be1d1ec3438a0a999839c3";
+
+/// The coordinator wording that made every ask a task but did not say how the
+/// person accepts one: a coordinator told the person to run `shprd approve`.
+#[cfg(test)]
+const ASSISTANT_M11_TASKS_ONLY: &str =
+    include_str!("../../../data/templates/history/assistant-m11-tasks-only.md");
+
+/// The SHA-256 of [`ASSISTANT_M11_TASKS_ONLY`].
+const ASSISTANT_M11_TASKS_ONLY_DIGEST: &str =
+    "09e6b9146233e0219a4718d4782707c71accaa030743a15096b7d88a7c415a50";
+
+/// The coordinator wording that said to ignore another product's notes but not
+/// to never run its tools: a coordinator made tasks with `herdr-task`, which
+/// shprd's panes never showed (SHPR-79).
+#[cfg(test)]
+const ASSISTANT_M11_ACCEPT: &str =
+    include_str!("../../../data/templates/history/assistant-m11-accept.md");
+
+/// The SHA-256 of [`ASSISTANT_M11_ACCEPT`].
+const ASSISTANT_M11_ACCEPT_DIGEST: &str =
+    "2edb55677e9ae75377a852243658a791b0169d71c55b8bd711c7192f1aa00a50";
+
+/// The coordinator wording shipped before SHPR-83 (`git show
+/// 7bc01e7^:data/templates/assistant.md`). An install of it read as `edited`
+/// because its digest was never listed, so it never upgraded.
+#[cfg(test)]
+const ASSISTANT_PRE_SHPR83: &str =
+    include_str!("../../../data/templates/history/assistant-pre-shpr83.md");
+
+/// The SHA-256 of [`ASSISTANT_PRE_SHPR83`].
+const ASSISTANT_PRE_SHPR83_DIGEST: &str =
+    "b2bb0172dfa307a6f7e93f3a2883b3c00c99f21a836d25772a86a2d1d24340a5";
+
+/// The coordinator wording before the condensed rewrite: it named another
+/// product by name and ran longer than a model needs.
+#[cfg(test)]
+const ASSISTANT_M11_LONG: &str =
+    include_str!("../../../data/templates/history/assistant-m11-long.md");
+
+/// The SHA-256 of [`ASSISTANT_M11_LONG`].
+const ASSISTANT_M11_LONG_DIGEST: &str =
+    "391d4cc326bf5fd542a2486474a1496d9da08bb2f77294fd4ca7d0a0740a0e5f";
+
+/// The coordinator wording that offered the scope-widen verb and required a
+/// scope on every task. Declared paths are an optional hint now.
+#[cfg(test)]
+const ASSISTANT_M11_SCOPE: &str =
+    include_str!("../../../data/templates/history/assistant-m11-scope.md");
+
+/// The SHA-256 of [`ASSISTANT_M11_SCOPE`].
+const ASSISTANT_M11_SCOPE_DIGEST: &str =
+    "e482982fc547944b949a371eb414a6e762aa976996db107ebbcf28f21ece1c23";
+
+/// The coordinator wording that told the person every worker's question and
+/// operational card was theirs, before the coordinator settled those itself.
+#[cfg(test)]
+const ASSISTANT_M11_ASK_PERSON: &str =
+    include_str!("../../../data/templates/history/assistant-m11-ask-person.md");
+
+/// The SHA-256 of [`ASSISTANT_M11_ASK_PERSON`].
+const ASSISTANT_M11_ASK_PERSON_DIGEST: &str =
+    "717c372ab7520dd34e1eb80ab1d54cfba3c28e5df6647a0690aede3fa0baa37a";
+
+/// The coordinator wording that said the person never types a command yet sent
+/// them to human-only verbs, and did not check for a moved base before landing.
+#[cfg(test)]
+const ASSISTANT_M11_PRE_BOARD_BUTTONS: &str =
+    include_str!("../../../data/templates/history/assistant-m11-pre-board-buttons.md");
+
+/// The SHA-256 of [`ASSISTANT_M11_PRE_BOARD_BUTTONS`].
+const ASSISTANT_M11_PRE_BOARD_BUTTONS_DIGEST: &str =
+    "20b992a8a0cfbdaa80f53aa1c7be4e9174719fa0d9f1db8980ed27e0202a9810";
+
 /// The coordinator's retired defaults.
-const ASSISTANT_OLD: &[&str] = &[ASSISTANT_M9_ASKS_DIGEST, ASSISTANT_ASKS_RAISE_DIGEST];
+const ASSISTANT_OLD: &[&str] = &[
+    ASSISTANT_M9_ASKS_DIGEST,
+    ASSISTANT_ASKS_RAISE_DIGEST,
+    ASSISTANT_PRE_IDENTITY_DIGEST,
+    ASSISTANT_M11_IDENTITY_DIGEST,
+    ASSISTANT_M11_TASKS_ONLY_DIGEST,
+    ASSISTANT_M11_ACCEPT_DIGEST,
+    ASSISTANT_PRE_SHPR83_DIGEST,
+    ASSISTANT_M11_LONG_DIGEST,
+    ASSISTANT_M11_SCOPE_DIGEST,
+    ASSISTANT_M11_ASK_PERSON_DIGEST,
+    ASSISTANT_M11_PRE_BOARD_BUTTONS_DIGEST,
+];
 
 /// The reviewer wording M9.6 shipped, which did not name the asks the packet
 /// now carries. A criterion about asking is only checkable from those, so
@@ -178,8 +348,67 @@ const REVIEWER_M9_ASKS: &str = include_str!("../../../data/templates/history/rev
 const REVIEWER_M9_ASKS_DIGEST: &str =
     "3d9ee44b1a18395e0463945ab0d34baed819d8ec7ad8fa3896491ec0120a517c";
 
+/// The reviewer wording before it opened with an identity line. With another
+/// product's session note in the same CLI (Shepherdr's), an agent could answer
+/// as that product, so today's words say first who it is.
+#[cfg(test)]
+const REVIEWER_PRE_IDENTITY: &str =
+    include_str!("../../../data/templates/history/reviewer-pre-identity.md");
+
+/// The SHA-256 of [`REVIEWER_PRE_IDENTITY`].
+const REVIEWER_PRE_IDENTITY_DIGEST: &str =
+    "2c28ab6907cffc0e9d2173d49042a0918f4f7c744ad8be2183cfd752d51c291e";
+
+/// The reviewer wording before the condensed rewrite: it named another product
+/// and said the packet's files and the findings file more than once.
+#[cfg(test)]
+const REVIEWER_M11_LONG: &str =
+    include_str!("../../../data/templates/history/reviewer-m11-long.md");
+
+/// The SHA-256 of [`REVIEWER_M11_LONG`].
+const REVIEWER_M11_LONG_DIGEST: &str =
+    "c187a5267112fc4148487499f64ef7ac444e10bce3a0a2a901bd38daf2ef0488";
+
+/// The reviewer wording that judged the diff against the scope as a limit.
+/// It judges whether each change serves the task now.
+#[cfg(test)]
+const REVIEWER_M11_SCOPE: &str =
+    include_str!("../../../data/templates/history/reviewer-m11-scope.md");
+
+/// The SHA-256 of [`REVIEWER_M11_SCOPE`].
+const REVIEWER_M11_SCOPE_DIGEST: &str =
+    "859869ecc557b7a1570bb847b00609aa546b44171a1c88e0a45e04ac91febd7f";
+
+/// The reviewer wording before disclosed worker decisions were kept apart from
+/// the findings: a choice the worker named in its summary was filed as a defect.
+#[cfg(test)]
+const REVIEWER_M11_PRE_DECISIONS: &str =
+    include_str!("../../../data/templates/history/reviewer-m11-pre-decisions.md");
+
+/// The SHA-256 of [`REVIEWER_M11_PRE_DECISIONS`].
+const REVIEWER_M11_PRE_DECISIONS_DIGEST: &str =
+    "b6acca26b2baeaff73d81987fdad635f97b9244494fbd96c0620345be1e81dde";
+
+/// The reviewer wording before it said what a finding may and may not be about:
+/// worker-operation lines, a missing screenshot and unanswered asks were filed
+/// as blocking defects.
+#[cfg(test)]
+const REVIEWER_M11_PRE_BLOCKING: &str =
+    include_str!("../../../data/templates/history/reviewer-m11-pre-blocking.md");
+
+/// The SHA-256 of [`REVIEWER_M11_PRE_BLOCKING`].
+const REVIEWER_M11_PRE_BLOCKING_DIGEST: &str =
+    "f87b60fe4db2564b63bc4818a5fde968b8517feff25e0472ab3a1947da1ce424";
+
 /// The reviewer's retired defaults.
-const REVIEWER_OLD: &[&str] = &[REVIEWER_M9_ASKS_DIGEST];
+const REVIEWER_OLD: &[&str] = &[
+    REVIEWER_M11_PRE_BLOCKING_DIGEST,
+    REVIEWER_M11_PRE_DECISIONS_DIGEST,
+    REVIEWER_M9_ASKS_DIGEST,
+    REVIEWER_PRE_IDENTITY_DIGEST,
+    REVIEWER_M11_LONG_DIGEST,
+    REVIEWER_M11_SCOPE_DIGEST,
+];
 
 /// The prompts this build ships, in the order `shprd prompts list` prints them.
 pub const SHIPPED: [ShippedPrompt; 4] = [
@@ -205,9 +434,12 @@ pub const SHIPPED: [ShippedPrompt; 4] = [
         old: REVIEWER_OLD,
     },
     ShippedPrompt {
+        // Not a role: the opening a takeover brief carries, when the worker's
+        // program cannot go on and the next line of the worker chain takes over.
+        // The id stays `backup` so an installed (or edited) file keeps its name.
         id: "backup",
-        role: "backup",
-        about: "Takes a task over once, when the worker's CLI cannot go on.",
+        role: "takeover",
+        about: "Opens the brief of a program that takes a task over.",
         text: include_str!("../../../data/templates/backup.md"),
         old: BACKUP_OLD,
     },
@@ -598,16 +830,20 @@ impl PromptRef {
         Ok(PromptRef::Path(PathBuf::from(trimmed)))
     }
 
-    /// The words this reference names.
+    /// The words this reference names, without a leading credit comment.
     ///
     /// An id is written on first use and upgraded like any other installed
     /// prompt; a path must exist, and a `~` in it is `home`.
     pub fn read(&self, dir: &Path, home: &Path) -> Result<String, PromptError> {
         match self {
-            PromptRef::Prompt(id) => ensure(dir, id).map(|prompt| prompt.text),
+            PromptRef::Prompt(id) => {
+                ensure(dir, id).map(|prompt| strip_leading_comment(&prompt.text).to_owned())
+            }
             PromptRef::Path(path) => {
                 let path = expand_tilde(path, home);
-                std::fs::read_to_string(&path).map_err(|source| PromptError::Read { path, source })
+                std::fs::read_to_string(&path)
+                    .map(|text| strip_leading_comment(&text).to_owned())
+                    .map_err(|source| PromptError::Read { path, source })
             }
         }
     }
@@ -618,6 +854,22 @@ impl PromptRef {
             PromptRef::Prompt(id) => format!("{}{id}", Self::PREFIX),
             PromptRef::Path(path) => path.display().to_string(),
         }
+    }
+}
+
+/// `text` without a leading `<!-- ... -->` block (and the blank lines after it).
+///
+/// A template opens with a comment holding its licence credit. The file on disk
+/// keeps it; the words an agent is sent never carry it. Text that does not open
+/// with a closed comment is returned whole.
+pub fn strip_leading_comment(text: &str) -> &str {
+    let trimmed = text.trim_start();
+    let Some(rest) = trimmed.strip_prefix("<!--") else {
+        return text;
+    };
+    match rest.split_once("-->") {
+        Some((_, after)) => after.trim_start_matches(['\n', '\r']),
+        None => text,
     }
 }
 

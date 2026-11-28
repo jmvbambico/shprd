@@ -21,6 +21,16 @@ use shprd_core::state::RunState;
 use shprd_mux::{Host, PaneId};
 use shprd_server::Coordinator;
 
+/// How many stop alarms in `repo`'s news memory were later contradicted by the
+/// task itself (the figure `shprd doctor` reports); zero when there is no memory.
+pub fn stops_contradicted(repo: &Path) -> u32 {
+    std::fs::read_to_string(shprd_server::news::memory_path(repo))
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|value| value.get("stops_contradicted")?.as_u64())
+        .map_or(0, |n| u32::try_from(n).unwrap_or(u32::MAX))
+}
+
 /// The mux seam the news is delivered through.
 pub struct LiveNews {
     /// The host the coordinator's pane lives in.
@@ -52,8 +62,13 @@ impl Coordinator for LiveNews {
             }
         };
         let space = crate::cmd::spawn::repo_space_name(&repo_name);
-        match crate::cmd::spawn::coordinator_pane_for(self.mux.as_ref(), &self.home, state, &space)
-        {
+        match crate::cmd::spawn::coordinator_pane_for(
+            self.mux.as_ref(),
+            &self.home,
+            &self.repo,
+            state,
+            &space,
+        ) {
             Ok(pane) => pane.map(|pane| pane.as_str().to_string()),
             Err(err) => {
                 tracing::warn!(%err, "the coordinator's pane could not be found");
@@ -89,9 +104,20 @@ mod tests {
             &crate::cmd::spawn::repo_name(repo.path()).expect("the repository's name"),
         );
         let space = mux.create_space(&name, repo.path()).expect("the space");
-        let recorded = crate::cmd::spawn::record_coordinator_pane(home.path(), &mux, &space)
-            .expect("recording the pane")
+        let recorded = mux
+            .list_tabs(&space.id)
+            .expect("the tabs")
+            .first()
+            .map(|tab| tab.root_pane.clone())
             .expect("the space's first tab");
+        crate::cmd::spawn::record_coordinator_pane(
+            home.path(),
+            repo.path(),
+            &space.id,
+            &recorded,
+            "sh",
+        )
+        .expect("recording the pane");
 
         let news = LiveNews::new(Box::new(mux), home.path(), repo.path());
         assert_eq!(
@@ -118,5 +144,15 @@ mod tests {
             None,
             "nothing recorded, so nothing may be typed into"
         );
+    }
+
+    #[test]
+    fn the_contradicted_stop_count_is_read_from_the_memory() {
+        let repo = tempfile::tempdir().expect("repo");
+        assert_eq!(stops_contradicted(repo.path()), 0);
+        let path = shprd_server::news::memory_path(repo.path());
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("dir");
+        std::fs::write(&path, r#"{"stops_contradicted": 3}"#).expect("memory");
+        assert_eq!(stops_contradicted(repo.path()), 3);
     }
 }

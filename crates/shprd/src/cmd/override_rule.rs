@@ -29,8 +29,7 @@ use crate::ctx::{CliError, Ctx};
 
 /// Records a human's override of `rule`, after asking at the terminal.
 pub fn override_verb(ctx: &Ctx, args: &OverrideArgs) -> Result<(), CliError> {
-    confirm::require_human(
-        &confirm::named_actor(),
+    ctx.require_human(
         "overrides a rule",
         "ask the maintainer to run `shprd override`",
     )?;
@@ -45,7 +44,8 @@ pub fn override_verb(ctx: &Ctx, args: &OverrideArgs) -> Result<(), CliError> {
     let task = args.task.as_deref().unwrap_or_default().trim().to_string();
     let state = ctx.state()?;
     let question = question(&state, &task, &rule, &args.reason)?;
-    if !confirm::answered(args.yes, "shprd override", &question)? {
+    let ok = confirm::answered(args.yes, "shprd override", &question)?;
+    if !ok {
         return Err(CliError::Invalid(anyhow!(
             "not overridden: nothing was recorded, so nothing about this run changed"
         )));

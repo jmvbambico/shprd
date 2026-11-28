@@ -16,7 +16,7 @@ use tempfile::TempDir;
 
 mod support;
 
-use support::herdr::isolate;
+use support::isolate;
 
 /// The binary under test, built by cargo for this integration test.
 const BIN: &str = env!("CARGO_BIN_EXE_shprd");
@@ -228,7 +228,7 @@ fn show_prints_every_key_with_the_layer_it_came_from() {
         "{shown}"
     );
     assert!(
-        shown.contains("roles.coordinator.title = \"Assistant\"  (built in)"),
+        shown.contains("roles.coordinator.title = \"Orchestrator\"  (built in)"),
         "{shown}"
     );
     assert!(
@@ -298,7 +298,7 @@ fn a_value_equal_to_the_inherited_one_is_not_stored() {
     fixture.ok(&["set", "tasks.merge", "checks"]);
     let printed = fixture.ok(&["set", "tasks.merge", "ask"]);
     assert!(
-        printed.contains("not stored: it equals what this scope inherits"),
+        printed.contains("is back to what this scope inherits"),
         "{printed}"
     );
     let text = Fixture::text(&fixture.settings());

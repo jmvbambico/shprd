@@ -1,0 +1,1 @@
+{"TCP":{"443":{"HTTPS":true}},"Web":{"studio.tail1234.ts.net:443":{"Handlers":{"/shprd":{"Proxy":"http://127.0.0.1:9999"}}}},"AllowFunnel":{"studio.tail1234.ts.net:443":false}}

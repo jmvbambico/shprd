@@ -46,8 +46,9 @@ fn an_empty_file_resolves_to_the_built_in_values() {
     assert_eq!(shown(&resolved, "tasks.news_settle_secs"), "5");
     assert_eq!(shown(&resolved, "tasks.proof"), "true");
     assert_eq!(shown(&resolved, "tasks.worktrees"), "true");
+    assert_eq!(shown(&resolved, "tasks.self_update"), "false");
     assert_eq!(shown(&resolved, "tasks.base"), "\"\"");
-    assert_eq!(shown(&resolved, "tasks.branch"), "\"task/{n}-{slug}\"");
+    assert_eq!(shown(&resolved, "tasks.branch"), "\"{run}/{task}\"");
     assert_eq!(shown(&resolved, "review.cross_vendor"), "true");
     assert_eq!(shown(&resolved, "host"), "\"auto\"");
     assert_eq!(
@@ -77,15 +78,15 @@ fn the_built_in_workflow_values_are_the_old_config_defaults() {
 }
 
 #[test]
-fn the_four_built_in_roles_are_the_first_rows() {
+fn the_three_built_in_roles_are_the_first_rows() {
     let resolved = resolve(&File::default(), &Request::default());
     assert_eq!(
         resolved.order(),
-        ["coordinator", "worker", "reviewer", "backup"],
-        "the three built-ins and the backup, in their own order"
+        ["coordinator", "worker", "reviewer"],
+        "the three built-ins, in their own order"
     );
     let coordinator = resolved.role("coordinator").expect("the coordinator");
-    assert_eq!(coordinator.label(), "Assistant");
+    assert_eq!(coordinator.label(), "Orchestrator");
     assert_eq!(coordinator.kind.value, RoleKind::Coordinator);
     assert_eq!(coordinator.prompt.value, "prompt:assistant");
     let reviewer = resolved.role("reviewer").expect("the reviewer");
@@ -121,7 +122,7 @@ fn a_custom_role_is_any_id_and_defaults_to_a_helper() {
     let resolved = resolve(&file, &Request::default());
     assert_eq!(
         resolved.order(),
-        ["coordinator", "worker", "reviewer", "backup", "docs"],
+        ["coordinator", "worker", "reviewer", "docs"],
         "a custom role follows the built-ins unless the order says otherwise"
     );
     let docs = resolved.role("docs").expect("the docs role");
@@ -161,14 +162,7 @@ fn roles_order_leads_and_every_other_role_follows() {
     let resolved = resolve(&file, &Request::default());
     assert_eq!(
         resolved.order(),
-        [
-            "docs",
-            "coordinator",
-            "worker",
-            "reviewer",
-            "backup",
-            "spare"
-        ],
+        ["docs", "coordinator", "worker", "reviewer", "spare"],
         "the order leads, the built-ins it left out follow, then the rest"
     );
 }
@@ -283,9 +277,10 @@ fn every_key_is_reported_even_the_ones_nobody_set() {
     assert!(rows.iter().any(|row| row.key == "tasks.tick_secs"));
     assert_eq!(
         rows.last().map(|row| row.key.as_str()),
-        Some("host"),
-        "the host is the last row a settings page draws"
+        Some("web.cloudflared_host"),
+        "the web keys are the last rows a settings page draws"
     );
+    assert!(rows.iter().any(|row| row.key == "host"));
 }
 
 #[test]
@@ -482,6 +477,11 @@ fn a_repo_committed_file_may_not_widen_a_guard() {
         ("[roles.worker]\nagent = \"codex\"\n", "roles"),
         ("[tasks]\nmerge = \"auto\"\n", "tasks.merge"),
         ("[tasks]\nmax_running = 10\n", "tasks.max_running"),
+        ("[tasks]\ngh_user = \"someone\"\n", "tasks.gh_user"),
+        (
+            "[tasks]\nworktree_files = \".env\"\n",
+            "tasks.worktree_files",
+        ),
         ("[review]\ncross_vendor = false\n", "review"),
     ] {
         std::fs::write(&path, document).expect("the file is written");
@@ -654,10 +654,58 @@ fn the_old_roster_reviewer_is_the_lower_layer_of_the_reviewer_role() {
 }
 
 #[test]
+fn the_legacy_reviewer_stays_first_and_the_agents_lines_are_fallbacks() {
+    let home = home();
+    let path = user_config(home.path());
+    std::fs::create_dir_all(path.parent().expect("the config dir")).expect("the dir");
+    std::fs::write(&path, "[roster]\nreviewer = \"codex/gpt-6-luna\"\n").expect("old config");
+    std::fs::write(
+        user_file(home.path()),
+        "[roles.reviewer]\nperm = \"read-only\"\nagents = [\"pi|Command Code/z-ai/glm-5.3-flash|||read-only\"]\n",
+    )
+    .expect("settings");
+    let loaded = Loaded::read(home.path(), None).expect("both load");
+    let resolved = loaded.resolve(None);
+    let lines = resolved.role("reviewer").expect("reviewer").lines();
+    assert_eq!(
+        lines[0].agent, "codex",
+        "the resolved main reviewer is first"
+    );
+    assert_eq!(lines[0].model.as_deref(), Some("gpt-6-luna"));
+    assert_eq!(lines[1].agent, "pi", "the agents line is only a fallback");
+}
+
+#[test]
+fn setting_a_key_to_what_the_old_config_resolves_stores_it_in_the_new_layer() {
+    let home = home();
+    let path = user_config(home.path());
+    std::fs::create_dir_all(path.parent().expect("the config dir")).expect("the dir");
+    std::fs::write(&path, "[roster]\nreviewer = \"codex/gpt-6-luna\"\n").expect("old config");
+    let loaded = Loaded::read(home.path(), None).expect("loads");
+    let key = Key::parse("roles.reviewer.agent").expect("key");
+    let written = loaded
+        .write(
+            home.path(),
+            &Scope::You,
+            &key,
+            Some(Value::Text("codex".into())),
+            None,
+        )
+        .expect("written");
+    assert_eq!(written.outcome, WriteOutcome::Stored);
+    let loaded = Loaded::read(home.path(), None).expect("reloads");
+    assert_eq!(
+        source_of(&loaded.resolve(None), "roles.reviewer.agent"),
+        Some(Source::You)
+    );
+}
+
+#[test]
 fn keys_parse_from_their_names_and_their_old_names() {
     let cases = [
         ("tasks.merge", "tasks.merge"),
         ("land.merge", "tasks.merge"),
+        ("land.gh_user", "tasks.gh_user"),
         ("tick.max_running", "tasks.max_running"),
         ("tick.interval_secs", "tasks.tick_secs"),
         ("janitor.archive_days", "tasks.archive_after"),
@@ -738,6 +786,22 @@ fn a_role_id_may_not_be_order_or_a_key_path() {
         Err(SettingsError::UnknownKey { key, .. }) => assert_eq!(key, "roles.order.agent"),
         other => panic!("expected a refusal, got {other:?}"),
     }
+}
+
+#[test]
+fn review_rounds_may_be_off_but_not_negative_or_past_ten() {
+    let cases: [(i64, bool); 5] = [(0, true), (1, true), (10, true), (11, false), (-1, false)];
+    let key = Key::parse("tasks.review_rounds").expect("the key parses");
+    for (rounds, allowed) in cases {
+        let checked = key.check(&Value::Number(rounds));
+        assert_eq!(checked.is_ok(), allowed, "{rounds}: {checked:?}");
+    }
+    // Off survives the file: 0 rounds resolves as 0, so no review is asked for.
+    let resolved = resolve(
+        &you("version = 1\n[tasks]\nreview_rounds = 0\n"),
+        &Request::default(),
+    );
+    assert_eq!(shown(&resolved, "tasks.review_rounds"), "0");
 }
 
 #[test]
@@ -869,7 +933,7 @@ fn a_roles_order_list_is_reported_as_a_source() {
     assert_eq!(shown(&resolved, "roles.order"), "[\"docs\"]");
     assert_eq!(
         resolved.order(),
-        ["docs", "coordinator", "worker", "reviewer", "backup"]
+        ["docs", "coordinator", "worker", "reviewer"]
     );
 }
 
@@ -949,4 +1013,337 @@ fn a_value_round_trips_through_json() {
     }
     assert_eq!(Value::from_json(&serde_json::json!(null)), None);
     assert_eq!(Value::from_json(&serde_json::json!(1.5)), None);
+}
+
+#[test]
+fn the_web_keys_have_defaults_and_read_back_through_their_accessors() {
+    let resolved = resolve(&File::default(), &Request::default());
+    assert_eq!(shown(&resolved, "web.tunnel"), "\"tailscale\"");
+    assert_eq!(shown(&resolved, "web.stable"), "false");
+    assert_eq!(shown(&resolved, "web.cloudflared_name"), "\"\"");
+    assert_eq!(shown(&resolved, "web.cloudflared_host"), "\"\"");
+    assert_eq!(resolved.web_tunnel(), "tailscale");
+    assert!(!resolved.web_stable());
+    assert_eq!(resolved.web_cloudflared_name(), "");
+
+    let file = you("[web]\ntunnel = \"cloudflared-named\"\nstable = true\n\
+         cloudflared_name = \" shprd \"\ncloudflared_host = \"shprd.example.org\"\n");
+    let resolved = resolve(&file, &Request::default());
+    assert_eq!(resolved.web_tunnel(), "cloudflared-named");
+    assert!(resolved.web_stable());
+    assert_eq!(resolved.web_cloudflared_name(), "shprd");
+    assert_eq!(resolved.web_cloudflared_host(), "shprd.example.org");
+    assert_eq!(source_of(&resolved, "web.tunnel"), Some(Source::You));
+}
+
+#[test]
+fn web_tunnel_takes_only_the_provider_words() {
+    let key = Key::parse("web.tunnel").expect("the key parses");
+    for word in WEB_TUNNEL_WORDS {
+        assert!(key.value_from_text(word).is_ok(), "{word}");
+    }
+    assert!(key.value_from_text("carrier-pigeon").is_err());
+    assert!(File::parse("[web]\ntunnel = \"carrier-pigeon\"\n").is_err());
+    assert!(File::parse("[web]\nnonsense = 1\n").is_err());
+    assert!(Key::parse("web.nonsense").is_err());
+    assert!(Key::parse("web").is_err());
+}
+
+#[test]
+fn a_repository_may_not_choose_where_a_shell_is_exposed() {
+    for key in WEB_KEYS {
+        assert!(!Key::Web(key).is_repo_allowed(), "{}", key.name());
+    }
+    let repo = parse_repo_committed("[web]\ntunnel = \"ngrok\"\n");
+    assert!(
+        repo.is_err(),
+        "a committed [web] table is refused: {repo:?}"
+    );
+}
+
+#[test]
+fn a_web_key_is_written_into_the_web_table() {
+    let home = home();
+    let loaded = Loaded::read(home.path(), None).expect("an empty home loads");
+    let key = Key::parse("web.tunnel").expect("the key parses");
+    let written = loaded
+        .write(
+            home.path(),
+            &Scope::You,
+            &key,
+            Some(Value::Text("tunnl".to_owned())),
+            None,
+        )
+        .expect("the tunnel is stored");
+    assert_eq!(written.resolved.web_tunnel(), "tunnl");
+    let text = std::fs::read_to_string(user_file(home.path())).expect("the file was written");
+    assert!(
+        text.contains("[web]") && text.contains("tunnel = \"tunnl\""),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_role_is_shown_under_its_own_name_or_its_built_in_one() {
+    // The built-in names: the coordinator keeps Shepherdr's word.
+    let resolved = resolve(&File::default(), &Request::default());
+    let names: std::collections::BTreeMap<_, _> = resolved.role_titles().into_iter().collect();
+    assert_eq!(names["coordinator"], "Orchestrator");
+    assert_eq!(names["worker"], "Worker");
+    assert_eq!(names["reviewer"], "Reviewer");
+
+    // The person's own names.
+    let named = resolve(
+        &you(
+            "[roles.coordinator]\ntitle = \"Orchestrator\"\n[roles.worker]\ntitle = \"Dev\"\n\
+             [roles.reviewer]\ntitle = \"QA\"\n",
+        ),
+        &Request::default(),
+    );
+    let names: std::collections::BTreeMap<_, _> = named.role_titles().into_iter().collect();
+    assert_eq!(names["coordinator"], "Orchestrator");
+    assert_eq!(names["worker"], "Dev");
+    assert_eq!(names["reviewer"], "QA");
+    // The key never changes.
+    assert!(named.role("worker").is_some());
+}
+
+#[test]
+fn an_empty_or_blank_name_falls_back_to_the_built_in_title() {
+    assert_eq!(display_title("", "worker"), "Worker");
+    assert_eq!(display_title("   \t ", "reviewer"), "Reviewer");
+    assert_eq!(display_title("", "coordinator"), "Orchestrator");
+    // A custom role falls back to its id.
+    assert_eq!(display_title("  ", "docs"), "docs");
+}
+
+#[test]
+fn a_name_is_trimmed_and_cut_to_the_cap() {
+    assert_eq!(display_title("  Dev  team ", "worker"), "Dev team");
+    let long = "x".repeat(TITLE_MAX + 10);
+    assert_eq!(display_title(&long, "worker").chars().count(), TITLE_MAX);
+    // Cutting never leaves a trailing space.
+    let spaced = format!("{} tail", "a".repeat(TITLE_MAX - 1));
+    assert_eq!(display_title(&spaced, "worker"), "a".repeat(TITLE_MAX - 1));
+}
+
+#[test]
+fn storing_a_name_trims_it_and_an_empty_one_is_no_value() {
+    let key = Key::parse("roles.worker.title").expect("key");
+    assert_eq!(
+        key.normalized(Some(Value::Text("  Dev ".to_owned()))),
+        Some(Value::Text("Dev".to_owned()))
+    );
+    assert_eq!(key.normalized(Some(Value::Text("   ".to_owned()))), None);
+    // Another key is stored as given.
+    let other = Key::parse("tasks.base").expect("key");
+    assert_eq!(
+        other.normalized(Some(Value::Text("  x ".to_owned()))),
+        Some(Value::Text("  x ".to_owned()))
+    );
+}
+
+#[test]
+fn a_worker_holds_an_ordered_list_of_program_lines() {
+    let file = you(r#"
+        version = 1
+
+        [roles.worker]
+        agent = "claude"
+        model = "claude-haiku-5-5"
+        effort = "low"
+        fast = true
+        perm = "auto"
+        agents = ["codex|gpt-5||1|auto", "pi", "claude"]
+        "#);
+    let worker = resolve(&file, &Request::default())
+        .role("worker")
+        .expect("the worker role");
+    let lines = worker.lines();
+    assert_eq!(
+        lines
+            .iter()
+            .map(|line| line.agent.as_str())
+            .collect::<Vec<_>>(),
+        ["claude", "codex", "pi"],
+        "the role's own pick is the first line; a program is listed once"
+    );
+    assert_eq!(lines[0].model.as_deref(), Some("claude-haiku-5-5"));
+    assert!(lines[0].fast);
+    assert_eq!(lines[1].model.as_deref(), Some("gpt-5"));
+    assert!(lines[1].fast);
+    assert_eq!(lines[1].perm.as_deref(), Some("auto"));
+    assert_eq!(lines[2].model, None);
+}
+
+#[test]
+fn an_old_worker_fallback_list_becomes_the_lines_after_the_first() {
+    let file = you(r#"
+        version = 1
+
+        [roles.worker]
+        agent = "claude"
+        model = "claude-opus-5-5"
+        fallback = ["codex", "pi/some-model"]
+        "#);
+    let worker = resolve(&file, &Request::default())
+        .role("worker")
+        .expect("the worker role");
+    let lines = worker.lines();
+    assert_eq!(lines.len(), 3, "the old key still reads");
+    assert_eq!(lines[0].agent_ref(), "claude/claude-opus-5-5");
+    assert_eq!(lines[1].agent_ref(), "codex");
+    assert_eq!(lines[2].agent_ref(), "pi/some-model");
+}
+
+#[test]
+fn agents_wins_over_the_old_fallback_once_it_names_lines() {
+    let file = you(r#"
+        version = 1
+
+        [roles.worker]
+        agent = "claude"
+        fallback = ["codex"]
+        agents = ["pi"]
+        "#);
+    let worker = resolve(&file, &Request::default())
+        .role("worker")
+        .expect("the worker role");
+    let programs: Vec<String> = worker.lines().into_iter().map(|line| line.agent).collect();
+    assert_eq!(programs, ["claude", "pi"]);
+}
+
+#[test]
+fn a_line_round_trips_through_its_stored_string() {
+    let line = WorkerLine {
+        agent: "opencode".to_owned(),
+        model: Some("anthropic/claude-sonnet-5-5".to_owned()),
+        effort: Some("high".to_owned()),
+        fast: true,
+        perm: None,
+    };
+    assert_eq!(WorkerLine::parse(&line.encode()), Some(line));
+    assert_eq!(
+        WorkerLine::parse("|model"),
+        None,
+        "a line needs its program"
+    );
+    assert_eq!(WorkerLine::parse(""), None);
+}
+
+#[test]
+fn an_old_backup_role_is_ignored_without_error() {
+    let file = you(r#"
+        version = 1
+
+        [roles]
+        order = ["coordinator", "worker", "reviewer", "backup", "docs"]
+
+        [roles.backup]
+        title = "Backup agent"
+        agent = "codex"
+        model = "gpt-5"
+
+        [roles.docs]
+        kind = "worker"
+        "#);
+    let resolved = resolve(&file, &Request::default());
+    assert_eq!(
+        resolved.order(),
+        ["coordinator", "worker", "reviewer", "docs"],
+        "the retired row is not a custom role"
+    );
+    assert!(resolved.role("backup").is_none());
+    assert!(
+        resolved
+            .roles()
+            .iter()
+            .all(|role| role.id != "backup"
+                && role.agent.as_ref().is_none_or(|a| a.value != "codex"))
+    );
+    let rows = resolved.rows();
+    assert!(
+        rows.iter().all(|row| !row.key.starts_with("roles.backup.")),
+        "{:?}",
+        rows.iter().map(|row| row.key.clone()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn an_old_reviewer_with_a_fallback_reads_as_two_lines() {
+    let file = you(r#"
+        version = 1
+
+        [roles.reviewer]
+        agent = "codex"
+        model = "gpt-5"
+        fallback = ["claude/opus"]
+        "#);
+    let resolved = resolve(&file, &Request::default());
+    let lines = resolved.role("reviewer").expect("reviewer").lines();
+    let refs: Vec<String> = lines.iter().map(|line| line.agent_ref()).collect();
+    assert_eq!(refs, ["codex/gpt-5", "claude/opus"]);
+
+    // The new shape wins over the old key once it holds lines.
+    let file = you(r#"
+        version = 1
+
+        [roles.reviewer]
+        agent = "codex"
+        agents = ["pi|deepseek||||"]
+        fallback = ["claude/opus"]
+        "#);
+    let resolved = resolve(&file, &Request::default());
+    let lines = resolved.role("reviewer").expect("reviewer").lines();
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[1].agent, "pi");
+}
+
+#[test]
+fn the_gh_account_is_pinned_per_repo_and_empty_by_default() {
+    let file = File::parse(
+        r#"
+        [repos.mine.tasks]
+        gh_user = " alice "
+        "#,
+    )
+    .expect("the file parses");
+    let ask = |repo: &str| {
+        resolve(
+            &file,
+            &Request {
+                repo: Some(repo),
+                repo_file: None,
+                task: None,
+            },
+        )
+        .tasks()
+        .gh_user
+    };
+    assert_eq!(ask("mine"), "alice");
+    assert_eq!(ask("another"), "");
+    let key = Key::parse("land.gh_user").expect("the alias parses");
+    assert_eq!(key.kind(), Kind::Text);
+}
+
+#[test]
+fn worktree_files_are_per_repo_text_and_empty_by_default() {
+    let file = File::parse("[repos.mine.tasks]\nworktree_files = \".env\\nlink:data\"\n")
+        .expect("the file parses");
+    let ask = |repo: &str| {
+        resolve(
+            &file,
+            &Request {
+                repo: Some(repo),
+                repo_file: None,
+                task: None,
+            },
+        )
+        .tasks()
+        .worktree_files
+    };
+    assert_eq!(ask("mine"), ".env\nlink:data");
+    assert_eq!(ask("another"), "");
+    let key = Key::parse("tasks.worktree_files").expect("the key parses");
+    assert_eq!(key.kind(), Kind::Text);
 }

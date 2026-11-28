@@ -18,11 +18,16 @@ import { fileURLToPath } from "node:url";
 import {
   COORDINATOR_ID,
   KIND,
+  MENU,
+  NARROW_PX,
+  attention,
+  closeWords,
   coordinatorRow,
+  menuHeight,
+  menuItems,
+  narrowSidebar,
   needWords,
   orderedTasks,
-  rowBadge,
-  rowCounts,
   sidebarRows,
   spaceIndex,
   splitSpaceName,
@@ -34,7 +39,12 @@ import {
   panelButtons,
   parseTabName,
   pillCounts,
+  rememberPanel,
+  shownPanel,
+  tabLabel,
+  tabProgram,
   tabRows,
+  foreignTab,
   tabState,
 } from "../mods/lib/tabstrip.js";
 import {
@@ -54,13 +64,22 @@ import {
   visible,
 } from "../mods/lib/toasts.js";
 import {
+  DONE_SHOWN,
   counts,
+  etaMinutes,
+  filterChips,
+  found,
   lastFailure,
+  listView,
+  staleIds,
+  STALE_MS,
   newTask,
+  progressOf,
   rowActions,
   runLabel,
   runShort,
   runState,
+  secondLine,
   since,
   statusCounts,
   taskById,
@@ -71,8 +90,21 @@ import {
   WORDS,
   card as acceptCard,
   changeRows,
+  changeCounts,
   changesLine,
+  protectedLine,
+  commitRows,
+  canReview,
+  VIEW,
+  hasArtifacts,
+  mustLeavePr,
+  reportLine,
+  terminalChild,
+  terminalReachable,
+  threadAgent,
+  threadViews,
   checks as handInChecks,
+  proofs as handInProofs,
   findings as reviewFindings,
   head as acceptHead,
   reviewLine,
@@ -80,7 +112,10 @@ import {
   whereNow,
   words as summaryWords,
 } from "../mods/lib/accept.js";
-import { PR_WORDS, openUrl, taskPr } from "../mods/lib/taskpr.js";
+import { PR_WORDS, branchLine, openUrl, prSize, taskPr } from "../mods/lib/taskpr.js";
+import { openAccept } from "../mods/lib/panel.js";
+import { cards as cardsOf } from "../mods/lib/asks.js";
+import * as herdr from "herdr";
 
 /** One fixture, parsed. */
 function fixture(name) {
@@ -171,7 +206,8 @@ test("a task row carries the word, the colour and the reason the service gave it
   assert.equal(t3.glyph, "dot");
   assert.equal(t3.needs, true);
   assert.equal(t3.ready, false);
-  assert.match(t3.sub, /the count badge overflows/);
+  // The newest decision card speaks for the task (UXC-7).
+  assert.match(t3.sub, /sending attempt 1 back/);
   assert.equal(t3.folder, "/tmp/sh55/shop");
 
   const t2 = rows.tasks.find((row) => row.id === "T2");
@@ -209,10 +245,11 @@ test("the whole board is still read when the window has no spaces yet", () => {
 
 test("no run is a board with a hint, not an empty sidebar", () => {
   const rows = sidebarRows({ seq: 0, run: null, hint: "no run yet: start one with `shprd run start`", tasks: [] }, []);
+  // The window never repeats an old service's hint: nobody types a command here.
   assert.equal(rows.coordinator.word, "No run");
   assert.equal(rows.coordinator.tone, "dim");
   assert.equal(rows.coordinator.label, "This repository");
-  assert.equal(rows.coordinator.sub, "no run yet: start one with `shprd run start`");
+  assert.equal(rows.coordinator.sub, "no tasks yet: say what you want in the chat");
   assert.deepEqual(rows.tasks, []);
   assert.deepEqual(rows.waiting, []);
 });
@@ -226,28 +263,61 @@ test("the dropped tasks a run keeps are history, not rows", () => {
   assert.deepEqual(sidebarRows(stale, []).tasks, []);
 });
 
-test("a row's badge is a count on the run and a mark on a task", () => {
+test("a row's badge counts what needs the person and what is ready", () => {
   const rows = sidebarRows(STATE, SPACES);
-  assert.equal(rowBadge(rows.coordinator), "1", "how many tasks need the person");
-  assert.equal(rowBadge(rows.tasks.find((row) => row.id === "T3")), "!");
-  assert.equal(rowBadge(rows.tasks.find((row) => row.id === "T2")), null);
-  assert.equal(rowBadge(null), null);
+  assert.deepEqual(attention(rows.coordinator), { need: 1, ready: 1 }, "the run's own counts");
+  assert.deepEqual(attention(rows.tasks.find((row) => row.id === "T3")), { need: 1, ready: 0 });
+  assert.deepEqual(attention(rows.tasks.find((row) => row.id === "T2")), { need: 0, ready: 1 });
+  assert.deepEqual(attention(rows.tasks.find((row) => row.id === "T1")), { need: 0, ready: 0 });
+  assert.deepEqual(attention(null), { need: 0, ready: 0 });
 });
 
-test("row counts and task looks are the tokens' words", () => {
-  const tally = rowCounts(sidebarRows(STATE, SPACES));
-  assert.deepEqual(tally, { needs: 1, ready: 1, working: 1, total: 6 });
+test("the rail is read from the sidebar's width, as Shepherdr reads it", () => {
+  const tree = (px) => ({ id: "root", children: [{ id: "sidebar", size: { px }, children: [] }] });
+  assert.equal(narrowSidebar(tree(NARROW_PX)), false, "160 is still wide");
+  assert.equal(narrowSidebar(tree(NARROW_PX - 1)), true);
+  assert.equal(narrowSidebar(tree(391)), false);
+  assert.equal(narrowSidebar({ id: "root", children: [] }), false, "no sidebar node: the wide form");
+  assert.equal(narrowSidebar(null), false);
+});
+
+test("a space's row menu is Open task then Close…, and only what a space can do", () => {
+  const rows = sidebarRows(STATE, SPACES);
+  const withSpace = menuItems(rows.tasks.find((row) => row.id === "T2"));
+  assert.deepEqual(withSpace, [{ id: "open", label: "Open task" }, { sep: true }, { id: "close", label: "Close…" }]);
+  // The popup has only the props: the space is its id there, and the words are the same.
+  assert.deepEqual(menuItems({ task: "T2", space: "s4" }), withSpace);
+  // A task with no space has nothing to close, so it has no Close… row.
+  assert.deepEqual(menuItems(rows.waiting.find((row) => row.id === "T6")), [{ id: "open", label: "Open task" }]);
+  // Shepherdr's `heightOf`: 5 px of padding, 32 px a row, 9 px a separator.
+  assert.equal(menuHeight(withSpace), MENU.pad * 2 + MENU.row + MENU.sep + MENU.row);
+  assert.equal(menuHeight(menuItems({ task: "T6" })), MENU.pad * 2 + MENU.row);
+});
+
+test("closing a space asks in Shepherdr's words", () => {
+  assert.deepEqual(closeWords({ task: "T2" }), {
+    title: "Close “T2”?",
+    detail: "Its tabs close and every program in them ends.",
+    verb: "Close space",
+  });
+  assert.equal(closeWords({}).title, "Close “this space”?");
+});
+
+test("task looks are the tokens' words", () => {
   assert.deepEqual(taskLook(task("T1")), {
     status: "working",
     word: "Working",
     tone: "amber",
     glyph: "pie",
+    pct: 62,
   });
-  assert.deepEqual(taskLook({}), { status: "to_do", word: "To do", tone: "dim", glyph: "ring" });
+  assert.deepEqual(taskLook({}), { status: "to_do", word: "To do", tone: "dim", glyph: "ring", pct: null });
 });
 
 test("a needs-you row says the card's words when the service has a card", () => {
-  assert.match(needWords(task("T3"), STATE), /the count badge overflows its row at ten/);
+  assert.match(needWords(task("T3"), STATE), /sending attempt 1 back/);
+  const withNotice = { tasks: STATE.tasks, needs: [...STATE.needs, { task: "T3", body: "FYI only", seq: 99, kind: "notice", actions: ["dismiss"] }] };
+  assert.match(needWords(task("T3"), withNotice), /sending attempt 1 back/, "a notice never speaks for the task");
   assert.equal(needWords(task("T1"), STATE), null);
   assert.equal(needWords(task("T3"), { tasks: STATE.tasks, needs: [] }), "the count badge overflows its row at ten");
 });
@@ -347,11 +417,70 @@ test("the most urgent status in a tab is the one its pill shows", () => {
   assert.equal(tabState({ id: "c", name: "claude·T1" }, panes, STATE).status, "working");
 });
 
+test("a pill is called by its name, or by what runs in it when it has none", () => {
+  // shprd's own title is the pill's name.
+  assert.equal(tabLabel({ id: "a", name: "pi·T1" }, parseTabName("pi·T1"), { name: "pi" }), "pi·T1");
+  // A name a person gave it is kept, even though shprd did not give it.
+  assert.equal(tabLabel({ id: "a", name: "my shell" }, parseTabName("my shell"), { name: "zsh" }), "my shell");
+  // Herdr's own names — a position, or "tb3" on older builds — are not names.
+  assert.equal(tabLabel({ id: "a", name: "1" }, parseTabName("1"), { name: "zsh" }), "zsh");
+  assert.equal(
+    tabLabel({ id: "a", name: "tb3" }, parseTabName("tb3"), { name: "Claude Code" }),
+    "Claude Code",
+  );
+  // Nothing to call it by is still a word, never an empty pill.
+  assert.equal(tabLabel({ id: "a", name: "1" }, parseTabName("1"), null), "Terminal");
+});
+
+test("a pill wears the program in its tab and counts what it needs", () => {
+  const panes = [
+    { tab: "a", program: { name: "zsh", icon: "icons/zsh.svg", tint: true } },
+    {
+      tab: "a",
+      program: { name: "Claude Code", icon: "icons/none.svg", tint: false, agent: true },
+    },
+    { tab: "b", program: { name: "zsh", icon: "icons/zsh.svg", tint: true } },
+  ];
+  // An agent's own glyph wins over the shell a tab's first pane runs.
+  assert.equal(tabProgram(panes, "a").name, "Claude Code");
+  assert.equal(tabProgram(panes, "b").name, "zsh");
+  assert.equal(tabProgram(panes, "c"), null, "a tab with no pane claims no program");
+
+  const space = {
+    id: "s",
+    name: "shprd · shop",
+    tabs: [
+      { id: "a", name: "claude·T2", active: true, panes: 1 },
+      { id: "b", name: "zsh", panes: 1 },
+    ],
+  };
+  const rows = tabRows(space, panes, STATE);
+  assert.deepEqual(
+    rows.map((row) => [row.icon, row.tint, row.program, row.named]),
+    [
+      ["icons/none.svg", false, "Claude Code", false],
+      ["icons/zsh.svg", true, "zsh", false],
+    ],
+  );
+  // The badge's two numbers: what needs the person, then what is ready.
+  assert.deepEqual(
+    rows.map((row) => [row.need, row.ready]),
+    [
+      [0, 1],
+      [0, 0],
+    ],
+    "T2 is ready, and a shell says nothing about a task",
+  );
+  const blocked = tabRows(space, [{ tab: "a", status: "blocked" }], STATE);
+  assert.deepEqual([blocked[0].need, blocked[0].ready], [1, 0]);
+});
+
 test("the side panel's buttons carry the counts of the stacks they open", () => {
-  const buttons = panelButtons(STATE, "asks");
+  const buttons = panelButtons(STATE, "files");
   assert.deepEqual(
     buttons.map((button) => button.id),
-    ["files", "changes", "tasks", "asks", "settings"],
+    ["files", "changes", "tasks"],
+    "the panel's stacks only: settings is a dialog, not a tab of the panel",
   );
   const tasks = buttons.find((button) => button.id === "tasks");
   assert.deepEqual({ needs: tasks.needs, ready: tasks.ready, active: tasks.active }, {
@@ -359,7 +488,8 @@ test("the side panel's buttons carry the counts of the stacks they open", () => 
     ready: 1,
     active: false,
   });
-  assert.equal(buttons.find((button) => button.id === "asks").active, true);
+  assert.equal(buttons.find((button) => button.id === "files").active, true);
+  assert.equal(buttons.some((button) => button.id === "asks"), false, "the cards live in the task thread");
   assert.equal(buttons.find((button) => button.id === "files").needs, 0);
 });
 
@@ -390,7 +520,7 @@ test("the news is the events a person acts on, each with the seq that made it", 
   const needs = items[1];
   assert.equal(needs.level, "warning");
   assert.equal(needs.title, "T3 · Needs you");
-  assert.match(needs.body, /the count badge overflows its row at ten/);
+  assert.match(needs.body, /sending attempt 1 back/);
   assert.notEqual(items[1].id, items[3].id, "two cards are two toasts");
 });
 
@@ -401,6 +531,41 @@ test("a card about a task the board calls finished is not news", () => {
   assert.equal(newsItems([on_a_live_task], STATE).length, 1);
   // A landing is worth telling however the task reads now.
   assert.equal(newsItems([{ seq: 42, kind: "task_landed", task: "T4" }], STATE).length, 1);
+});
+
+test("an operational card gets no Needs you toast; a protected-path accept does", () => {
+  const operational = (id, need) => ({
+    id,
+    status: "needs_you",
+    derived: { status: "needs_you", need, reason: "out of rounds", for_you: false },
+  });
+  // The shape the service gives a task that touched an undeclared protected
+  // path: ready, waiting for the person's Accept, For you.
+  const protectedAccept = {
+    id: "T8",
+    status: "passed",
+    derived: {
+      status: "ready",
+      need: "accept",
+      reason: "Touches protected paths: AGENTS.md",
+      for_you: true,
+    },
+  };
+  const state = {
+    seq: 53,
+    tasks: [operational("T7", "attention"), operational("T9", "agent_stopped"), protectedAccept],
+  };
+  const events = [
+    { seq: 50, kind: "escalated", task: "T7" },
+    { seq: 51, kind: "ask_raised", task: "T9" },
+    { seq: 52, kind: "escalated", task: "" },
+    { seq: 53, kind: "escalated", task: "T8" },
+  ];
+  const items = fromSnapshot(events, state);
+  assert.deepEqual(items.map((item) => item.id), ["ev:53"]);
+  assert.equal(items[0].title, "T8 · Needs you");
+  assert.equal(items[0].body, "Touches protected paths: AGENTS.md");
+  assert.equal(items.some((item) => /Needs you/.test(item.title) && /T7|T9/.test(item.title)), false);
 });
 
 test("a batch of events nobody acts on says nothing", () => {
@@ -417,6 +582,19 @@ test("a failed pass is a toast, filed under the pass's own time", () => {
   assert.match(item.body, /\(\+1\)/);
   assert.equal(passItem({ ...STATE, last_tick: { at_ms: 1, steps: 1, failed: [] } }), null);
   assert.equal(passItem({ seq: 0, tasks: [] }), null);
+});
+
+test("a land failure is one plain sentence in the toast and the status bar", () => {
+  const plain = "Couldn't merge T1: this repository has no GitHub remote";
+  const state = {
+    ...STATE,
+    last_tick: { at_ms: 9, steps: 1, failed: [{ step: "land", task: "T1", error: plain }] },
+  };
+  assert.equal(passItem(state).body, plain);
+  assert.equal(lastFailure(state), plain);
+  for (const text of [passItem(state).body, lastFailure(state)]) {
+    assert.doesNotMatch(text, /`|gh |forge|run /);
+  }
 });
 
 test("one reading of the service is the news plus the pass", () => {
@@ -543,8 +721,9 @@ test("the bar names the run, its failure and the service's absence", () => {
   assert.equal(runState({ ...STATE, finished: true }), "finished");
   assert.equal(runState({ seq: 0, run: null }), "none");
   assert.equal(runLabel(STATE), "run m10a · integration/m10");
-  assert.equal(runShort(STATE), "run m10a", "the bar names the run; the sidebar names the branch");
-  assert.equal(runLabel({ seq: 0, run: null, hint: "no run yet" }), "no run yet");
+  assert.equal(runShort(STATE), "run m10a · 1 working · 1 ready", "the bar names the run and where its tasks stand");
+  assert.equal(runLabel({ seq: 0, run: null, hint: "no run yet" }), "no tasks yet: say what you want in the chat");
+  assert.equal(runShort({ seq: 0, run: null, hint: "no run yet: start one with `shprd run start`" }), "no tasks yet: say what you want in the chat");
   assert.match(lastFailure(STATE), /^land on T2: could not run git/);
   assert.equal(lastFailure({ seq: 1, run: null }), null);
 });
@@ -558,6 +737,46 @@ test("a time in the bar is words, not a date", () => {
   assert.equal(since(undefined, now), "just now");
 });
 
+test("a stuck task can be dropped from its row, and a dropped one is not listed", () => {
+  const stopped = { id: "S", status: "working", derived: { status: "needs_you", need: "stopped" } };
+  assert.deepEqual(rowActions(stopped), [{ id: "drop", label: "Drop", action: null }]);
+  const handedIn = { id: "P", status: "reported", derived: { status: "needs_you", need: "asks" } };
+  assert.deepEqual(
+    rowActions(handedIn).map((act) => act.id),
+    ["review", "drop"],
+    "a handed-in task that needs you keeps Review and can be dropped",
+  );
+  const dropped = { id: "D", status: "dropped", derived: { status: "done", reason: "Dropped · no" } };
+  assert.deepEqual(rowActions(dropped), []);
+  const view = listView({ tasks: [dropped, { id: "L", status: "integrated", derived: { status: "done" } }] }, {});
+  assert.equal(view.doneLine.count, 1, "a dropped task is not counted as done");
+});
+
+test("a task in review says so, not its worker's last progress line", () => {
+  const reviewing = {
+    id: "R",
+    title: "t",
+    status: "reported",
+    derived: { status: "working" },
+    last_status: { message: "mul done; test-file scope question", progress: 70 },
+    attempts: [{ gates: [], reviews: [{ reviewer: "codex", degraded: false }] }],
+  };
+  assert.equal(secondLine(reviewing), "In review");
+  assert.equal(progressOf(reviewing), null, "a worker's old 70% is not drawn");
+  const working = { ...reviewing, status: "working", attempts: [] };
+  assert.equal(secondLine(working), "mul done; test-file scope question");
+  assert.equal(progressOf(working), 70);
+});
+
+test("the add form takes an After list and names an id the board does not hold", () => {
+  const ok = newTask({ title: "a", scope: "x", acceptance: "y", deps: "T1, T2" }, ["T1", "T2"]);
+  assert.deepEqual(ok.deps, ["T1", "T2"]);
+  assert.equal(ok.ready, true);
+  const bad = newTask({ title: "a", scope: "x", acceptance: "y", deps: "nope" }, ["T1"]);
+  assert.equal(bad.ready, false);
+  assert.match(bad.why, /No task named nope/);
+});
+
 // -- the tasks panel's reading of a row's act ------------------------------
 
 /** One task of the M10.5 board, by id. */
@@ -565,11 +784,49 @@ function boardTask(id) {
   return BOARD.tasks.find((entry) => entry.id === id);
 }
 
+test("a row's button follows the word the row shows, for every status and word (SHPR-78)", () => {
+  const ids = (task) => rowActions(task).map((act) => act.id);
+  const row = (status, word) => ({ id: "X", status, derived: { status: word } });
+  // Review only where the row reads Ready, or needs the person about a hand-in.
+  assert.deepEqual(ids(row("passed", "ready")), ["review"]);
+  assert.deepEqual(ids(row("reported", "ready")), ["review"]);
+  assert.deepEqual(ids(row("passed", "needs_you")), ["review", "drop"]);
+  assert.deepEqual(ids(row("reported", "needs_you")), ["review", "drop"]);
+  // A handed-in task whose agent took the work up again reads Working: no Review.
+  for (const status of ["passed", "reported"]) {
+    for (const word of ["working", "merging", "done", "queued", "to_do"]) {
+      assert.equal(ids(row(status, word)).includes("review"), false, `${status}/${word}`);
+      assert.deepEqual(ids(row(status, word)), [], `${status}/${word}`);
+    }
+  }
+  // An older service sends no word: the hand-in still reads as reviewable.
+  assert.deepEqual(ids({ id: "X", status: "passed" }), ["review"]);
+  // Review never shows on a row that is working, failed, dropped or not yet started.
+  for (const [status, word] of [["working", "working"], ["failed", "needs_you"], ["dropped", "done"], ["queued", "to_do"], ["queued", "scheduled"], ["integrated", "done"], ["integrated", "merging"]]) {
+    assert.equal(ids(row(status, word)).includes("review"), false, `${status}/${word}`);
+  }
+  assert.deepEqual(ids(row("working", "working")), ["stop"]);
+  assert.deepEqual(ids(row("queued", "to_do")), ["start"]);
+  assert.deepEqual(ids(row("failed", "needs_you")), ["retry", "drop"]);
+  // The head's Review and the card's Accept agree with the row.
+  const again = row("passed", "working");
+  assert.equal(canReview(again), false);
+  assert.equal(verbs(again, "ask").accept, false, "no Accept on a task that is working again");
+});
+
 test("a row offers the one verb the engine has for its state", () => {
   // T2 is passed, so its act opens the Accept card rather than posting a verb.
-  assert.deepEqual(rowActions(boardTask("T2")), [{ id: "review", label: "Review", action: null }]);
+  // It needs the person too, so it can also be dropped from its row.
+  assert.deepEqual(rowActions(boardTask("T2")), [
+    { id: "review", label: "Review", action: null },
+    { id: "drop", label: "Drop", action: null },
+  ]);
   // T3 failed its review: the send-back is a spawn, which is what a retry is.
-  assert.deepEqual(rowActions(boardTask("T3")), [{ id: "retry", label: "Retry", action: "task.retry" }]);
+  // A failed task can also be given up: Drop opens the card on its Drop step.
+  assert.deepEqual(rowActions(boardTask("T3")), [
+    { id: "retry", label: "Retry", action: "task.retry" },
+    { id: "drop", label: "Drop", action: null },
+  ]);
   // T5 is working, so the one act is a stop.
   assert.deepEqual(rowActions(boardTask("T5")), [{ id: "stop", label: "Stop", action: "task.stop" }]);
   // A done task is history, and a queued one waits for its deps: neither has an
@@ -595,13 +852,17 @@ test("the add-task form says what is missing before the press", () => {
     title: "Tabs",
     scope: ["a", "b"],
     acceptance: ["it works", "it stays"],
+    deps: [],
     why: "",
     ready: true,
   });
   assert.equal(newTask({}).ready, false);
   assert.match(newTask({}).why, /title/);
-  assert.match(newTask({ title: "x" }).why, /folder or path/);
+  assert.match(newTask({ title: "x" }).why, /must be true/);
   assert.match(newTask({ title: "x", scope: "a" }).why, /must be true/);
+  // The paths are an optional hint: a task with none is ready.
+  assert.equal(newTask({ title: "x", acceptance: "it works" }).ready, true);
+  assert.deepEqual(newTask({ title: "x", acceptance: "it works" }).scope, []);
 });
 
 test("a panel finds the task its shared selection names, or nothing", () => {
@@ -647,10 +908,96 @@ test("a long summary keeps its first sentence and folds the rest away", () => {
 });
 
 test("the changes are counted once, from the branch git read", () => {
-  assert.equal(changesLine(CHANGES), "3 files changed · +6 −0");
-  assert.equal(changesLine({ files: [{ path: "a", added: 1, deleted: 2 }], added: 1, deleted: 2 }), "1 file changed · +1 −2");
+  // The service names the commits too: "N commits · N files changed +a −r".
+  assert.equal(changesLine(CHANGES), "7 commits · 3 files changed +6 −0");
+  assert.equal(protectedLine(CHANGES), null);
+  assert.equal(protectedLine({ protected: [] }), null);
+  assert.equal(
+    protectedLine({ protected: ["AGENTS.md", "docs/plan.md"] }),
+    "Touches protected paths: AGENTS.md, docs/plan.md",
+  );
+  assert.deepEqual(changeCounts(CHANGES), { commits: "7 commits", files: "3 files changed", added: "+6", removed: "−0" });
+  // An older service has no commit count, and the line is the files alone.
+  assert.equal(changesLine({ files: [{ path: "a", added: 1, deleted: 2 }], added: 1, deleted: 2 }), "1 file changed +1 −2");
+  assert.equal(changesLine({ commit_count: 1, files: [{ path: "a", added: 1, deleted: 2 }], added: 1, deleted: 2 }), "1 commit · 1 file changed +1 −2");
   assert.equal(changesLine({ files: [] }), WORDS.noChanges);
   assert.equal(changesLine(null), WORDS.noChanges);
+});
+
+test("the newest commits are listed and the rest are counted", () => {
+  const { rows, rest } = commitRows(CHANGES);
+  assert.equal(rows.length, 5);
+  assert.deepEqual(rows[0], { sha: "a1b2c3d", subject: "feat(tasks): page the list" });
+  assert.equal(rest, 2, "seven commits, five listed: And 2 more");
+  assert.equal(WORDS.moreLine(rest), "And 2 more");
+  assert.deepEqual(commitRows(null), { rows: [], rest: 0 });
+});
+
+test("the thread's switch is Chat, Terminal, then Pull request and Artifacts once it has them", () => {
+  const T1 = boardTask("T1");
+  const bare = { ...boardTask("T2"), pr: undefined, attempts: [] };
+  const words_ = (task, opts) => threadViews(task, opts).map((seg) => seg.word);
+  assert.deepEqual(words_(bare, { live: true }), ["Chat", "Terminal"], "no Pull request or Artifacts before it has one");
+  assert.deepEqual(words_({ ...bare, pr: T1.pr }, { live: true }), ["Chat", "Terminal", "Pull request"]);
+  assert.deepEqual(words_(T1, { live: true }), ["Chat", "Terminal", "Pull request", "Artifacts"]);
+  assert.equal(hasArtifacts(T1), true);
+  assert.equal(hasArtifacts(bare), false);
+  // Chat is always on and is what a thread opens on; Terminal is dim when no agent is up.
+  const open = threadViews(T1, { live: false });
+  assert.equal(open[0].on, true, "a thread opens on its chat");
+  const segs = threadViews(T1, { live: false, shown: "tasks-thread-term" });
+  assert.equal(segs[0].dead, false);
+  assert.equal(segs[0].child, "tasks-thread-chat");
+  assert.equal(segs[0].on, false);
+  assert.equal(segs[1].dead, true, "Not running");
+  assert.equal(segs[1].on, true);
+  // Terminal is lit for its live terminal and for its read-only stream, and shows the one given.
+  assert.equal(threadViews(T1, { live: true, shown: VIEW.stream.id, termChild: VIEW.stream.id })[1].on, true);
+  assert.equal(threadViews(T1, { live: true, termChild: VIEW.stream.id })[1].child, VIEW.stream.id);
+  assert.equal(threadViews(T1, { live: true, shown: "tasks-thread-pr" }).find((seg) => seg.on).key, "pr");
+  assert.equal(threadViews(T1, { live: true, shown: VIEW.artifacts.id }).find((seg) => seg.on).key, "artifacts");
+  // The pull request of a task that lost it, or artifacts it has none of, fall back to the chat.
+  assert.equal(mustLeavePr(bare, "tasks-thread-pr"), true);
+  assert.equal(mustLeavePr(bare, VIEW.artifacts.id), true);
+  assert.equal(mustLeavePr(T1, "tasks-thread-pr"), false);
+  assert.equal(mustLeavePr(T1, VIEW.artifacts.id), false);
+  assert.equal(mustLeavePr(bare, "tasks-thread-term"), false);
+  assert.equal(mustLeavePr(bare, "tasks-thread-chat"), false);
+});
+
+test("the Terminal view is the agent's own terminal, and a read-only stream only when it cannot be shown", () => {
+  const now = Date.now();
+  const worker = { id: "t1", terminal: "t1", task: "T1", role: "worker", state: "working", started_ms: now - 60_000 };
+  const reviewer = { id: "t2", terminal: "t2", task: "T1", role: "reviewer", state: "working", started_ms: now - 10_000 };
+  const ended = { id: "t3", terminal: "t3", task: "T9", role: "worker", state: "done", ended_ms: now - 1000, started_ms: now - 5000 };
+  const state = { live_agents: [worker, reviewer, ended, { id: "c", terminal: "c", task: null, role: "coordinator", state: "idle" }] };
+  // Whoever is at work now: the newer of a worker and its reviewer; a finished agent when none runs.
+  assert.equal(threadAgent(state, "T1", now).id, "t2");
+  assert.equal(threadAgent({ live_agents: [worker, { ...reviewer, state: "done" }] }, "T1", now).id, "t1");
+  assert.equal(threadAgent(state, "T9", now).id, "t3");
+  assert.equal(threadAgent(state, "T7", now), null);
+  // An agent without a start time is ordered by when it entered its state.
+  const byState = { live_agents: [{ ...worker, started_ms: undefined, since_ms: now - 5 }, { ...reviewer, started_ms: undefined, since_ms: now - 9 }] };
+  assert.equal(threadAgent(byState, "T1", now).id, "t1");
+  // The window holds a terminal it lists by address; a finished program is not one to type into.
+  const held = [{ address: "t2", state: "running" }];
+  assert.equal(terminalReachable(reviewer, held), true);
+  assert.equal(terminalReachable(worker, held), false, "a terminal the window does not list");
+  assert.equal(terminalReachable(ended, [{ address: "t3", state: "running" }]), false);
+  assert.equal(terminalReachable(null, held), false);
+  assert.equal(terminalChild(reviewer, held), VIEW.term.id);
+  assert.equal(terminalChild(worker, held), VIEW.stream.id);
+  assert.equal(terminalChild(null, held), VIEW.stream.id);
+});
+
+test("the head's Review is the Ready row's Review, and its status line is the agent's", () => {
+  for (const id of ["T1", "T2", "T3", "T4", "T5", "T6"]) {
+    const task = boardTask(id);
+    assert.equal(canReview(task), rowActions(task).some((act) => act.id === "review"), id);
+  }
+  assert.equal(reportLine({ last_status: { message: " Fixing the tests ", progress: 40 } }), "Fixing the tests · 40%");
+  assert.equal(reportLine({ last_status: { message: "Done" } }), "Done");
+  assert.equal(reportLine({}), null);
 });
 
 test("the changed files are the biggest first, and a binary file says so", () => {
@@ -701,6 +1048,14 @@ test("the checks are the ones the hand-in recorded, with their exit codes", () =
   assert.equal(handInChecks(timedOut).rows[0].state, "unknown");
 });
 
+test("the proof the hand-in named is listed by file name and path", () => {
+  const named = { attempts: [{ report: { proofs: [".shprd/proof/T5-usage.txt"] } }] };
+  assert.deepEqual(handInProofs(named), [{ name: "T5-usage.txt", path: ".shprd/proof/T5-usage.txt" }]);
+  // A report that names none, or a service that predates the field, lists none.
+  assert.deepEqual(handInProofs({ attempts: [{ report: { checks: [] } }] }), []);
+  assert.deepEqual(handInProofs(boardTask("T6")), []);
+});
+
 test("the reviewer's findings are worst first, each with its wave", () => {
   const found = reviewFindings(boardTask("T3"));
   assert.equal(found.length, 2);
@@ -736,6 +1091,24 @@ test("the review line names the reviewer and whether it was independent", () => 
   assert.deepEqual(reviewLine(none), { line: WORDS.noReview, degraded: false });
 });
 
+test("a failed task a person accepted offers Accept", () => {
+  const failed = { ...boardTask("T2"), status: "failed", derived: { status: "needs_you" } };
+  assert.equal(verbs(failed, "ask").accept, false);
+  const accepted = { ...failed, derived: { status: "ready" }, accepted_failure: true };
+  assert.equal(verbs(accepted, "ask").accept, true);
+  assert.equal(verbs(accepted, "checks").accept, false);
+});
+
+test("Accept is offered disabled, with the reason, where landing would refuse", () => {
+  const why = "T2 was handed in but no review was requested";
+  const blocked = { ...boardTask("T2"), accept_blocked: why };
+  const offered = verbs(blocked, "ask");
+  assert.equal(offered.accept, true, "the button is still on the card");
+  assert.equal(offered.acceptBlocked, why);
+  assert.match(offered.note, /Can't accept yet: T2 was handed in/);
+  assert.equal(verbs(boardTask("T2"), "ask").acceptBlocked, null);
+});
+
 test("the card offers Accept only where a merge policy asks", () => {
   const ready = boardTask("T2");
   assert.equal(verbs(ready, "ask").accept, true);
@@ -746,6 +1119,12 @@ test("the card offers Accept only where a merge policy asks", () => {
   }
   // A service that could not say leaves the decision to the engine.
   assert.equal(verbs(ready, null).accept, true);
+  // A task flagged for a protected path waits for the person under any policy.
+  for (const policy of ["checks", "auto"]) {
+    const flagged = verbs(ready, policy, { protected: ["AGENTS.md"] });
+    assert.equal(flagged.accept, true, policy);
+    assert.equal(flagged.note, null, policy);
+  }
   // A hand-in nobody reviewed yet is not a decision for the person: the card
   // offers no Accept until a review has passed it.
   const reported = { id: "T9", status: "reported", derived: { status: "working" }, attempts: [] };
@@ -768,11 +1147,26 @@ test("the card offers Accept only where a merge policy asks", () => {
   });
   // A landed or dropped task is not a decision any more.
   for (const id of ["T1", "T4"]) {
-    assert.deepEqual(verbs(boardTask(id), "ask"), { accept: false, sendBack: false, drop: false, note: null });
+    assert.deepEqual(verbs(boardTask(id), "ask"), { accept: false, acceptBlocked: null, sendBack: false, drop: false, note: null });
   }
   assert.equal(whereNow(boardTask("T1")), "Landed: its work is in the base branch.");
   assert.equal(whereNow(boardTask("T4")), "Landed: its work is in the base branch.");
   assert.equal(whereNow(null), "This task is no longer on the board.");
+});
+
+test("Review opens the Accept card as a 640 by 640 modal dialog for that task", () => {
+  const before = herdr.OVERLAYS.length;
+  const id = openAccept({ task: "T2", title: "Paging" });
+  assert.equal(herdr.OVERLAYS.length, before + 1);
+  const spec = herdr.OVERLAYS[herdr.OVERLAYS.length - 1];
+  assert.equal(spec.id, id);
+  assert.equal(spec.mod, "shprd-accept");
+  assert.equal(spec.kind, "dialog");
+  assert.equal(spec.modal, true, "it blocks the window under it, as Shepherdr's does");
+  assert.equal(spec.width, 640);
+  assert.equal(spec.height, 640);
+  assert.equal(spec.props.task, "T2", "the dialog is about the task it was opened for");
+  assert.equal(spec.props.overlay, id, "and knows its own id, to close itself on Esc");
 });
 
 // -- the task PR's reading of a landing ------------------------------------
@@ -805,4 +1199,560 @@ test("a local landing and a task that never landed say so, and open nothing", ()
   // nothing.
   assert.equal(openUrl({ kind: "pr", url: "" }), null);
   assert.equal(openUrl({ kind: "pr", url: "/pull/1" }), null);
+});
+
+test("the pull request bar says how big the change is and which branches it joins", () => {
+  assert.deepEqual(prSize(CHANGES), { files: "3 files", added: "+6", removed: "−0" });
+  assert.deepEqual(prSize({ files: [{ path: "a" }], added: 2, deleted: 1 }), { files: "1 file", added: "+2", removed: "−1" });
+  assert.equal(prSize(null), null, "before the changes were read there is no size to draw");
+  assert.equal(branchLine({ head: "shprd/m10b/T2" }, CHANGES), "shprd/m10b/T2 → main");
+  assert.equal(branchLine({ head: "shprd/m10b/T2" }, null), "shprd/m10b/T2", "no base known, only the head");
+  assert.equal(PR_WORDS.openOnGitHub, "Open on GitHub");
+  assert.equal(PR_WORDS.copyLink, "Copy link");
+  assert.equal(PR_WORDS.copied, "Copied");
+});
+
+// -- the tasks panel's search, filter row and groups (M11 U2) ---------------
+
+/** One task of the service fixture, by id. */
+function stateTask(id) {
+  return STATE.tasks.find((entry) => entry.id === id);
+}
+
+/** A board of `n` done tasks beside the fixture's other words. */
+function withDone(n) {
+  const extra = Array.from({ length: n }, (_, i) => ({
+    id: `D${i}`,
+    title: `finished ${i}`,
+    status: "done",
+    derived: { status: "done" },
+  }));
+  return { ...STATE, tasks: [...STATE.tasks.filter((t) => t.derived.status !== "done"), ...extra] };
+}
+
+test("the search finds a task by id, title, status word or PR number, and by nothing else", () => {
+  const t2 = stateTask("T2");
+  assert.equal(found(t2, "t2"), true);
+  assert.equal(found(t2, t2.title.split(" ")[0]), true);
+  assert.equal(found(t2, "ready"), true);
+  assert.equal(found({ ...t2, pr: { number: 42 } }, "#42"), true);
+  assert.equal(found(t2, "zzz-not-there"), false);
+  assert.equal(found(t2, ""), true);
+});
+
+test("typing an id leaves only that task's row", () => {
+  const view = listView(STATE, { query: "T3" });
+  const ids = view.groups.flatMap((g) => g.tasks.map((t) => t.id));
+  assert.deepEqual(ids, ["T3"]);
+});
+
+test("For you comes first: needs you, then Ready; Done is a line until opened", () => {
+  const view = listView(STATE, {});
+  assert.equal(view.groups[0].label, "For you");
+  assert.deepEqual(
+    view.groups[0].tasks.map((t) => t.derived.status),
+    ["needs_you", "ready"],
+  );
+  assert.equal(view.groups.some((g) => g.key === "done"), false);
+  assert.match(view.doneLine.label, /^\d+ done$/);
+  const opened = listView(STATE, { doneOpen: true });
+  assert.equal(opened.doneLine, null);
+  assert.equal(opened.groups.at(-1).key, "done");
+});
+
+test("an opened Done shows five rows and 'Show N more', whole once asked", () => {
+  const board = withDone(8);
+  const cut = listView(board, { doneOpen: true }).groups.find((g) => g.key === "done");
+  assert.equal(cut.tasks.length, DONE_SHOWN);
+  assert.equal(cut.cut, 3);
+  assert.equal(cut.count, 8);
+  const all = listView(board, { doneOpen: true, allDone: true }).groups.find((g) => g.key === "done");
+  assert.equal(all.tasks.length, 8);
+  assert.equal(all.more, true);
+});
+
+test("a folded heading is reported shut, except while searching", () => {
+  const shut = new Set(["working"]);
+  assert.equal(listView(STATE, { shut }).groups.find((g) => g.key === "working").shut, true);
+  assert.equal(listView(STATE, { shut, query: "T1" }).groups.find((g) => g.key === "working").shut, false);
+});
+
+test("a search finds Done tasks too, all shown", () => {
+  const view = listView(withDone(8), { query: "finished" });
+  assert.equal(view.doneLine, null);
+  assert.equal(view.groups.find((g) => g.key === "done").tasks.length, 8);
+});
+
+test("a status filter is that word's tasks, flat; the chips count what is there", () => {
+  const view = listView(STATE, { filter: "ready" });
+  assert.equal(view.groups.length, 1);
+  assert.equal(view.groups[0].flat, true);
+  assert.deepEqual(view.groups[0].tasks.map((t) => t.id), ["T2"]);
+  const chips = filterChips(STATE);
+  assert.deepEqual(chips.primary.map((c) => c.key), ["needs_you", "working", "ready"]);
+  assert.equal(chips.more.some((c) => c.key === "done"), true);
+  assert.equal(chips.primary.find((c) => c.key === "ready").count, 1);
+});
+
+test("minutes left show only when the service reports them", () => {
+  assert.equal(etaMinutes(stateTask("T5")), null);
+  assert.equal(etaMinutes({ eta_minutes: 12.2 }), 13);
+  assert.equal(etaMinutes({ derived: { eta_minutes: 4 } }), 4);
+  assert.equal(etaMinutes({ eta_minutes: 0 }), null);
+});
+
+/** A layout as `layout()` answers it, the panel and its stack as given. */
+const layoutWith = (hidden, active) => ({
+  id: "root",
+  children: [
+    { id: "panel", hidden, children: [{ id: "panel-body", type: "stack", active }] },
+  ],
+});
+
+test("the panel button that is lit is the one the layout shows, not one the bar remembers", () => {
+  assert.equal(shownPanel(layoutWith(false, "changes")), "changes");
+  assert.equal(shownPanel(layoutWith(false, "tasks")), "tasks");
+  // A hidden panel lights nothing, and so does a stack that has no button.
+  assert.equal(shownPanel(layoutWith(true, "tasks")), null);
+  assert.equal(shownPanel(layoutWith(false, "settings")), null);
+  assert.equal(shownPanel(null), null);
+  const lit = panelButtons(STATE, shownPanel(layoutWith(false, "changes")))
+    .filter((button) => button.active)
+    .map((button) => button.id);
+  assert.deepEqual(lit, ["changes"]);
+  assert.deepEqual(panelButtons(STATE, null).filter((button) => button.active), []);
+});
+
+test("each space gets its own panel back when it is shown again", () => {
+  const memory = new Map();
+  let last = null;
+  const look = (space, current) => {
+    const seen = rememberPanel(memory, last, space, current);
+    last = seen.last;
+    return seen.restore;
+  };
+  // Space a: Changes open. Recorded, nothing to restore.
+  assert.equal(look("a", "changes"), undefined);
+  assert.equal(look("a", "changes"), undefined);
+  // Switch to space b, not seen before: the panel is left as it is.
+  assert.equal(look("b", "changes"), undefined);
+  // In b the person hides the panel.
+  assert.equal(look("b", null), undefined);
+  // Back to a: its Changes panel returns, even though the layout shows b's hidden one.
+  assert.equal(look("a", null), "changes");
+  // Then b again: hidden is what it had.
+  assert.equal(look("b", "changes"), null);
+  // No space at all changes nothing.
+  assert.equal(rememberPanel(memory, "b", null, "tasks").restore, undefined);
+});
+
+// -- SHPR-27: deps in the form, group by, pins, the done tick ----------------
+
+import { GROUP_MODES, groupMode, splitIds, taskIds } from "../mods/lib/board.js";
+import { tasksMenu } from "../mods/lib/menu.js";
+import { status as statusWord } from "../mods/lib/tokens.js";
+
+test("the add-task form takes the ids a task waits for, and refuses one nobody has", () => {
+  const body = { title: "T2", scope: "a", acceptance: "ok", deps: "T1, T1  M2" };
+  assert.deepEqual(newTask(body).deps, ["T1", "M2"]);
+  assert.equal(newTask(body).ready, true, "without a board to check against, the service decides");
+  assert.equal(newTask({ ...body, deps: "" }).deps.length, 0);
+  const checked = newTask(body, ["T1"]);
+  assert.equal(checked.ready, false);
+  assert.match(checked.why, /No task named M2/);
+  assert.equal(newTask(body, ["T1", "M2"]).ready, true);
+  assert.deepEqual(splitIds(null), []);
+  assert.deepEqual(taskIds(STATE).slice(0, 1), [STATE.tasks[0].id]);
+});
+
+test("Group by Status gives every word its own heading, Needs you and Ready included", () => {
+  const view = listView(STATE, { groupBy: "status" });
+  assert.equal(view.groups.some((g) => g.key === "you"), false);
+  assert.equal(view.groups[0].key, "needs_you");
+  assert.equal(view.groups.find((g) => g.key === "ready").tasks.length, 1);
+  assert.match(view.doneLine.label, /done$/);
+});
+
+test("Group by Space gives each space its own heading, tasks in status order", () => {
+  const board = {
+    tasks: [
+      { id: "A1", title: "a", space: "s1", derived: { status: "working" } },
+      { id: "A2", title: "b", space: "s1", derived: { status: "needs_you" } },
+      { id: "B1", title: "c", space: "s2", derived: { status: "done" } },
+      { id: "C1", title: "d", derived: { status: "queued" } },
+    ],
+  };
+  const spaces = [{ id: "s1", name: "shop" }, { id: "s2", name: "docs" }];
+  const view = listView(board, { groupBy: "space", spaces });
+  assert.deepEqual(view.groups.map((g) => g.label), ["shop"], "Done is folded out of the space groups");
+  assert.deepEqual(view.groups[0].tasks.map((t) => t.id), ["A2", "A1", "C1"], "a task with no space is in the first space");
+  assert.equal(view.doneLine.label, "1 done");
+  const open = listView(board, { groupBy: "space", spaces, doneOpen: true });
+  assert.equal(open.groups.at(-1).key, "done", "an opened Done is its own group, which folds back");
+  assert.equal(open.doneLine, null);
+});
+
+test("There is no pinned group: a row has no star and listView takes no pins (SHPR-78)", () => {
+  const view = listView(STATE, { pinned: new Set(["T3", "T1"]) });
+  assert.equal(view.groups.some((g) => g.key === "pinned"), false);
+  assert.equal(groupMode("nonsense"), "you");
+  assert.equal(groupMode("space"), "space");
+  assert.deepEqual(GROUP_MODES.map((m) => m.key), ["you", "space", "status"]);
+});
+
+test("Done is a grey tick, and only Ready is green", () => {
+  assert.deepEqual([statusWord("done").glyph, statusWord("done").tone], ["tick", "dim"]);
+  assert.deepEqual([statusWord("ready").glyph, statusWord("ready").tone], ["tick", "green"]);
+});
+
+test("the Tasks popups list their rows and mark the one in force", () => {
+  const group = tasksMenu({ menu: "group", items: GROUP_MODES, current: "space" });
+  assert.equal(group[0].heading, "Group by");
+  assert.deepEqual(group.slice(1).map((r) => r.pick), [
+    { menu: "group", key: "you" },
+    { menu: "group", key: "space" },
+    { menu: "group", key: "status" },
+  ]);
+  assert.equal(group[2].hint, "✓");
+  const more = tasksMenu({ menu: "more", items: [{ key: "done", word: "Done", count: 4 }], current: "all" });
+  assert.deepEqual(more.map((r) => [r.label, r.hint]), [["Done", "4"]]);
+});
+
+test("a Waiting line from the engine keeps its path and task id on the row", () => {
+  const line = "Waiting: crates/shprd/tests is in use by install-layout-source";
+  assert.equal(secondLine({ title: "t", last_status: { message: line } }), line);
+  assert.equal(secondLine({ title: "t", last_status: { message: "x".repeat(60) } }).length, 40);
+});
+
+// ---- SHPR-67: old tasks never block a fresh start ----
+
+const NOW = 1_000_000_000_000;
+const HOURS = 60 * 60 * 1000;
+const aged = (id, word, hours, extra = {}) => ({
+  id,
+  title: `task ${id}`,
+  status: word === "done" ? "integrated" : "queued",
+  derived: { status: word },
+  added_at_ms: NOW - hours * HOURS,
+  touched_at_ms: NOW - hours * HOURS,
+  ...extra,
+});
+
+test("an open task untouched for hours is old; a fresh one, a working one and a done one are not", () => {
+  const board = {
+    tasks: [
+      aged("OLD1", "to_do", 9),
+      aged("OLD2", "queued", 5),
+      aged("NEW", "needs_you", 0.1),
+      aged("ASKED", "needs_you", 9),
+      aged("RUN", "working", 9),
+      aged("DONE", "done", 9),
+      { ...aged("NOTIME", "to_do", 9), touched_at_ms: undefined },
+    ],
+  };
+  // A needs-you task is never old, however long it has waited (UXC-7).
+  assert.deepEqual([...staleIds(board, NOW)].sort(), ["OLD1", "OLD2"]);
+  assert.equal(STALE_MS, 3 * HOURS);
+});
+
+test("a task with an open review-out ask is never old: it badges, stays on top, and draws its three answers", () => {
+  const ask = {
+    id: "review-out-2",
+    task: "OUT",
+    kind: "question",
+    text: "OUT: its review failed; answer the card `review-out-2`",
+    options: ["retry with another round", "take it as it is", "drop it"],
+  };
+  const board = {
+    tasks: [aged("OUT", "needs_you", 20), aged("OLD", "queued", 20)],
+    asks: [ask],
+    needs: [
+      { seq: 1, task: "OUT", body: ask.text, default_action: "x", kind: "decision", actions: ["review", "drop"] },
+    ],
+  };
+  assert.deepEqual([...staleIds(board, NOW)], ["OLD"], "only the task nobody asks about is old");
+  assert.equal(counts(board, NOW).needs, 1, "the badge counts the asking task");
+  const view = listView(board, { now: NOW });
+  assert.notEqual(view.groups[0].key, "older", "the asking task is not folded away");
+  assert.ok(view.groups[0].tasks.some((t) => t.id === "OUT"));
+  const drawn = cardsOf(board, { asks: [ask] }).filter((card) => card.task === "OUT");
+  assert.equal(drawn.length, 1);
+  assert.deepEqual(
+    drawn[0].options.map((option) => option.answer),
+    ["retry with another round", "take it as it is", "drop it"],
+  );
+});
+
+test("a queued task waiting on an old task is old with it, however new", () => {
+  const board = {
+    tasks: [
+      aged("OLD", "to_do", 9),
+      aged("BEHIND", "to_do", 0.1, { deps: ["OLD"] }),
+      aged("BEHIND2", "to_do", 0.1, { deps: ["BEHIND"] }),
+      aged("FREE", "to_do", 0.1),
+    ],
+  };
+  assert.deepEqual([...staleIds(board, NOW)].sort(), ["BEHIND", "BEHIND2", "OLD"]);
+});
+
+test("old tasks fold into one Older group at the bottom; new ones are on top, newest first", () => {
+  const board = {
+    tasks: [
+      aged("OLD1", "to_do", 9),
+      aged("OLD2", "to_do", 8),
+      aged("ASKED", "needs_you", 9),
+      aged("N1", "to_do", 0.5),
+      aged("N2", "to_do", 0.1),
+      aged("D1", "done", 20),
+    ],
+  };
+  const view = listView(board, { now: NOW });
+  assert.deepEqual(view.groups.map((g) => g.key), ["you", "to_do", "older"]);
+  assert.deepEqual(view.groups[1].tasks.map((t) => t.id), ["N2", "N1"], "newest first");
+  const older = view.groups[2];
+  assert.equal(older.shut, true, "folded until opened");
+  assert.equal(older.stale, true);
+  assert.deepEqual([...older.ids].sort(), ["OLD1", "OLD2"]);
+  assert.equal(view.doneLine.label, "1 done");
+  assert.equal(listView(board, { now: NOW, olderOpen: true }).groups[2].shut, false);
+  // A search still finds an old task in place.
+  const found = listView(board, { now: NOW, query: "OLD1" });
+  assert.deepEqual(found.groups.flatMap((g) => g.tasks.map((t) => t.id)), ["OLD1"]);
+  assert.equal(found.groups[0].key, "to_do");
+});
+
+test("an old needs-you task is counted in the badge and never sits under Older", () => {
+  const board = { tasks: [aged("OLD", "needs_you", 9), aged("NEW", "needs_you", 0.1)] };
+  assert.equal(counts(board, NOW).needs, 2);
+  const view = listView(board, { now: NOW });
+  assert.deepEqual(view.groups.map((g) => g.key), ["you"]);
+  assert.deepEqual(view.groups[0].tasks.map((t) => t.id).sort(), ["NEW", "OLD"]);
+});
+
+test("UXC-7: a needs-you row offers its newest decision card's button, and Drop", () => {
+  const t = { ...aged("T", "needs_you", 9), status: "failed" };
+  const state = (needs, asks = []) => ({ tasks: [t], needs, asks });
+  const ids = (s) => rowActions(t, s).map((a) => a.id);
+  const card = (seq, actions, kind = "decision") => ({ task: "T", body: "b", seq, kind, actions });
+  assert.deepEqual(ids(state([card(1, ["retry"]), card(2, ["resend_brief"])])), ["resend_brief", "drop"]);
+  assert.equal(rowActions(t, state([card(2, ["resend_brief"])]))[0].action, "task.resend_brief");
+  // A newer notice never speaks for the task.
+  assert.deepEqual(ids(state([card(2, ["resend_brief"]), card(5, ["dismiss"], "notice")])), ["resend_brief", "drop"]);
+  assert.deepEqual(ids(state([card(2, ["drop"])])), ["drop"]);
+  assert.deepEqual(ids(state([card(2, ["retry"])], [{ task: "T", id: 1, options: ["a", "b"] }])), ["answer", "drop"]);
+  // No state, or no card: the default acts.
+  assert.deepEqual(ids(state([])), ["retry", "drop"]);
+});
+
+test("SHPR-69: another product's Assistant tab is not a pill in shprd's tab bar", () => {
+  const space = { id: "sp1", tabs: [
+    { id: "tb1", name: "Assistant", active: false },
+    { id: "tb2", name: "shprd", active: true },
+    { id: "tb3", name: "pi·T1" },
+  ] };
+  const panes = [
+    { tab: "tb1", mod: "chat" },
+    { tab: "tb2", mod: "shprd-chat" },
+    { tab: "tb3", terminal: "t9" },
+  ];
+  assert.equal(foreignTab(space.tabs[0], panes), true);
+  assert.equal(foreignTab(space.tabs[1], panes), false);
+  const rows = tabRows(space, panes, STATE);
+  assert.deepEqual(rows.map((row) => row.id), ["tb2", "tb3"]);
+  // The tabs keep the host's own positions: a drag still names the right slot.
+  assert.deepEqual(rows.map((row) => row.index), [1, 2]);
+});
+
+// SHPR-79: a shprd space's center shows shprd's coordinator, whatever Shepherdr's tab bar did.
+import { seenWith, strayTab, shprdCoordinatorTab } from "../mods/lib/tabstrip.js";
+import { COLUMN, GUTTER, bubbleSpan, bubbleWidth } from "../mods/lib/chat.js";
+
+test("strayTab moves a shprd space off Shepherdr's Assistant, and only there (SHPR-79)", () => {
+  const panes = [{ tab: "assist", mod: "chat" }, { tab: "shprd-coordinator-sp", mod: "shprd-chat" }];
+  const space = (active) => ({
+    id: "sp",
+    name: "shprd · scratchpad",
+    tabs: [
+      { id: "assist", name: "Assistant", active: active === "assist" },
+      { id: "shprd-coordinator-sp", name: "shprd", active: active === "shprd-coordinator-sp" },
+    ],
+  });
+  assert.equal(shprdCoordinatorTab({ id: "shprd-coordinator-sp" }), true);
+  assert.equal(shprdCoordinatorTab({ id: "assist" }), false);
+  assert.equal(strayTab(space("assist"), panes), "shprd-coordinator-sp");
+  assert.equal(strayTab(space("shprd-coordinator-sp"), panes), null);
+  // A space with no shprd coordinator (Shepherdr's own, or `shprd · shprd` where the orchestrator
+  // runs) keeps its Assistant: nothing moves.
+  const theirs = { id: "x", name: "sweatbrain", tabs: [{ id: "assist", name: "Assistant", active: true }] };
+  assert.equal(strayTab(theirs, panes), null);
+});
+
+test("seenWith notes shprd's spaces so Shepherdr never adds an Assistant to them (SHPR-79)", () => {
+  const spaces = [
+    { id: "a", name: "shprd · scratchpad" },
+    { id: "b", name: "sweatbrain" },
+    { id: "m/c", name: "shprd · remote", machine: "m" },
+  ];
+  assert.deepEqual(seenWith(["b"], spaces), ["b", "a"]);
+  assert.equal(seenWith(["a", "b"], spaces), null);
+  assert.equal(seenWith(null, spaces), null, "Shepherdr has not started the list: it notes every space itself");
+});
+
+test("the chat's column and bubbles follow Shepherdr's at every pane width (SHPR-79)", () => {
+  assert.equal(COLUMN, 760);
+  assert.equal(GUTTER, 36);
+  assert.equal(bubbleWidth(600), 480);
+  assert.equal(bubbleWidth(2000), 608);
+  assert.equal(bubbleWidth(100), 240);
+});
+
+test("a done task's second line says it is done, never a stale agent line; the bar follows the board (SHPR-79)", () => {
+  const stale = { id: "T1", title: "ops", status: "passed", derived: { status: "done", reason: "No longer waiting" }, last_status: { message: "committed, handing in" }, attempts: [] };
+  assert.equal(secondLine(stale), "Done");
+  const reported = { ...stale, attempts: [{ report: { summary: "Added convert()" } }] };
+  assert.equal(secondLine(reported), "Added convert()");
+  const t = (id, status) => ({ id, title: id, status: "queued", derived: { status }, attempts: [] });
+  const state = (...words) => ({ run: { id: "tcalc1" }, tasks: words.map((w, i) => t(`T${i}`, w)) });
+  assert.equal(runShort(state("working", "working", "ready", "to_do")), "run tcalc1 · 2 working · 1 ready");
+  assert.equal(runShort(state("done", "done")), "run tcalc1 · all done");
+});
+
+test("a bubble gets a definite width from its longest line, within the column (SHPR-79)", () => {
+  // The coordinator's bubbles keep their sizing: 8 px a character + 30, never under 120.
+  assert.equal(bubbleSpan("ok", 900), 120);
+  const line = "T1 landed. T2 and T3 can now start, so I'll run a tick.";
+  assert.equal(bubbleSpan(line, 900), line.length * 8 + 30);
+  assert.equal(bubbleSpan(line, 900, false), line.length * 8 + 30);
+  assert.equal(bubbleSpan("x".repeat(500), 900), bubbleWidth(900));
+  assert.equal(bubbleSpan("x".repeat(500), 300), bubbleWidth(300));
+  const second = "and a second much longer line of words here";
+  assert.equal(bubbleSpan(`short\n${second}`, 900), second.length * 8 + 30);
+});
+
+test("the person's bubble hugs its text, up to the same maximum width", () => {
+  assert.equal(bubbleSpan("ok", 900, true), 96);
+  const short = "shprd restarted and is now running version 0.0.0 (commit 7c2b6b571).";
+  assert.equal(bubbleSpan(short, 1060, true), short.length * 7 + 26);
+  assert.ok(bubbleSpan(short, 1060, true) < bubbleSpan(short, 1060, false));
+  assert.ok(bubbleSpan(short, 1060, true) < bubbleWidth(1060));
+  assert.equal(bubbleSpan("x".repeat(500), 900, true), bubbleWidth(900));
+});
+
+// UXC-5: the Drop dialog has one Drop task button, in one place at a time.
+test("the Drop dialog never draws two Drop task controls, and Enter, Esc and a blank reason behave", async () => {
+  const { record, walk, keydown } = await import("gpui-kit");
+  const { default: Accept } = await import("../mods/shprd-accept/main.js");
+  const labelled = (root, label) => walk(root).filter((n) => n.kids.includes(label));
+  const open = (drop) => {
+    const view = new Accept();
+    view.cx = { notify() {}, timer: { after() {} } };
+    view.taskId = "T1";
+    view.state = { tasks: [{ id: "T1", title: "One", status: "reported", derived: { status: "needs_you" }, attempts: [] }] };
+    view.handle = { focus() {} };
+    if (drop) {
+      view.openDrop("row");
+      // Re-open with a spy: the field has focus at once, and again after layout settles.
+      let focused = 0;
+      const later = [];
+      view.reason.focus = () => {
+        focused += 1;
+      };
+      view.cx.timer.after = (_ms, fn) => later.push(fn);
+      view.openDrop("row");
+      assert.equal(focused, 1);
+      later.forEach((fn) => fn());
+      assert.equal(focused, 2);
+    }
+    const sent = [];
+    view.verb = (action, extra) => sent.push([action, extra]);
+    return { view, sent, draw: () => view.render({}) };
+  };
+  record(true);
+  try {
+    // Opened on the step (a row's Drop): one "Drop task", no "Drop task…".
+    const row = open(true);
+    assert.equal(row.view.dropFrom, "row");
+    assert.equal(labelled(row.draw(), "Drop task").length, 1);
+    assert.equal(labelled(row.draw(), "Drop task…").length, 0);
+    // Esc closes (never drops) where the dialog opened on the step.
+    let closed = 0;
+    row.view.close = () => {
+      closed += 1;
+    };
+    keydown(row.draw(), "accept-card", { key: "escape" });
+    assert.equal(closed, 1);
+    assert.deepEqual(row.sent, []);
+    // Enter in the field is the input's submit; a blank reason sends the default.
+    row.view.reason.submit();
+    assert.deepEqual(row.sent, [["task.drop", { reason: "No reason given" }]]);
+    row.view.reason.set_value("  too slow  ");
+    row.view.reason.submit();
+    assert.deepEqual(row.sent[1], ["task.drop", { reason: "too slow" }]);
+
+    // Opened from the footer: "Drop task…" is the only label until the step opens.
+    const foot = open(false);
+    assert.equal(labelled(foot.draw(), "Drop task…").length, 1);
+    assert.equal(labelled(foot.draw(), "Drop task").length, 0);
+    walk(foot.draw()).find((n) => n.idv === "accept-drop").click({}, { notify() {}, stop_propagation() {} });
+    assert.equal(foot.view.dropping, true);
+    assert.equal(labelled(foot.draw(), "Drop task").length, 1);
+    assert.equal(labelled(foot.draw(), "Drop task…").length, 0);
+    // Esc is Back here: the footer returns, the typed text stays, nothing is dropped.
+    foot.view.reason.set_value("keep me");
+    keydown(foot.draw(), "accept-card", { key: "escape" });
+    assert.equal(foot.view.dropping, false);
+    assert.equal(foot.view.reason.value(), "keep me");
+    assert.deepEqual(foot.sent, []);
+  } finally {
+    record(false);
+  }
+});
+
+// --- "For you" holds only what is the person's (m11-close T6) -----------------------------
+
+import { counts as boardCounts, forYou, integrationRow, rowActions as boardRowActions } from "../mods/lib/board.js";
+import { panelButtons as stripButtons } from "../mods/lib/tabstrip.js";
+
+const COORD = {
+  tasks: [
+    // The engine's own card: the coordinator settles it, the person only sees it.
+    { id: "T1", title: "stuck", status: "reported", derived: { status: "needs_you", need: "attention", reason: "review brief not delivered", for_you: false } },
+    // An agent's question and a Ready accept are the person's.
+    { id: "T2", title: "asks", status: "working", derived: { status: "needs_you", need: "asks", reason: "Question for you", for_you: true } },
+    { id: "T3", title: "protected", status: "passed", derived: { status: "ready" } },
+    // Under merge=auto the engine lands it: Landing, never For you.
+    { id: "T4", title: "landing", status: "passed", derived: { status: "merging", reason: "Landing", for_you: true } },
+  ],
+  integration_pr: null,
+};
+
+test("an operational card is not counted in For you or the Needs you badge", () => {
+  assert.equal(forYou(COORD.tasks[0]), false);
+  assert.equal(forYou(COORD.tasks[1]), true);
+  const tally = boardCounts(COORD);
+  assert.equal(tally.needs, 1, "only the agent's question");
+  assert.equal(tally.ready, 1);
+  assert.equal(stripButtons(COORD).find((b) => b.id === "tasks").needs, 1);
+  const view = listView(COORD, {});
+  const you = view.groups.find((g) => g.key === "you");
+  assert.deepEqual(you.tasks.map((t) => t.id), ["T2", "T3"]);
+  const theirs = view.groups.find((g) => g.key === "coordinator");
+  assert.deepEqual(theirs.tasks.map((t) => t.id), ["T1"], "still visible on the board");
+  assert.ok(view.groups.some((g) => g.key === "merging" && g.tasks[0].id === "T4"), "Landing is a merge, not For you");
+});
+
+test("a payload from an older service reads a needs-you row as the person's", () => {
+  assert.equal(forYou({ derived: { status: "needs_you" } }), true);
+});
+
+test("the integration pull request is the one card For you adds once every task landed", () => {
+  const state = { ...COORD, tasks: [], integration_pr: { base: "main", branch: "integration/m11", landed: 3 } };
+  const row = integrationRow(state);
+  assert.equal(row.synthetic, "integration_pr");
+  assert.match(row.title, /main/);
+  assert.equal(boardCounts(state).needs, 1);
+  const you = listView(state, {}).groups.find((g) => g.key === "you");
+  assert.equal(you.tasks[0].id, "PR");
+  assert.deepEqual(boardRowActions(row), [], "it opens no task and offers no verb");
+  assert.equal(integrationRow({ ...state, integration_pr: undefined }), null);
 });

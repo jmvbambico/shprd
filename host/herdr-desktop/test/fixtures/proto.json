@@ -1,0 +1,590 @@
+{
+ "seq": 40,
+ "run": {
+  "id": "m11",
+  "repo": "/Users/demo/projects/shprd",
+  "base_branch": "main",
+  "integration_branch": "integration/m11"
+ },
+ "tasks": [
+  {
+   "id": "SHPR-21",
+   "title": "Spaces tree in the sidebar",
+   "status": "integrated",
+   "derived": {
+    "status": "done"
+   },
+   "scope": [],
+   "acceptance": [],
+   "tags": [],
+   "skills": [],
+   "deps": [],
+   "space": "sp-shprd",
+   "phase": "Sidebar",
+   "attempts": [
+    {
+     "n": 1,
+     "agent": "claude",
+     "branch": "shprd/m11/SHPR-21",
+     "gates": [],
+     "reviews": []
+    }
+   ]
+  },
+  {
+   "id": "SHPR-22",
+   "title": "Agents pane under the spaces",
+   "status": "working",
+   "derived": {
+    "status": "working"
+   },
+   "scope": [],
+   "acceptance": [],
+   "tags": [],
+   "skills": [],
+   "deps": [
+    "SHPR-21"
+   ],
+   "space": "sp-shprd",
+   "phase": "Sidebar",
+   "attempts": [
+    {
+     "n": 1,
+     "agent": "claude",
+     "branch": "shprd/m11/SHPR-22",
+     "gates": [],
+     "reviews": []
+    }
+   ],
+   "last_status": {
+    "message": "rows draw; grouping next",
+    "progress": 62,
+    "seq": 9
+   }
+  },
+  {
+   "id": "SHPR-23",
+   "title": "Tasks | Graph switch in the panel",
+   "status": "failed",
+   "derived": {
+    "status": "needs_you",
+    "reason": "Reviewer found 2 majors",
+    "need": "attention"
+   },
+   "scope": [],
+   "acceptance": [],
+   "tags": [],
+   "skills": [],
+   "deps": [
+    "SHPR-21"
+   ],
+   "space": "sp-shprd",
+   "phase": "Sidebar",
+   "attempts": [
+    {
+     "n": 1,
+     "agent": "claude",
+     "branch": "shprd/m11/SHPR-23",
+     "gates": [],
+     "reviews": []
+    }
+   ]
+  },
+  {
+   "id": "SHPR-24",
+   "title": "Graph view from the board data",
+   "status": "queued",
+   "derived": {
+    "status": "queued",
+    "reason": "after SHPR-23"
+   },
+   "scope": [],
+   "acceptance": [],
+   "tags": [],
+   "skills": [],
+   "deps": [
+    "SHPR-23"
+   ],
+   "space": "sp-shprd",
+   "phase": "Sidebar",
+   "attempts": [
+    {
+     "n": 1,
+     "agent": "claude",
+     "branch": "shprd/m11/SHPR-24",
+     "gates": [],
+     "reviews": []
+    }
+   ]
+  },
+  {
+   "id": "SHPR-25",
+   "title": "Live agents on /api/state",
+   "status": "integrated",
+   "derived": {
+    "status": "done"
+   },
+   "scope": [],
+   "acceptance": [],
+   "tags": [],
+   "skills": [],
+   "deps": [],
+   "space": "sp-shprd",
+   "phase": "Server",
+   "attempts": [
+    {
+     "n": 1,
+     "agent": "claude",
+     "branch": "shprd/m11/SHPR-25",
+     "gates": [],
+     "reviews": []
+    }
+   ]
+  },
+  {
+   "id": "SHPR-26",
+   "title": "Stream agent state changes",
+   "status": "working",
+   "derived": {
+    "status": "working"
+   },
+   "scope": [],
+   "acceptance": [],
+   "tags": [],
+   "skills": [],
+   "deps": [
+    "SHPR-25"
+   ],
+   "space": "sp-shprd",
+   "phase": "Server",
+   "attempts": [
+    {
+     "n": 1,
+     "agent": "claude",
+     "branch": "shprd/m11/SHPR-26",
+     "gates": [],
+     "reviews": []
+    }
+   ],
+   "last_status": {
+    "message": "diffing states",
+    "progress": 35,
+    "seq": 9
+   }
+  },
+  {
+   "id": "SHPR-27",
+   "title": "Thread Terminal view for headless agents",
+   "status": "queued",
+   "derived": {
+    "status": "queued",
+    "reason": "after SHPR-26"
+   },
+   "scope": [],
+   "acceptance": [],
+   "tags": [],
+   "skills": [],
+   "deps": [
+    "SHPR-26",
+    "SHPR-22"
+   ],
+   "space": "sp-shprd",
+   "phase": "Server",
+   "attempts": [
+    {
+     "n": 1,
+     "agent": "claude",
+     "branch": "shprd/m11/SHPR-27",
+     "gates": [],
+     "reviews": []
+    }
+   ]
+  },
+  {
+   "id": "SHPR-28",
+   "title": "Run workers headless",
+   "status": "passed",
+   "derived": {
+    "status": "ready"
+   },
+   "scope": [],
+   "acceptance": [],
+   "tags": [],
+   "skills": [],
+   "deps": [
+    "SHPR-25"
+   ],
+   "space": "sp-shprd",
+   "phase": "Server",
+   "attempts": [
+    {
+     "n": 1,
+     "agent": "claude",
+     "branch": "shprd/m11/SHPR-28",
+     "gates": [],
+     "reviews": []
+    }
+   ],
+   "last_status": {
+    "message": "all gates pass",
+    "progress": 100,
+    "seq": 9
+   }
+  },
+  {
+   "id": "SHOP-1",
+   "title": "Cart totals",
+   "status": "integrated",
+   "derived": {
+    "status": "done"
+   },
+   "scope": [],
+   "acceptance": [],
+   "tags": [],
+   "skills": [],
+   "deps": [],
+   "space": "sp-shop",
+   "phase": "Checkout",
+   "attempts": [
+    {
+     "n": 1,
+     "agent": "claude",
+     "branch": "shprd/m11/SHOP-1",
+     "gates": [],
+     "reviews": []
+    }
+   ]
+  },
+  {
+   "id": "SHOP-2",
+   "title": "Stripe webhook retries",
+   "status": "working",
+   "derived": {
+    "status": "working"
+   },
+   "scope": [],
+   "acceptance": [],
+   "tags": [],
+   "skills": [],
+   "deps": [
+    "SHOP-1"
+   ],
+   "space": "sp-shop",
+   "phase": "Checkout",
+   "attempts": [
+    {
+     "n": 1,
+     "agent": "claude",
+     "branch": "shprd/m11/SHOP-2",
+     "gates": [],
+     "reviews": []
+    }
+   ],
+   "last_status": {
+    "message": "writing the retry test",
+    "progress": 48,
+    "seq": 9
+   }
+  },
+  {
+   "id": "SHOP-3",
+   "title": "Order email template",
+   "status": "queued",
+   "derived": {
+    "status": "queued",
+    "reason": "after SHOP-2"
+   },
+   "scope": [],
+   "acceptance": [],
+   "tags": [],
+   "skills": [],
+   "deps": [
+    "SHOP-2"
+   ],
+   "space": "sp-shop",
+   "phase": "Checkout",
+   "attempts": [
+    {
+     "n": 1,
+     "agent": "claude",
+     "branch": "shprd/m11/SHOP-3",
+     "gates": [],
+     "reviews": []
+    }
+   ]
+  },
+  {
+   "id": "RLY-4",
+   "title": "Pairing QR on first run",
+   "status": "failed",
+   "derived": {
+    "status": "needs_you",
+    "reason": "Asks you a question",
+    "need": "asks"
+   },
+   "scope": [],
+   "acceptance": [],
+   "tags": [],
+   "skills": [],
+   "deps": [],
+   "space": "sp-relay",
+   "phase": "Pairing",
+   "attempts": [
+    {
+     "n": 1,
+     "agent": "claude",
+     "branch": "shprd/m11/RLY-4",
+     "gates": [],
+     "reviews": []
+    }
+   ]
+  },
+  {
+   "id": "RLY-5",
+   "title": "Reconnect with backoff",
+   "status": "queued",
+   "derived": {
+    "status": "queued",
+    "reason": "after RLY-4"
+   },
+   "scope": [],
+   "acceptance": [],
+   "tags": [],
+   "skills": [],
+   "deps": [
+    "RLY-4"
+   ],
+   "space": "sp-relay",
+   "phase": "Pairing",
+   "attempts": [
+    {
+     "n": 1,
+     "agent": "claude",
+     "branch": "shprd/m11/RLY-5",
+     "gates": [],
+     "reviews": []
+    }
+   ]
+  }
+ ],
+ "agents": [
+  {
+   "id": "claude",
+   "dry": false
+  },
+  {
+   "id": "codex",
+   "dry": false
+  },
+  {
+   "id": "pi",
+   "dry": false
+  }
+ ],
+ "needs": [
+  {
+   "task": "SHPR-23",
+   "body": "Reviewer found 2 majors",
+   "seq": 38,
+   "kind": "decision",
+   "actions": [
+    "ask_assistant",
+    "dismiss"
+   ],
+   "key": "need:38"
+  },
+  {
+   "task": "RLY-4",
+   "body": "Asks you a question",
+   "seq": 39,
+   "kind": "decision",
+   "actions": [
+    "ask_assistant",
+    "dismiss"
+   ],
+   "key": "need:39"
+  }
+ ],
+ "asks": [],
+ "finished": false,
+ "spaces": [
+  {
+   "id": "sp-shprd",
+   "name": "shprd",
+   "folder": "~/projects/shprd",
+   "branch": "integration/m11"
+  },
+  {
+   "id": "sp-shop",
+   "name": "shop",
+   "folder": "~/projects/shop",
+   "branch": "main"
+  },
+  {
+   "id": "sp-relay",
+   "name": "relay",
+   "folder": "~/projects/relay",
+   "branch": "feature/pairing"
+  }
+ ],
+ "live_agents": [
+  {
+   "id": "a1",
+   "space": "sp-shprd",
+   "task": null,
+   "role": "coordinator",
+   "program": "claude",
+   "state": "idle",
+   "since_s": 420
+  },
+  {
+   "id": "a2",
+   "space": "sp-shprd",
+   "task": "SHPR-22",
+   "role": "worker",
+   "program": "claude",
+   "state": "working",
+   "since_s": 240
+  },
+  {
+   "id": "a3",
+   "space": "sp-shprd",
+   "task": "SHPR-23",
+   "role": "reviewer",
+   "program": "codex",
+   "state": "needs_you",
+   "since_s": 60
+  },
+  {
+   "id": "a4",
+   "space": "sp-shprd",
+   "task": "SHPR-26",
+   "role": "worker",
+   "program": "pi",
+   "state": "working",
+   "since_s": 540
+  },
+  {
+   "id": "a5",
+   "space": "sp-shprd",
+   "task": "SHPR-28",
+   "role": "reviewer",
+   "program": "codex",
+   "state": "done",
+   "since_s": 720
+  },
+  {
+   "id": "a6",
+   "space": "sp-shop",
+   "task": null,
+   "role": "coordinator",
+   "program": "claude",
+   "state": "idle",
+   "since_s": 1500
+  },
+  {
+   "id": "a7",
+   "space": "sp-shop",
+   "task": "SHOP-2",
+   "role": "worker",
+   "program": "codex",
+   "state": "working",
+   "since_s": 130
+  },
+  {
+   "id": "a8",
+   "space": "sp-relay",
+   "task": "RLY-4",
+   "role": "worker",
+   "program": "claude",
+   "state": "needs_you",
+   "since_s": 190
+  }
+ ],
+ "chat": {
+  "SHPR-22": {
+   "program": "claude",
+   "messages": [
+    {
+     "role": "user",
+     "text": "Add an Agents pane under the Spaces tree: one two-line row per live agent, with a Grouped toggle.",
+     "tools": [],
+     "at_ms": null
+    },
+    {
+     "role": "assistant",
+     "text": "Reading the sidebar mod first, then I'll build the pane from the board's live agents.",
+     "tools": [
+      {
+       "name": "Read",
+       "summary": "mods/shprd-spaces/main.js"
+      },
+      {
+       "name": "Read",
+       "summary": "mods/lib/board.js"
+      }
+     ],
+     "at_ms": null
+    },
+    {
+     "role": "assistant",
+     "text": "The rows draw: dot, task, role · program, and a state line with its age. Grouping by space is next.",
+     "tools": [
+      {
+       "name": "Edit",
+       "summary": "mods/shprd-agents/main.js"
+      },
+      {
+       "name": "Bash",
+       "summary": "node --test test/tree.test.mjs"
+      }
+     ],
+     "at_ms": null
+    }
+   ]
+  },
+  "SHPR-23": {
+   "program": "codex",
+   "messages": [
+    {
+     "role": "user",
+     "text": "Review SHPR-23: the Tasks | Graph switch. Report blockers and majors with proof.",
+     "tools": [],
+     "at_ms": null
+    },
+    {
+     "role": "assistant",
+     "text": "Two majors. The switch resets the filter chip when you come back from Graph, and the graph's right column cuts a long wait list instead of wrapping it.",
+     "tools": [
+      {
+       "name": "Bash",
+       "summary": "git diff integration/m11 -- host/herdr-desktop"
+      },
+      {
+       "name": "Read",
+       "summary": "mods/shprd-tasks/main.js"
+      }
+     ],
+     "at_ms": null
+    }
+   ]
+  },
+  "coordinator": {
+   "program": "claude",
+   "messages": [
+    {
+     "role": "user",
+     "text": "What is left in m11?",
+     "tools": [],
+     "at_ms": null
+    },
+    {
+     "role": "assistant",
+     "text": "SHPR-22 and SHPR-26 are working; SHPR-23 needs you (two review majors). SHPR-24 and SHPR-27 wait on them.",
+     "tools": [],
+     "at_ms": null
+    }
+   ]
+  }
+ }
+}

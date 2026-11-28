@@ -25,7 +25,9 @@ use shprd_git::changed;
 use shprd_git::git::Git;
 
 use crate::api::AppState;
-use crate::dto::{ActionReply, FileChangeDto, NewTaskDto, TaskChangesDto};
+use crate::dto::{
+    ActionReply, COMMITS_LISTED, CommitDto, FileChangeDto, NewTaskDto, TaskChangesDto,
+};
 use crate::error::ApiReject;
 use crate::hub::Hub;
 use crate::ledger;
@@ -96,8 +98,6 @@ pub(crate) fn add(
              \"acceptance\": [\"…\"]}}"
         ))
     })?;
-    let (folded, _) = ledger::load(&state.repo)
-        .map_err(|err| ApiReject::internal(format!("could not read the run log: {err}")))?;
     let id = match request.id.as_deref().map(str::trim) {
         Some(id) if !id.is_empty() => id.to_string(),
         // An id that is only spaces is a caller that meant to name one and did
@@ -109,8 +109,9 @@ pub(crate) fn add(
                  from its title",
             ));
         }
-        None => task_id(&request.title, |id| folded.tasks.contains_key(id)),
+        None => String::new(),
     };
+    let id_given = id.clone();
     let kind = EventKind::TaskAdded {
         task: id,
         title: request.title,
@@ -130,8 +131,11 @@ pub(crate) fn add(
         after_write,
         engine: state.engine.as_ref(),
         merge: None,
+        id_prefix: shprd_core::settings::task_id_prefix(state.home.as_deref(), &state.repo),
     };
-    crate::actions::commit(&ctx, kind)
+    // No id given: the next free `<PREFIX>-<n>` is picked under the log's lock.
+    let given = Some(id_given).filter(|id| !id.is_empty());
+    crate::actions::commit_new_task(&ctx, given, kind)
 }
 
 /// `GET /api/tasks/{id}/changes`: the task's branch against its base.
@@ -178,8 +182,7 @@ pub(crate) fn changes_in(
     let base = run.integration_branch.clone();
     let branch = attempt.branch.clone();
     let git = Git::new(repo);
-    let merge_base = git
-        .run(&["merge-base", &base, &branch])
+    let merge_base = shprd_git::sync::attempt_base(&git, &base, &branch, false)
         .map_err(|err| git_failure(task_id, &base, &branch, &err.to_string()))?
         .lines()
         .next()
@@ -202,13 +205,48 @@ pub(crate) fn changes_in(
             binary: stat.binary,
         })
         .collect();
+    let range = format!("{merge_base}..{branch}");
+    let counted = git
+        .run(&["rev-list", "--count", &range])
+        .map_err(|err| git_failure(task_id, &base, &branch, &err.to_string()))?;
+    let commit_count = counted.trim().parse::<u64>().map_err(|_| {
+        git_failure(
+            task_id,
+            &base,
+            &branch,
+            &format!("git counted its commits as {:?}", counted.trim()),
+        )
+    })?;
+    let limit = format!("--max-count={COMMITS_LISTED}");
+    let commits: Vec<CommitDto> = git
+        .run(&["log", &limit, "--format=%h%x09%s", &range])
+        .map_err(|err| git_failure(task_id, &base, &branch, &err.to_string()))?
+        .lines()
+        .filter_map(|line| {
+            let (sha, subject) = line.split_once('\t')?;
+            Some(CommitDto {
+                sha: sha.to_string(),
+                subject: subject.to_string(),
+            })
+        })
+        .collect();
     Ok(TaskChangesDto {
+        commit_count,
+        commits,
         task: task_id.to_string(),
         added: files.iter().map(|file| file.added).sum(),
         deleted: files.iter().map(|file| file.deleted).sum(),
         base,
         branch,
         merge_base,
+        protected: shprd_core::gate::protected_undeclared(
+            &files
+                .iter()
+                .map(|file| file.path.clone())
+                .collect::<Vec<_>>(),
+            &task.scope,
+            &shprd_core::ask::high_risk_globs_in(repo),
+        ),
         files,
     })
 }
