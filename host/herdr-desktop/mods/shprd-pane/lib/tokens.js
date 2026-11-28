@@ -156,6 +156,21 @@ export const NEED = {
   provider: "Its provider cut it off",
 };
 
+/**
+ * What a needs-you task waits for, in the board's lower-case status style. One
+ * helper, so the Graph, the Tasks list and the toasts never disagree.
+ *
+ * "needs you" is only for what For you shows (`for_you` not false: the
+ * integration PR, or a task touching an undeclared protected path). Any other
+ * waiting task is the coordinator's: a worker's question (`need: asks`) reads
+ * "needs answer"; a card with choices (retry, take as is, drop, a proposal)
+ * reads "needs decision".
+ */
+export function waitLabel(task) {
+  if (task?.derived?.for_you !== false) return "needs you";
+  return task?.derived?.need === "asks" ? "needs answer" : "needs decision";
+}
+
 /** The count words a badge shows: *needs you* on the left, *ready* on the right. */
 export const COUNT = { needs: "Needs you", ready: "Ready" };
 
