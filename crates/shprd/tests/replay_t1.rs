@@ -99,6 +99,27 @@ impl Rig {
         String::from_utf8_lossy(&out.stdout).to_string()
     }
 
+    /// Records the board's Accept for `task`: the `task_approved` event the
+    /// desktop commits when the person accepts, pinned to `head`.
+    fn accept(&self, task: &str, number: u64, head: &str) {
+        let path = self.root.join(".shprd/events.jsonl");
+        let mut text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read log: {e}"));
+        let seq = text.lines().count() as u64 + 1;
+        let event = Event {
+            seq,
+            at_ms: 1_700_000_100_000 + seq,
+            actor: shprd_core::event::Actor::Human,
+            kind: EventKind::TaskApproved {
+                task: task.to_string(),
+                number,
+                head_sha: head.to_string(),
+            },
+        };
+        text.push_str(&serde_json::to_string(&event).unwrap_or_default());
+        text.push('\n');
+        std::fs::write(&path, text).unwrap_or_else(|e| panic!("write log: {e}"));
+    }
+
     fn events(&self) -> Vec<Event> {
         let text = std::fs::read_to_string(self.root.join(".shprd/events.jsonl"))
             .unwrap_or_else(|e| panic!("read log: {e}"));
@@ -269,7 +290,9 @@ fn the_t1_run_replays_to_landed_with_one_accept_and_no_scope_card() {
     write(&rig.forge, &script(false));
     let waiting = rig.ok(&["land", "T1"]);
     assert!(waiting.contains("waiting for your approval"), "{waiting}");
-    rig.ok(&["approve", "T1", "--yes"]);
+    // The one Accept is the person's click on the board, which commits
+    // `task_approved` to the log; no terminal step is involved.
+    rig.accept("T1", 1, &head);
     rig.ok(&["land", "T1"]);
 
     let log = rig.events();
