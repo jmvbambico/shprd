@@ -528,6 +528,7 @@ impl TaskSignal {
                 .asks
                 .values()
                 .filter(|ask| ask.task == id && ask.answer.is_none())
+                .filter(|_| !matches!(task.status, TaskStatus::Integrated | TaskStatus::Dropped))
                 .filter(|ask| !ask.is_retired_by_newer_attempt(task))
                 .filter(|ask| !shprd_core::ask::is_scope_card(&ask.id))
                 .map(|ask| AskFacts {

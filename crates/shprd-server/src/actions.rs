@@ -502,6 +502,15 @@ pub(crate) fn list_asks(repo: &Path, now_ms: u64) -> Result<AskListDto, ApiRejec
         .values()
         .filter(|ask| ask.is_open_at(now_ms))
         .filter(|ask| {
+            state.tasks.get(&ask.task).is_none_or(|task| {
+                !matches!(
+                    task.status,
+                    shprd_core::state::TaskStatus::Integrated
+                        | shprd_core::state::TaskStatus::Dropped
+                )
+            })
+        })
+        .filter(|ask| {
             state
                 .tasks
                 .get(&ask.task)
