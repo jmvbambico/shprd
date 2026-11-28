@@ -276,7 +276,7 @@ fn the_t1_run_replays_to_landed_with_one_accept_and_no_scope_card() {
     let landed: Vec<_> = log
         .iter()
         .filter_map(|e| match &e.kind {
-            EventKind::TaskLanded { task, outcome, .. } if task == "T1" => Some(outcome.clone()),
+            EventKind::TaskLanded { task, outcome, .. } if task == "T1" => Some(*outcome),
             _ => None,
         })
         .collect();
