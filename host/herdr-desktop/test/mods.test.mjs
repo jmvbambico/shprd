@@ -533,6 +533,20 @@ test("a card about a task the board calls finished is not news", () => {
   assert.equal(newsItems([{ seq: 42, kind: "task_landed", task: "T4" }], STATE).length, 1);
 });
 
+test("an operational card gets no Needs you toast; a protected-path accept does", () => {
+  const task = (id, for_you) => ({ id, status: "needs_you", derived: { status: "needs_you", need: "attention", for_you } });
+  const state = { tasks: [task("T7", false), task("T8", true)] };
+  const events = [
+    { seq: 50, kind: "escalated", task: "T7" },
+    { seq: 51, kind: "ask_raised", task: "T7" },
+    { seq: 52, kind: "escalated", task: "" },
+    { seq: 53, kind: "escalated", task: "T8" },
+  ];
+  const items = newsItems(events, state);
+  assert.deepEqual(items.map((item) => item.id), ["ev:53"]);
+  assert.equal(items[0].title, "T8 · Needs you");
+});
+
 test("a batch of events nobody acts on says nothing", () => {
   const quiet = EVENTS.filter((event) => ["spawned", "reported", "task_status", "task_added"].includes(event.kind));
   assert.deepEqual(newsItems(quiet, STATE), []);
