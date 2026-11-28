@@ -386,7 +386,7 @@ export function listView(
   if (groupBy !== "status") {
     const mine = byRank([
       ...rest.filter((t) => word(t) === "needs_you" && forYou(t)),
-      ...rest.filter((t) => word(t) === "ready"),
+      ...rest.filter((t) => word(t) === "ready" && forYou(t)),
     ]);
     const pr = searching ? null : integrationRow(state);
     const you = pr ? [pr, ...mine] : mine;
