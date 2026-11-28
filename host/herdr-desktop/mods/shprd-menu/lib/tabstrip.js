@@ -311,6 +311,22 @@ export function seenWith(seen, spaces) {
   return add.length > 0 ? [...seen, ...add] : null;
 }
 
+/**
+ * What a left release on a pill does: `{select: id}` for a plain click, or
+ * `{move: id, index}` for a drag from another pill (the host counts from one).
+ *
+ * **It compares tab ids, never positions.** A press remembers the pill it went
+ * down on; a position can shift between press and release (a sweep closing an
+ * ended task's tab moves every pill after it), and a click then looked like a
+ * drag to the wrong place, so the tab never got selected. A press with no
+ * remembered pill, or one whose tab is gone, is a click on the pill released on.
+ */
+export function pillRelease(pressed, row, rows = []) {
+  const stale = !pressed || !rows.some((entry) => entry?.id === pressed.id);
+  if (stale || pressed.id === row.id) return { select: row.id };
+  return { move: pressed.id, index: row.index + 1 };
+}
+
 /** The pills' counts, for a heading or a test. */
 export function pillCounts(rows) {
   const tally = { total: 0, working: 0, needs: 0, ready: 0 };
