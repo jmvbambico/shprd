@@ -158,6 +158,16 @@ const WORKER_M11_PRE_REAL_DATA: &str =
 const WORKER_M11_PRE_REAL_DATA_DIGEST: &str =
     "b9ca850ee72a94477eed2b230fe28d36e93029e73223b2a5a53e5aac13da761a";
 
+/// The worker wording before it asked for a screenshot of any change the person
+/// sees (or the reason there is none) and for temp cleanup by literal path.
+#[cfg(test)]
+const WORKER_M11_PRE_PROOF_UI: &str =
+    include_str!("../../../data/templates/history/worker-m11-pre-proof-ui.md");
+
+/// The SHA-256 of [`WORKER_M11_PRE_PROOF_UI`].
+const WORKER_M11_PRE_PROOF_UI_DIGEST: &str =
+    "ab87d69308fd98f689bade382009f5a76a09d9bc864157359c08ef44b8c7caa5";
+
 /// The worker's retired defaults.
 const WORKER_OLD: &[&str] = &[
     WORKER_FIRST_DIGEST,
@@ -169,6 +179,7 @@ const WORKER_OLD: &[&str] = &[
     WORKER_M11_LONG_DIGEST,
     WORKER_M11_SCOPE_DIGEST,
     WORKER_M11_PRE_REAL_DATA_DIGEST,
+    WORKER_M11_PRE_PROOF_UI_DIGEST,
 ];
 
 /// The backup wording M9.5 shipped, retired for the same reason as the worker's:
