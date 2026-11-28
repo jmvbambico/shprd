@@ -740,25 +740,44 @@ struct FoldFailure {
 /// repository and why, when any fold errors; a build that cannot read a log it
 /// was handed is not healthy, however well it answers `/api/health`. Answered
 /// to a loopback caller only, like the service's id.
+///
+/// `?folder=<path>` names one more repository to fold, registered or not. A
+/// service that has only just started has registered nothing yet (the desktop
+/// registers its repositories a moment later), so the self-update names the
+/// repository it updates and the check folds a real log instead of vouching
+/// for an empty set.
 async fn health_repos(
     State(registry): State<Arc<Registry>>,
     Extension(auth::Peer(peer)): Extension<auth::Peer>,
+    Query(params): Query<HashMap<String, String>>,
     headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, ApiReject> {
     if !auth::is_local_caller(peer, &headers) {
         return Err(ApiReject::not_found("not found"));
     }
     let counted = registry.counted();
+    let mut targets: Vec<(String, PathBuf)> = counted
+        .into_iter()
+        .map(|(repo, state)| (repo.id, state.repo))
+        .collect();
+    if let Some(folder) = params.get("folder").map(PathBuf::from) {
+        let canon =
+            |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let known = canon(&folder);
+        let named = targets.iter().any(|(_, root)| canon(root) == known);
+        if !named && folder.is_dir() {
+            targets.push((folder.display().to_string(), folder));
+        }
+    }
+    let checked = targets.len();
     let failed: Vec<FoldFailure> = tokio::task::spawn_blocking(move || {
-        counted
+        targets
             .into_iter()
-            .filter_map(|(repo, state)| {
-                crate::ledger::load(&state.repo)
-                    .err()
-                    .map(|err| FoldFailure {
-                        id: repo.id,
-                        error: err.to_string(),
-                    })
+            .filter_map(|(id, root)| {
+                crate::ledger::load(&root).err().map(|err| FoldFailure {
+                    id,
+                    error: err.to_string(),
+                })
             })
             .collect()
     })
@@ -766,7 +785,7 @@ async fn health_repos(
     .map_err(|err| ApiReject::internal(err.to_string()))?;
     Ok(Json(serde_json::json!({
         "ok": failed.is_empty(),
-        "checked": registry.list().len(),
+        "checked": checked,
         "failed": failed,
     })))
 }

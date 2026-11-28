@@ -392,3 +392,25 @@ async fn the_health_check_folds_every_repository_and_names_one_that_cannot_be_re
     assert_eq!(bad["ok"], false, "{bad}");
     assert_eq!(bad["failed"].as_array().unwrap().len(), 1, "{bad}");
 }
+
+#[tokio::test]
+async fn the_health_check_folds_a_named_repository_the_service_has_not_registered_yet() {
+    // A service that has only just started has registered nothing: the check
+    // used to fold nothing and pass any build. The updater names its repository.
+    let fx = fixture().await;
+    let (_dir, repo) = folder("shprd");
+    let uri = format!("/api/health/repos?folder={repo}");
+    let (_, ok) = fx.call("GET", &uri, None).await;
+    assert_eq!(ok["ok"], true, "{ok}");
+    assert_eq!(ok["checked"], 1, "{ok}");
+
+    let log = Path::new(&repo).join(".shprd").join("events.jsonl");
+    std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+    std::fs::write(&log, "{\"this\": \"is not an event\"}\n").unwrap();
+    let (status, bad) = fx.call("GET", &uri, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(bad["ok"], false, "{bad}");
+    assert_eq!(bad["failed"].as_array().unwrap().len(), 1, "{bad}");
+    let (_, unnamed) = fx.call("GET", "/api/health/repos", None).await;
+    assert_eq!(unnamed["checked"], 0, "{unnamed}");
+}
