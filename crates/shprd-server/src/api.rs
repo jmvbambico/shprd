@@ -927,6 +927,7 @@ async fn answer(State(state): State<AppState>, body: Bytes) -> Result<Json<AskRe
             after_write: after_write.as_ref(),
             engine: engine.as_ref(),
             merge: None,
+            id_prefix: String::new(),
         };
         actions::answer_ask(&ctx, &body.task, &body.ask, &body.answer)
     })
@@ -977,6 +978,7 @@ async fn answer_remark(
             after_write: after_write.as_ref(),
             engine: engine.as_ref(),
             merge: None,
+            id_prefix: String::new(),
         };
         actions::answer_remark(&ctx, &id, &body)
     })
@@ -1166,6 +1168,7 @@ async fn action(
     let after_write = state.after_write.clone();
     let engine = state.engine.clone();
     let merge = settings_api::merge_policy(&state);
+    let id_prefix = shprd_core::settings::task_id_prefix(state.home.as_deref(), &state.repo);
     let reply = blocking(move || {
         let ctx = actions::Context {
             repo: &repo,
@@ -1174,6 +1177,7 @@ async fn action(
             after_write: after_write.as_ref(),
             engine: engine.as_ref(),
             merge,
+            id_prefix,
         };
         actions::run(&ctx, action)
     })

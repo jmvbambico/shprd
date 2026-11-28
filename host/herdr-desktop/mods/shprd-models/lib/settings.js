@@ -944,6 +944,12 @@ export const WORKFLOW = [
     kind: "text",
   },
   {
+    key: "tasks.id_prefix",
+    title: "Task id prefix",
+    about: "The three letters new task ids start with (SHP gives SHP-1, SHP-2, ...); empty derives them from the repository's name.",
+    kind: "text",
+  },
+  {
     key: "review.cross_vendor",
     title: "Cross-vendor review",
     about: "A reviewer never shares the worker's vendor, so the review is independent.",

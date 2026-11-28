@@ -54,6 +54,8 @@ pub(crate) struct Context<'a> {
     /// directory, so accepting is left to the rules alone rather than refused
     /// for a reason nobody could check.
     pub(crate) merge: Option<MergePolicy>,
+    /// The prefix of auto-assigned task ids; empty derives it from the repository's name.
+    pub(crate) id_prefix: String,
 }
 
 /// Runs one action against a repository's log.
@@ -80,10 +82,10 @@ pub(crate) fn run(ctx: &Context<'_>, action: Action) -> Result<ActionReply, ApiR
                 skills,
                 deps,
             };
-            // Without a `task` the id is the next free `T<n>`, picked under the
+            // Without a `task` the id is the next free `<PREFIX>-<n>`, picked under the
             // log's lock so two adders at once never share one.
-            let event =
-                ledger::commit_task_added(ctx.repo, ctx.actor, task, kind).map_err(commit_error)?;
+            let event = ledger::commit_task_added(ctx.repo, ctx.actor, task, &ctx.id_prefix, kind)
+                .map_err(commit_error)?;
             published(ctx, &event)
         }
         Action::TaskStatus {
@@ -910,6 +912,18 @@ fn ask_error(err: shprd_core::ask::AskError) -> ApiReject {
 /// wake-up, the binary's after-write step, or the fold the reply carries.
 pub(crate) fn commit(ctx: &Context<'_>, kind: EventKind) -> Result<ActionReply, ApiReject> {
     let event = ledger::commit(ctx.repo, ctx.actor, kind).map_err(commit_error)?;
+    published(ctx, &event)
+}
+
+/// Appends a `TaskAdded`, naming it the next free `<PREFIX>-<n>` when `task` is
+/// `None`, then wakes the waiters like every other write.
+pub(crate) fn commit_new_task(
+    ctx: &Context<'_>,
+    task: Option<String>,
+    kind: EventKind,
+) -> Result<ActionReply, ApiReject> {
+    let event = ledger::commit_task_added(ctx.repo, ctx.actor, task, &ctx.id_prefix, kind)
+        .map_err(commit_error)?;
     published(ctx, &event)
 }
 

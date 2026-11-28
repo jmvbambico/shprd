@@ -246,12 +246,13 @@ async fn a_task_added_without_an_id_gets_the_next_short_one() {
     };
     let first = add(json!({})).await;
     assert_eq!(first.status, StatusCode::OK);
-    assert_eq!(first.json()["task"]["id"], json!("T1"));
+    let prefix = shprd_core::settings::task_id_prefix(None, fixture.repo.path());
+    assert_eq!(first.json()["task"]["id"], json!(format!("{prefix}-1")));
     // A given id is kept, and a long one never blocks the counter.
     let given = add(json!({"task": "long-slug"})).await;
     assert_eq!(given.json()["task"]["id"], json!("long-slug"));
     let second = add(json!({})).await;
-    assert_eq!(second.json()["task"]["id"], json!("T2"));
+    assert_eq!(second.json()["task"]["id"], json!(format!("{prefix}-2")));
 }
 
 #[tokio::test]

@@ -531,10 +531,12 @@ pub enum TaskKey {
     AutoClean,
     /// The `gh` account every forge call uses; empty uses whichever is active.
     GhUser,
+    /// The three-letter prefix of auto-assigned task ids; empty derives it from the repository's name.
+    IdPrefix,
 }
 
 /// Every `tasks.*` key, in the order a settings UI lists them.
-pub const TASK_KEYS: [TaskKey; 18] = [
+pub const TASK_KEYS: [TaskKey; 19] = [
     TaskKey::Merge,
     TaskKey::ReviewRounds,
     TaskKey::MustFix,
@@ -553,6 +555,7 @@ pub const TASK_KEYS: [TaskKey; 18] = [
     TaskKey::SelfUpdate,
     TaskKey::AutoClean,
     TaskKey::GhUser,
+    TaskKey::IdPrefix,
 ];
 
 impl TaskKey {
@@ -577,6 +580,7 @@ impl TaskKey {
             Self::SelfUpdate => "self_update",
             Self::AutoClean => "auto_clean",
             Self::GhUser => "gh_user",
+            Self::IdPrefix => "id_prefix",
         }
     }
 
@@ -1225,6 +1229,26 @@ pub fn read_repo_file(root: &Path) -> Result<Layer, SettingsError> {
     })
 }
 
+/// The prefix this repository's auto-assigned task ids carry, e.g. `SHP`.
+///
+/// `tasks.id_prefix` when it is set (and has a letter or digit in it), else
+/// derived from the repository directory's name, so it is stable for a
+/// repository. A settings file that cannot be read derives it.
+pub fn task_id_prefix(home: Option<&Path>, repo: &Path) -> String {
+    let set = home
+        .and_then(|home| Loaded::read(home, Some(repo)).ok())
+        .map(|loaded| crate::event::clean_id_prefix(&loaded.resolve(None).tasks().id_prefix))
+        .unwrap_or_default();
+    if !set.is_empty() {
+        return set;
+    }
+    let name = repo
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    crate::event::derive_id_prefix(&name)
+}
+
 /// Read a file, or [`None`] when it does not exist.
 fn read_optional(path: &Path) -> Result<Option<String>, SettingsError> {
     match std::fs::read_to_string(path) {
@@ -1548,6 +1572,7 @@ pub fn builtin() -> Layer {
     layer.set(Key::Task(TaskKey::AutoClean), Value::Switch(true));
     layer.set(Key::Task(TaskKey::Base), Value::Text(String::new()));
     layer.set(Key::Task(TaskKey::GhUser), Value::Text(String::new()));
+    layer.set(Key::Task(TaskKey::IdPrefix), Value::Text(String::new()));
     layer.set(
         Key::Task(TaskKey::Branch),
         Value::Text(DEFAULT_BRANCH.to_owned()),
@@ -2089,6 +2114,8 @@ pub struct Tasks {
     pub base: String,
     /// The `gh` account pinned for forge calls; empty means the active one.
     pub gh_user: String,
+    /// The prefix of auto-assigned task ids (e.g. `SHP`); empty derives it from the repository's name.
+    pub id_prefix: String,
     /// The pattern new tasks' branches are named after.
     pub branch: String,
     /// Words put into a task's brief when it starts.
@@ -2258,6 +2285,11 @@ impl Resolved {
             base: self.text(TaskKey::Base).unwrap_or_default().to_owned(),
             gh_user: self
                 .text(TaskKey::GhUser)
+                .unwrap_or_default()
+                .trim()
+                .to_owned(),
+            id_prefix: self
+                .text(TaskKey::IdPrefix)
                 .unwrap_or_default()
                 .trim()
                 .to_owned(),
