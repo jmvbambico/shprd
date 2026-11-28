@@ -1462,8 +1462,8 @@ async fn a_hyphenated_id_survives_spawn_and_land() {
         .act(json!({"kind": "task.accept", "task": "SHP-12"}))
         .await;
     assert_eq!(accept.status, StatusCode::OK, "{:?}", accept.body);
-    let approved = fixture.events().into_iter().any(|event| {
-        matches!(&event.kind, EventKind::TaskApproved { task, .. } if task == "SHP-12")
-    });
+    let approved = fixture.events().into_iter().any(
+        |event| matches!(&event.kind, EventKind::TaskApproved { task, .. } if task == "SHP-12"),
+    );
     assert!(approved, "the landing names SHP-12");
 }
