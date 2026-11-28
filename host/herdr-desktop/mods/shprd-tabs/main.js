@@ -34,6 +34,7 @@
 import { View, div, image, svg } from "gpui-kit";
 import { h_flex } from "gpui-base";
 import {
+  knownAgents,
   layout,
   nextCommand,
   openOverlay,
@@ -59,7 +60,7 @@ import {
   tabMenu,
 } from "./lib/menu.js";
 import { countsBadge, openAddTask, openNewSpace } from "./lib/panel.js";
-import { panelButtons, rememberPanel, seenWith, shownPanel, strayTab, tabRows } from "./lib/tabstrip.js";
+import { panelButtons, rememberPanel, seenWith, shownPanel, strayTab, tabRows, coordinatorProgram } from "./lib/tabstrip.js";
 import { RADIUS, TEXT, tone } from "./lib/tokens.js";
 
 /** How often the bar re-reads the board the pills borrow their words from. */
@@ -111,6 +112,11 @@ export default class Tabs extends View {
     // two must agree about how many rows there are. `undefined` is "not read
     // yet"; `null` is "the service could not say", which the menu shows.
     this.roster = undefined;
+    // The settings document and the harnesses' icons: the coordinator's tab wears
+    // its role's name and the icon of the harness the role runs now.
+    this.settings = null;
+    this.icons = {};
+    this.iconsRead = false;
     // The bar's width, from its own size change: a button keeps its word only
     // when there is room for it (Shepherdr's rule).
     this.width = 0;
@@ -168,6 +174,9 @@ export default class Tabs extends View {
       }
       this.client = next.client;
       this.state = await this.client.state();
+      // Read each beat, so a role's new program shows without a restart.
+      this.settings = await this.client.settings().catch(() => this.settings);
+      await this.readIcons();
       // The pills are painted before the roster is asked for: the roster can take
       // a moment (a program that lists its own models is a process), and a bar
       // that waits for it is a bar with no counts on the first frame. The "+"
@@ -184,6 +193,20 @@ export default class Tabs extends View {
       void reason(err);
     }
     cx.notify();
+  }
+
+  /** The harnesses' icons, from Herdr's list of agents (once; a failure leaves none). */
+  async readIcons() {
+    if (this.iconsRead) return;
+    this.iconsRead = true;
+    try {
+      for (const entry of (await knownAgents()) ?? []) {
+        const id = entry.key ?? (entry.run ?? [])[0];
+        if (id && entry.icon) this.icons[id] = { icon: entry.icon, tint: Boolean(entry.tint) };
+      }
+    } catch {
+      // No icons: the tab is words only.
+    }
   }
 
   /**
@@ -344,7 +367,7 @@ export default class Tabs extends View {
 
   /** F2: the rename prompt for the shown tab, as a double-click on its pill. */
   renameActiveTab() {
-    const row = tabRows(this.space(), panes(), this.state).find((entry) => entry.active);
+    const row = tabRows(this.space(), panes(), this.state, coordinatorProgram(this.settings, this.icons)).find((entry) => entry.active);
     // A tab shprd titled keeps its title: it is how shprd finds the tab again.
     if (row && renamable({ name: row.name })) this.rename(row);
   }
@@ -382,7 +405,7 @@ export default class Tabs extends View {
     const t = theme();
     const colors = tone(t);
     const space = this.space();
-    const rows = tabRows(space, panes(), this.state);
+    const rows = tabRows(space, panes(), this.state, coordinatorProgram(this.settings, this.icons));
     const pills = rows.map((row) => this.pill(t, colors, row));
     // The buttons are data until they are drawn: the same list is what says which
     // stacks the panel has, and each becomes one element below.

@@ -166,7 +166,7 @@ export function tabLabel(tab, named, program) {
  * whether it is the shown tab. `active` is the host's own answer, so a click
  * that missed never moves the highlight here.
  */
-export function tabRows(space, panes, state) {
+export function tabRows(space, panes, state, coordinator = null) {
   const tabs = space?.tabs ?? [];
   return tabs.flatMap((tab, index) => {
     // Another product's Assistant tab (Shepherdr's chat pane) is not shprd's to
@@ -176,11 +176,14 @@ export function tabRows(space, panes, state) {
     const shape = tabState(tab, panes, state);
     const task = taskOf(state, named.task);
     const program = tabProgram(panes, tab?.id);
+    // The coordinator's tab is its role's, not the repository's: the role's display
+    // name from the settings, and the icon of the harness the role runs now.
+    const mine = shprdCoordinatorTab(tab);
     return [{
       id: tab.id,
       index,
       name: named.name,
-      label: tabLabel(tab, named, program),
+      label: mine ? roleTitle(state, "coordinator") : tabLabel(tab, named, program),
       // Whether a person named it (`tab.rename`, `tab.new {name}`): the rename
       // prompt's field holds the name only when there is one.
       named: Boolean(tab.named),
@@ -203,13 +206,26 @@ export function tabRows(space, panes, state) {
       ready: shape.tone === "green" ? 1 : 0,
       // The pill's icon: the program's own, from the app's table (`name` for the
       // tab's own title when nobody named it).
-      icon: program?.icon ?? null,
-      tint: Boolean(program?.tint),
+      icon: mine ? (coordinator?.icon ?? null) : (program?.icon ?? null),
+      tint: mine ? Boolean(coordinator?.tint) : Boolean(program?.tint),
       program: program?.name ?? null,
       zoomed: Boolean(tab.zoomed),
       panes: Number.isInteger(tab.panes) ? tab.panes : 0,
     }];
   });
+}
+
+/**
+ * The harness the coordinator role runs, with its icon: `roles.coordinator.agent`
+ * from the settings document (`GET /api/settings`) looked up in `icons`, the
+ * harnesses' icons by id (`{ icon, tint }`, from Herdr's known agents). Null when
+ * the role has no program or the harness has no icon.
+ */
+export function coordinatorProgram(settings, icons) {
+  const row = (settings?.values ?? []).find((entry) => entry?.key === "roles.coordinator.agent");
+  const id = typeof row?.value === "string" ? row.value : null;
+  const found = id ? icons?.[id] : null;
+  return found?.icon ? { id, icon: found.icon, tint: Boolean(found.tint) } : null;
 }
 
 /** The mod Shepherdr's Assistant chat pane is; shprd's own is `shprd-chat`. */
