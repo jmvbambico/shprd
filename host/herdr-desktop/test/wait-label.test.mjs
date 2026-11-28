@@ -1,7 +1,7 @@
 // What a waiting task is labelled by: one helper for the Graph, the Tasks list and the toasts.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { graphRows } from "../mods/lib/tree.js";
+import { graphRows, taskLine } from "../mods/lib/tree.js";
 import { taskLook } from "../mods/lib/spaces.js";
 import { newsItems } from "../mods/lib/toasts.js";
 import { waitLabel } from "../mods/lib/tokens.js";
@@ -35,4 +35,12 @@ test("a worker's question reads 'needs answer', and a toast says only what the h
   assert.equal(taskLook(STATE.tasks[2]).word, "needs answer");
   const items = newsItems([{ seq: 1, kind: "needs_you", task: "W1" }], STATE);
   for (const item of items) assert.match(item.title, /Needs you$/);
+});
+
+test("the task detail line says the same words, never 'asks you' or 'waits for you'", () => {
+  const line = (t) => taskLine(STATE, t, 0);
+  assert.equal(line(STATE.tasks[0]), "needs you");
+  assert.equal(line(STATE.tasks[1]), "needs decision");
+  assert.equal(line(STATE.tasks[2]), "needs answer");
+  assert.equal(line(task("W4", { need: "reply", for_you: false })), "needs decision");
 });

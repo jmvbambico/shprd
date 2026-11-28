@@ -49,7 +49,7 @@ test("a task row's second line says who is on it and where it stands", () => {
   assert.equal(line("SHPR-26"), "pi · working · 9m · 35%");
   assert.equal(line("SHPR-23"), "needs you");
   assert.equal(line("SHPR-28"), "ready to approve");
-  assert.equal(spaceTree(state, [], NOW)[2].tasks[0].sub, "asks you · 3m ago");
+  assert.equal(spaceTree(state, [], NOW)[2].tasks[0].sub, "needs you · 3m ago");
 });
 
 test("a queued task whose agent already works reads working, not its raw status", () => {

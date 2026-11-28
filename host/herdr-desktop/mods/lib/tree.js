@@ -183,7 +183,7 @@ export function agentsOfTask(state, taskId, now = Date.now()) {
 /**
  * A task row's dim second line: who is on it and where it stands, then progress
  * and time to go when known — `claude · working · R#1 · 6m`, `codex · reviewing`,
- * `asks you · 2m ago`, `ready to approve`. Time to go is not in the service's answer yet, so it is not drawn.
+ * `needs answer · 2m ago`, `ready to approve`. Time to go is not in the service's answer yet, so it is not drawn.
  */
 export function taskLine(state, task, now = Date.now()) {
   const agents = agentsOfTask(state, task.id, now).filter((agent) => agent.state !== "done");
@@ -194,8 +194,7 @@ export function taskLine(state, task, now = Date.now()) {
   const rounds = attempt?.reviews?.length ?? 0;
   const parts = [];
   if (status === "needs_you") {
-    const need = task.derived?.need;
-    parts.push(need === "asks" ? "asks you" : need === "reply" ? "waits for you" : waitLabel(task));
+    parts.push(waitLabel(task));
     const since = age(worker?.since_ms, now);
     if (since) parts.push(since === "now" ? "now" : `${since} ago`);
     return parts.join(" · ");
