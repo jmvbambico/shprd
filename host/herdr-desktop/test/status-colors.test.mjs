@@ -32,7 +32,9 @@ test("the tokens resolve in both themes and are in tone()", () => {
     const set = tone({ dark });
     for (const key of Object.keys(statusColors({ dark }))) assert.match(set[key], /^#[0-9a-f]{6}$/);
     assert.equal(set.done, set.green);
-    assert.equal(set.failed, set.red);
+    // dagr's own values (herdr-dagr src/style.rs): WORKING 81 = #5fd7ff, FAILED 167 = #d75f5f.
+    assert.equal(set.working, dark ? "#5fd7ff" : "#0284c7");
+    assert.equal(set.failed, dark ? "#d75f5f" : "#c0392b");
     assert.equal(set.waiting, set.amber);
   }
 });

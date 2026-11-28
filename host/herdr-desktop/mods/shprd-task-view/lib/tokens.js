@@ -90,11 +90,16 @@ export const green = (settings) => (dark_(settings) ? "#3dd68c" : "#30a46c");
 /** *Working*, and the time left under a working glyph. */
 export const amber = (settings) => (dark_(settings) ? "#f5b544" : "#e2a336");
 /**
- * *Working*: the sky blue of dagr's working state. dagr is not installed here to
- * read its palette from, so these are Tailwind sky-400 (dark) and sky-600 (light),
- * the nearest sky blues that read on both Herdr themes.
+ * *Working*: dagr's working sky blue. Dagr's source (herdr-dagr, src/style.rs,
+ * commit 52991f9) has WORKING = xterm-256 colour 81 = #5fd7ff, used as is on the
+ * dark theme; the light theme takes the darker sky #0284c7 so it still reads.
  */
-export const working = (settings) => (dark_(settings) ? "#38bdf8" : "#0284c7");
+export const working = (settings) => (dark_(settings) ? "#5fd7ff" : "#0284c7");
+/**
+ * *Failed*: dagr's failed red. Dagr's source (src/style.rs) has FAILED = xterm-256
+ * colour 167 = #d75f5f, used as is on dark; light takes the darker #c0392b.
+ */
+export const failed = (settings) => (dark_(settings) ? "#d75f5f" : "#c0392b");
 /**
  * What a task waits for a decision or an answer on: the amber *working* had
  * before it turned blue, which is close to dagr's yellow.
@@ -126,7 +131,7 @@ export function statusColors(settings) {
   return {
     done: green(settings),
     working: working(settings),
-    failed: red(settings),
+    failed: failed(settings),
     waiting: waiting(settings),
   };
 }
