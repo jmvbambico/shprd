@@ -1870,6 +1870,34 @@ mod tests {
     }
 
     #[test]
+    fn the_doctor_flags_the_wrong_active_account_and_names_the_right_one() {
+        // The 2026-11-23 incident: the active account cannot see the repository
+        // ("Could not resolve to a Repository"), another logged-in one can write.
+        let gh = ScriptGh {
+            status: TWO,
+            views: vec![
+                (
+                    "alice",
+                    "GraphQL: Could not resolve to a Repository with the name 'o/r'.",
+                    false,
+                ),
+                (
+                    "bob",
+                    "{\"nameWithOwner\":\"o/r\",\"viewerPermission\":\"WRITE\"}",
+                    true,
+                ),
+            ],
+        };
+        let (text, failed) = forge_text(&gh);
+        assert!(failed, "{text}");
+        assert!(
+            text.contains("alice (the active account) cannot see this repository's remote"),
+            "{text}"
+        );
+        assert!(text.contains("tasks.gh_user bob"), "{text}");
+    }
+
+    #[test]
     fn the_doctor_shows_what_github_said_when_the_repo_is_hidden() {
         let gh = ScriptGh {
             status: TWO,
