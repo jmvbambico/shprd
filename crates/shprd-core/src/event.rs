@@ -12,12 +12,54 @@ use crate::baseline::BaselineEntry;
 /// Identifies a task inside a run.
 pub type TaskId = String;
 
-/// The next free short task id, `T<n>`, for a log that holds `events`.
+/// The three-letter task id prefix for a repository called `name`.
 ///
-/// It is one more than the highest `T<n>` any `TaskAdded` event already names,
-/// and is bumped past any id in use, so a long id a person gave never blocks
-/// it. Ids that are not `T<digits>` are ignored when counting.
-pub fn next_task_id(events: &[Event]) -> TaskId {
+/// Uppercase: the first letter, then the next two consonants, padded with the
+/// letters skipped on the way (the vowels, in order) when there are fewer than
+/// two. `shprd` gives `SHP`, `jmanager` gives `JMN`. A name with no letters
+/// gives `TSK`, and a short one is padded with `X`.
+pub fn derive_id_prefix(name: &str) -> String {
+    let letters: Vec<char> = name
+        .chars()
+        .filter(char::is_ascii_alphabetic)
+        .map(|c| c.to_ascii_uppercase())
+        .collect();
+    let Some((&first, rest)) = letters.split_first() else {
+        return "TSK".to_owned();
+    };
+    let is_vowel = |c: &char| "AEIOU".contains(*c);
+    let mut prefix = vec![first];
+    prefix.extend(rest.iter().filter(|c| !is_vowel(c)).take(2));
+    prefix.extend(rest.iter().filter(|c| is_vowel(c)).take(3 - prefix.len()));
+    while prefix.len() < 3 {
+        prefix.push('X');
+    }
+    prefix.into_iter().collect()
+}
+
+/// Cleans a prefix a person set: letters and digits only, uppercase. Empty
+/// when nothing usable is left, which means "derive it".
+pub fn clean_id_prefix(prefix: &str) -> String {
+    prefix
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|c| c.to_ascii_uppercase())
+        .collect()
+}
+
+/// The next free task id, `<prefix>-<n>` (e.g. `SHP-12`), for a log that holds
+/// `events`.
+///
+/// It is one more than the highest `<prefix>-<n>` any `TaskAdded` event already
+/// names, and is bumped past any id in use, so a long id a person gave, or an
+/// old `T<n>` id, never blocks it. Ids that do not match are ignored when
+/// counting. An empty `prefix` falls back to the old `T<n>` form.
+pub fn next_task_id(events: &[Event], prefix: &str) -> TaskId {
+    let lead = if prefix.is_empty() {
+        "T".to_owned()
+    } else {
+        format!("{prefix}-")
+    };
     let used: std::collections::HashSet<&str> = events
         .iter()
         .filter_map(|event| match &event.kind {
@@ -27,23 +69,23 @@ pub fn next_task_id(events: &[Event]) -> TaskId {
         .collect();
     let mut n = used
         .iter()
-        .filter_map(|id| id.strip_prefix('T')?.parse::<u64>().ok())
+        .filter_map(|id| id.strip_prefix(lead.as_str())?.parse::<u64>().ok())
         .max()
         .map_or(1, |highest| highest.saturating_add(1));
     // Past u64::MAX there is no next number: fall back to the first free one
     // below, and if every number is taken stop rather than loop forever.
-    while used.contains(format!("T{n}").as_str()) {
+    while used.contains(format!("{lead}{n}").as_str()) {
         n = match n.checked_add(1) {
             Some(next) => next,
             None => (1..u64::MAX)
-                .find(|k| !used.contains(format!("T{k}").as_str()))
+                .find(|k| !used.contains(format!("{lead}{k}").as_str()))
                 .unwrap_or(1),
         };
     }
-    format!("T{n}")
+    format!("{lead}{n}")
 }
 
-/// How an attempt is named for a person: `<id>·a<n>`, e.g. `T3·a2`.
+/// How an attempt is named for a person: `<id>·a<n>`, e.g. `SHP-12·a2`.
 pub fn attempt_label(task: &str, attempt: u32) -> String {
     format!("{task}·a{attempt}")
 }
@@ -1020,16 +1062,47 @@ mod tests {
     #[test]
     fn the_allocator_ends_at_the_u64_limit() {
         let log = [added(1, "T18446744073709551615")];
-        assert_eq!(next_task_id(&log), "T1");
+        assert_eq!(next_task_id(&log, ""), "T1");
+        let log = [added(1, "SHP-18446744073709551615")];
+        assert_eq!(next_task_id(&log, "SHP"), "SHP-1");
     }
 
     #[test]
-    fn the_next_task_id_is_one_past_the_highest_short_id() {
-        assert_eq!(next_task_id(&[]), "T1");
-        let log = [added(1, "T1"), added(2, "long-slug"), added(3, "T7")];
-        assert_eq!(next_task_id(&log), "T8");
-        // A long id never blocks, and an id in use is skipped.
-        assert_eq!(next_task_id(&[added(1, "M1.6")]), "T1");
+    fn the_prefix_is_the_first_letter_and_the_next_two_consonants() {
+        assert_eq!(derive_id_prefix("shprd"), "SHP");
+        assert_eq!(derive_id_prefix("jmanager"), "JMN");
+        assert_eq!(derive_id_prefix("sweatbrain"), "SWT");
+        // Too few consonants: padded with the skipped letters, then X.
+        assert_eq!(derive_id_prefix("aeon"), "ANE");
+        assert_eq!(derive_id_prefix("ab"), "ABX");
+        assert_eq!(derive_id_prefix("--"), "TSK");
+        assert_eq!(derive_id_prefix("my-app2"), "MYP");
+    }
+
+    #[test]
+    fn a_set_prefix_is_cleaned() {
+        assert_eq!(clean_id_prefix(" shp "), "SHP");
+        assert_eq!(clean_id_prefix("-"), "");
+    }
+
+    #[test]
+    fn the_next_task_id_is_one_past_the_highest_id_with_that_prefix() {
+        assert_eq!(next_task_id(&[], "SHP"), "SHP-1");
+        let log = [
+            added(1, "SHP-1"),
+            added(2, "long-slug"),
+            added(3, "SHP-7"),
+            added(4, "T40"),
+            added(5, "JMN-90"),
+        ];
+        assert_eq!(next_task_id(&log, "SHP"), "SHP-8");
+        // Old ids and long ids never block, and numbering continues past them.
+        assert_eq!(
+            next_task_id(&[added(1, "M1.6"), added(2, "T27")], "SHP"),
+            "SHP-1"
+        );
+        // The old form stays reachable with no prefix.
+        assert_eq!(next_task_id(&log, ""), "T41");
     }
 
     #[test]

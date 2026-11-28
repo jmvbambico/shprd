@@ -98,8 +98,6 @@ pub(crate) fn add(
              \"acceptance\": [\"…\"]}}"
         ))
     })?;
-    let (folded, _) = ledger::load(&state.repo)
-        .map_err(|err| ApiReject::internal(format!("could not read the run log: {err}")))?;
     let id = match request.id.as_deref().map(str::trim) {
         Some(id) if !id.is_empty() => id.to_string(),
         // An id that is only spaces is a caller that meant to name one and did
@@ -111,8 +109,9 @@ pub(crate) fn add(
                  from its title",
             ));
         }
-        None => task_id(&request.title, |id| folded.tasks.contains_key(id)),
+        None => String::new(),
     };
+    let id_given = id.clone();
     let kind = EventKind::TaskAdded {
         task: id,
         title: request.title,
@@ -132,8 +131,11 @@ pub(crate) fn add(
         after_write,
         engine: state.engine.as_ref(),
         merge: None,
+        id_prefix: shprd_core::settings::task_id_prefix(state.home.as_deref(), &state.repo),
     };
-    crate::actions::commit(&ctx, kind)
+    // No id given: the next free `<PREFIX>-<n>` is picked under the log's lock.
+    let given = Some(id_given).filter(|id| !id.is_empty());
+    crate::actions::commit_new_task(&ctx, given, kind)
 }
 
 /// `GET /api/tasks/{id}/changes`: the task's branch against its base.

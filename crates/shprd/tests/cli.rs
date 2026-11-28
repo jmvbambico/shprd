@@ -2425,16 +2425,38 @@ fn add_without_id(root: &Path, title: &str) -> String {
 fn a_task_without_an_id_gets_the_next_short_id_and_a_given_id_is_kept() {
     let dir = repo();
     let root = dir.path();
+    // The prefix comes from the repository directory's name, and stays the same.
+    let name = root
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let prefix = shprd_core::event::derive_id_prefix(&name);
     start(root);
-    assert_eq!(add_without_id(root, "first"), "T1");
+    let first = format!("{prefix}-1");
+    let second = format!("{prefix}-2");
+    let tenth = format!("{prefix}-10");
+    let ninth = format!("{prefix}-9");
+    assert_eq!(add_without_id(root, "first"), first);
     add_task(root, "long-slug", "src");
-    assert_eq!(add_without_id(root, "second"), "T2");
-    add_task(root, "T9", "docs");
-    assert_eq!(add_without_id(root, "third"), "T10");
+    // An old `T27` id does not move the new numbering.
+    add_task(root, "T27", "src");
+    assert_eq!(add_without_id(root, "second"), second);
+    add_task(root, &ninth, "docs");
+    assert_eq!(add_without_id(root, "third"), tenth);
     let state = state(root);
-    for id in ["T1", "T2", "long-slug", "T9", "T10"] {
+    for id in [&first, &second, "long-slug", "T27", &ninth, &tenth] {
         assert_eq!(status_of(&state, id), "queued", "{id}");
     }
+}
+
+#[test]
+fn the_id_prefix_setting_overrides_the_derived_one() {
+    let dir = repo();
+    let root = dir.path();
+    start(root);
+    ok(root, &["settings", "set", "tasks.id_prefix", "abc"]);
+    assert_eq!(add_without_id(root, "x"), "ABC-1");
+    assert_eq!(add_without_id(root, "y"), "ABC-2");
 }
 
 #[test]
