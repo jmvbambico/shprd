@@ -28,7 +28,7 @@
 // Shared: the source is `mods/lib/spaces.js`; `bin/sync-shared` copies it into
 // every mod folder that imports it. Edit the source, never a copy.
 
-import { NEED, STATUS_ORDER, desktopWords, roleTitle, status as statusOf, waitLabel } from "./tokens.js";
+import { NEED, STATUS_ORDER, desktopWords, roleTitle, statusColor, status as statusOf, waitLabel } from "./tokens.js";
 import { NO_TASKS, counts, isLive, newestDecision, progressOf, secondLine } from "./board.js";
 
 /** The id a coordinator row carries, so a click and a test name the same thing. */
@@ -120,6 +120,7 @@ export function taskLook(task) {
     status: task?.derived?.status ?? "to_do",
     word: task?.derived?.status === "needs_you" && task?.derived?.for_you === false ? waitLabel(task) : look.word,
     tone: look.tone,
+    ...(statusColor(task) ? { color: statusColor(task) } : {}),
     glyph: look.glyph,
     pct: progressOf(task),
   };
@@ -173,6 +174,7 @@ export function sidebarRows(state, list = []) {
       word: look.word,
       // A card the coordinator settles itself is not the person's: it reads amber (on it), not red.
       tone: look.status === "needs_you" && task?.derived?.for_you === false ? "amber" : look.tone,
+      color: look.color,
       glyph: look.glyph,
       pct: look.pct,
       needs: look.status === "needs_you" && task?.derived?.for_you !== false,
@@ -207,6 +209,7 @@ export function coordinatorRow(state, space = null) {
     status: run ? (state?.finished ? "done" : "working") : "to_do",
     word: run ? (state?.finished ? "Finished" : "Running") : "No run",
     tone: run ? (state?.finished ? "green" : "amber") : "dim",
+    color: run ? (state?.finished ? "done" : "working") : undefined,
     glyph: run ? (state?.finished ? "tick" : "pie") : "ring",
     needs: tally.needs > 0,
     count: tally.needs,

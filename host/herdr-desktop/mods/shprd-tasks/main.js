@@ -833,16 +833,8 @@ export default class Tasks extends View {
 
   /** One task in the graph: guide lines, glyph, id, title, and its status word at the right. */
   node(t, colors, row) {
-    const word =
-      row.status === "working"
-        ? colors.amber
-        : row.status === "needs_you"
-          ? colors.red
-          : row.status === "ready"
-            ? colors.green
-            : row.waits || row.status === "done"
-              ? t.dim
-              : t.muted;
+    // The state word takes the shared status colour; queued and waiting-on-a-dep stay grey.
+    const word = colors[row.color] ?? (row.waits || row.status === "done" ? t.dim : t.muted);
     // The same act pill as the list's row.
     const task = (this.state?.tasks ?? []).find((entry) => entry.id === row.id);
     const acts = task ? rowActions(task, this.state) : [];
@@ -1295,7 +1287,7 @@ export default class Tasks extends View {
             el.child(
               div()
                 .text_size(TEXT.id)
-                .text_color(colors.amber)
+                .text_color(colors.working)
                 .child(`${etaMinutes(task)}m`),
             ),
           ),

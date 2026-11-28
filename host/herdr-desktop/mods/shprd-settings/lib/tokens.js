@@ -89,6 +89,17 @@ export const red = (settings) => (dark_(settings) ? "#ff6369" : "#e5484d");
 export const green = (settings) => (dark_(settings) ? "#3dd68c" : "#30a46c");
 /** *Working*, and the time left under a working glyph. */
 export const amber = (settings) => (dark_(settings) ? "#f5b544" : "#e2a336");
+/**
+ * *Working*: the sky blue of dagr's working state. dagr is not installed here to
+ * read its palette from, so these are Tailwind sky-400 (dark) and sky-600 (light),
+ * the nearest sky blues that read on both Herdr themes.
+ */
+export const working = (settings) => (dark_(settings) ? "#38bdf8" : "#0284c7");
+/**
+ * What a task waits for a decision or an answer on: the amber *working* had
+ * before it turned blue, which is close to dagr's yellow.
+ */
+export const waiting = (settings) => amber(settings);
 /** Text on a filled status colour (a count badge). */
 export const onStatus = (settings) => (dark_(settings) ? "#000000" : "#ffffff");
 
@@ -101,8 +112,44 @@ export function tone(settings) {
     red: red(settings),
     green: green(settings),
     amber: amber(settings),
+    ...statusColors(settings),
     on: onStatus(settings),
   };
+}
+
+/**
+ * The colours a task's state is drawn in, one set for every pane (Tasks, Graph,
+ * Agents, Spaces) so they cannot drift: done and landed green, working sky blue,
+ * failed red, waiting amber. Queued and to do have none and stay grey.
+ */
+export function statusColors(settings) {
+  return {
+    done: green(settings),
+    working: working(settings),
+    failed: red(settings),
+    waiting: waiting(settings),
+  };
+}
+
+/** The token a status word is drawn in, or undefined for the greys (queued, to do, scheduled). */
+export const STATUS_COLOR = {
+  working: "working",
+  needs_you: "waiting",
+  ready: "done",
+  merging: "done",
+  done: "done",
+};
+
+/**
+ * The token a task's glyph or word is drawn in. A needs-you task whose attempt
+ * failed (`need` stopped or provider, or a failed task) reads `failed`; any other
+ * waiting task reads `waiting`.
+ */
+export function statusColor(task) {
+  const derived = task?.derived ?? {};
+  if (task?.status === "failed" || derived.status === "failed") return "failed";
+  if (derived.status === "needs_you" && (derived.need === "stopped" || derived.need === "provider")) return "failed";
+  return STATUS_COLOR[derived.status];
 }
 
 /**
@@ -141,7 +188,8 @@ export const STATUS_ORDER = [
 
 /** One status, or `to_do` for a word this build does not know. */
 export function status(name) {
-  return STATUS[name] ?? STATUS.to_do;
+  const found = STATUS[name] ?? STATUS.to_do;
+  return STATUS_COLOR[name] ? { ...found, color: STATUS_COLOR[name] } : found;
 }
 
 /**

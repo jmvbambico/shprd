@@ -308,6 +308,7 @@ test("task looks are the tokens' words", () => {
     status: "working",
     word: "Working",
     tone: "amber",
+    color: "working",
     glyph: "pie",
     pct: 62,
   });

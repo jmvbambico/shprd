@@ -33,7 +33,7 @@
 // Shared: the source is `mods/lib/tabstrip.js`; `bin/sync-shared` copies it into
 // every mod folder that imports it. Edit the source, never a copy.
 
-import { roleTitle, status as statusOf } from "./tokens.js";
+import { roleTitle, statusColor, status as statusOf } from "./tokens.js";
 
 /** The separator shprd's tab titles are built from (`worker_title`). */
 export const SEP = "·";
@@ -57,9 +57,9 @@ export const SUFFIX = { review: "reviewer", worker: "worker" };
 
 /** Herdr's agent states, as a pill names and colours them. */
 export const LIVE = {
-  working: { word: "Working", tone: "amber", glyph: "pie" },
-  blocked: { word: "Needs you", tone: "red", glyph: "dot" },
-  done: { word: "Finished", tone: "green", glyph: "tick" },
+  working: { word: "Working", tone: "amber", color: "working", glyph: "pie" },
+  blocked: { word: "Needs you", tone: "red", color: "waiting", glyph: "dot" },
+  done: { word: "Finished", tone: "green", color: "done", glyph: "tick" },
   idle: { word: "Idle", tone: "dim", glyph: "ring" },
 };
 
@@ -135,6 +135,7 @@ export function tabState(tab, panes, state) {
     status: task.derived?.status ?? "to_do",
     word: look.word,
     tone: look.tone,
+    color: statusColor(task),
     glyph: look.glyph,
     from: "shprd",
   };
@@ -196,6 +197,7 @@ export function tabRows(space, panes, state, coordinator = null, icons = {}) {
       status: shape.status,
       word: shape.word,
       tone: shape.tone,
+      color: shape.color,
       glyph: shape.glyph,
       from: shape.from,
       needs: shape.tone === "red",

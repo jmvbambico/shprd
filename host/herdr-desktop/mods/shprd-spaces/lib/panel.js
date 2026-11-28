@@ -728,11 +728,12 @@ export function icon(name, size, color) {
  * `lib/tabstrip.js` build it, and `colors` is `tone(theme())`.
  */
 export function statusGlyph(t, shape, colors, size = 14) {
-  const color = !shape || shape.tone === "dim" ? t.dim : (colors?.[shape.tone] ?? t.dim);
+  const key = shape?.color ?? shape?.tone;
+  const color = !shape || key === "dim" ? t.dim : (colors?.[key] ?? t.dim);
   const kind = shape?.glyph ?? "ring";
   const box = div().relative().w(size).h(size).flex_none().flex().items_center().justify_center();
   if (kind === "pie") {
-    return svg(pieFile(shape?.pct)).size(size).flex_none().text_color(colors?.amber ?? color);
+    return svg(pieFile(shape?.pct)).size(size).flex_none().text_color(colors?.[shape?.color] ?? colors?.working ?? color);
   }
   if (kind === "dot") {
     const dot = size - 4;
