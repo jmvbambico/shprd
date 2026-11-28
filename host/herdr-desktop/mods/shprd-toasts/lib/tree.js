@@ -19,7 +19,7 @@
 // source, never a copy.
 
 import { isLive, look } from "./board.js";
-import { roleRename, roleTitle } from "./tokens.js";
+import { roleRename, roleTitle, waitLabel } from "./tokens.js";
 
 
 /** How long a finished agent stays in the Agents pane: 30 minutes. A coordinator stays as long as its space. */
@@ -195,7 +195,7 @@ export function taskLine(state, task, now = Date.now()) {
   const parts = [];
   if (status === "needs_you") {
     const need = task.derived?.need;
-    parts.push(need === "asks" ? "asks you" : need === "reply" ? "waits for you" : "needs you");
+    parts.push(need === "asks" ? "asks you" : need === "reply" ? "waits for you" : waitLabel(task));
     const since = age(worker?.since_ms, now);
     if (since) parts.push(since === "now" ? "now" : `${since} ago`);
     return parts.join(" · ");
@@ -448,7 +448,7 @@ export function graphRows(state, pickedId = null, herdrSpaces = []) {
             ? `waits ${open.join(" ")}`
             : "queued"
           : at === "needs_you"
-            ? "needs you"
+            ? waitLabel(task)
             : at;
       out.push({
         kind: "task",
