@@ -109,6 +109,15 @@ if [ "$scratch_after" -gt "$scratch_before" ]; then
 fi
 echo "ok: isolate strips every host variable and keeps a later assignment"
 
+echo "== mods load"
+# Every mod's main.js is syntax-checked and imported with the app's modules
+# stubbed, the way Herdr loads it: a duplicate import or a bad path fails here.
+if ! command -v node >/dev/null 2>&1; then
+  echo "node is not on PATH: the mods cannot be load-checked" >&2
+  exit 1
+fi
+node --disable-warning=DEP0205 test/load-mods.mjs
+
 echo "== client unit tests"
 if command -v bun >/dev/null 2>&1; then
   echo "   (bun)"
