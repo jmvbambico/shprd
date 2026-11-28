@@ -9,7 +9,7 @@ import test, { beforeEach } from "node:test";
 import assert from "node:assert/strict";
 
 import * as herdr from "herdr";
-import { activeTaskId, openTaskChat, openThread, showCard, sweepTaskTabs, taskTabOf } from "../mods/lib/panel.js";
+import { activeTaskId, openTaskChat, openNeeds, openThread, sweepTaskTabs, taskTabOf } from "../mods/lib/panel.js";
 import { herdrSpaceOf } from "../mods/lib/tree.js";
 import { tabRows } from "../mods/lib/tabstrip.js";
 
@@ -111,8 +111,8 @@ test("an ended task's tab closes when it is not shown, and once the person leave
 
 test("the other entry points never open a tab", () => {
   openThread({ task: "T1", title: "" }, "chat");
-  showCard({ task: "T1" }, "t");
-  showCard({ task: null }, "", { id: "sp1" });
+  openNeeds("T1");
+  openNeeds(null);
   assert.deepEqual(tabsOf(), []);
   assert.ok(!herdr.RUNS.some((r) => r.name === "tab.select"));
 });
@@ -135,7 +135,7 @@ test("a worker's ask: its entry opens the tab at the card, or focuses the open t
 test("the tab wears the icon of the harness on the task: the worker's while working, the reviewer's in review", () => {
   showTab("T1");
   const icons = { claude: { icon: "claude.svg", tint: false }, codex: { icon: "codex.svg", tint: true } };
-  const iconOf = (state) => tabRows(herdr.spaces()[1], herdr.panes(), state, icons).find((row) => row.id === "tab-t");
+  const iconOf = (state) => tabRows(herdr.spaces()[1], herdr.panes(), state, null, icons).find((row) => row.id === "tab-t");
 
   const working = structuredClone(STATE);
   assert.equal(iconOf(working).icon, "claude.svg");
