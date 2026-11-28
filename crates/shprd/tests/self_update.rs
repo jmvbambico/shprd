@@ -31,14 +31,42 @@ use tempfile::TempDir;
 
 const FAKE_SERVICE: &str = r#"
 import json, os, socketserver, sys, uuid
+from urllib.parse import parse_qs, urlparse
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 state, version = sys.argv[1], sys.argv[2]
 ident = uuid.uuid4().hex
 
+def old_fold_error(folder):
+    """The fold 2b4770b left behind: a landing or a drop closes a task's asks
+    with an answer, and a later `ask_answered` for an ask that already has one
+    fails the whole fold."""
+    answered, raised = set(), {}
+    with open(os.path.join(folder, ".shprd", "events.jsonl")) as log:
+        for line in log:
+            event = json.loads(line)
+            kind = event["kind"]
+            if kind == "ask_raised":
+                raised.setdefault(event["task"], []).append(event["ask"])
+            elif kind in ("task_landed", "task_dropped"):
+                for ask in raised.get(event["task"], []):
+                    answered.add((event["task"], ask))
+            elif kind == "ask_answered":
+                key = (event["task"], event["ask"])
+                if key in answered:
+                    return "ask %s of task %s is already answered" % (event["ask"], event["task"])
+                answered.add(key)
+    return None
+
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path == "/api/health/repos":
+        url = urlparse(self.path)
+        if url.path == "/api/health/repos" and version == "unfoldable":
+            folder = parse_qs(url.query).get("folder", [""])[0]
+            error = old_fold_error(folder) if folder else None
+            failed = [] if error is None else [{"id": folder, "error": error}]
+            body = json.dumps({"ok": not failed, "checked": 1, "failed": failed}).encode()
+        elif url.path == "/api/health/repos":
             body = json.dumps({"ok": True, "checked": 0, "failed": []}).encode()
         else:
             body = json.dumps({"ok": True, "id": ident, "version": version}).encode()
@@ -80,20 +108,13 @@ for a in "$@"; do
 done
 [ "$1" = serve ] || exit 0
 [ "$VERSION" = bad ] && exit 1
-# The unfoldable build is the REAL shprd, started the way the helper starts the
-# service: from the state folder, naming no repository. It registers nothing at
-# start, so only the repository the helper names (whose log cannot be folded)
-# can make the health check fail. A supervisor that restarts it before the
-# rollback's file swap finds it gone, as it would a service that cannot start.
+# The "unfoldable" build is the fake service too: it folds the updated
+# repository's log with the rule 2b4770b left behind. A supervisor that restarts
+# it before the rollback's file swap finds it gone, as it would a service that
+# cannot start.
 if [ "$VERSION" = unfoldable ]; then
   [ -f "$FAKE_STATE/unfoldable-served" ] && exit 1
   touch "$FAKE_STATE/unfoldable-served"
-  cd "$FAKE_STATE"
-  "$FAKE_REAL" --home "$FAKE_HOME" serve --port 0 &
-  real=$!
-  trap 'kill $real 2>/dev/null' TERM INT
-  wait $real
-  exit $?
 fi
 exec python3 "$FAKE_PY" "$FAKE_STATE" "$VERSION"
 "#
@@ -290,14 +311,6 @@ impl World {
                 root.join("shprd_serve.py").display().to_string(),
             ),
             ("FAKE_STATE".to_string(), state.display().to_string()),
-            (
-                "FAKE_REAL".to_string(),
-                env!("CARGO_BIN_EXE_shprd").to_string(),
-            ),
-            (
-                "FAKE_HOME".to_string(),
-                root.join("fake-home").display().to_string(),
-            ),
             (
                 "XDG_STATE_HOME".to_string(),
                 state_home.display().to_string(),
@@ -655,35 +668,62 @@ fn a_new_binary_that_cannot_fold_a_repository_log_is_rolled_back() {
     if !have_python() {
         return;
     }
-    // The "unfoldable" build is the real shprd serving a repository whose log it
-    // cannot fold; its own /api/health/repos says so.
+    // The "unfoldable" build folds with the rule 2b4770b left behind. The log is
+    // the 2026-11-28 incident's sequence: a task with an out-of-rounds review
+    // ask, the task dropped (which closes the ask), then an ask_answered for
+    // that ask. Every line parses; only the fold rejects the sequence.
     let world = World::new("crates/x.rs", "unfoldable");
-    // The updated repository's log is a real run (started by the real CLI) plus a
-    // well-formed `ask_answered` the fold refuses, the class of failure the
-    // 2026-11-28 incident had: every line parses, the fold rejects the sequence.
     world.start_run();
-    let mut log =
-        shprd_core::log::EventLog::open(&world.repo.join(".shprd").join("events.jsonl")).unwrap();
-    log.append(
-        shprd_core::event::Actor::Human,
-        shprd_core::event::EventKind::AskAnswered {
-            task: "chat-tail".to_string(),
-            ask: "review-out-2".to_string(),
-            answer: "late".to_string(),
-        },
-        &shprd_core::log::SystemClock,
-    )
-    .unwrap();
+    let path = world.repo.join(".shprd").join("events.jsonl");
+    let mut log = shprd_core::log::EventLog::open(&path).unwrap();
+    let clock = shprd_core::log::SystemClock;
+    for (actor, kind) in [
+        (
+            shprd_core::event::Actor::Human,
+            shprd_core::event::EventKind::TaskAdded {
+                task: "SHP-1".to_string(),
+                title: "a task".to_string(),
+                scope: Vec::new(),
+                acceptance: vec!["it works".to_string()],
+                tags: Vec::new(),
+                skills: Vec::new(),
+                deps: Vec::new(),
+            },
+        ),
+        (
+            shprd_core::event::Actor::Human,
+            shprd_core::event::EventKind::AskRaised {
+                task: "SHP-1".to_string(),
+                ask: "review-out-2".to_string(),
+                ask_kind: shprd_core::ask::AskKind::Question,
+                text: "the review rounds are spent".to_string(),
+                options: Vec::new(),
+                created_at_ms: 1,
+                expires_at_ms: None,
+            },
+        ),
+        (
+            shprd_core::event::Actor::Human,
+            shprd_core::event::EventKind::TaskDropped {
+                task: "SHP-1".to_string(),
+                reason: "no longer wanted".to_string(),
+            },
+        ),
+        (
+            shprd_core::event::Actor::Human,
+            shprd_core::event::EventKind::AskAnswered {
+                task: "SHP-1".to_string(),
+                ask: "review-out-2".to_string(),
+                answer: "late".to_string(),
+            },
+        ),
+    ] {
+        log.append(actor, kind, &clock).unwrap();
+    }
     drop(log);
-    assert!(
-        shprd_core::state::RunState::fold(
-            &shprd_core::log::EventLog::read_all(&world.repo.join(".shprd").join("events.jsonl"))
-                .unwrap()
-                .events
-        )
-        .is_err(),
-        "the seeded log must be one a build cannot fold"
-    );
+    // The build under test folds this sequence (SHP-1's fix); the fake build does not.
+    shprd_core::state::RunState::fold(&shprd_core::log::EventLog::read_all(&path).unwrap().events)
+        .expect("the current fold accepts the incident's sequence");
     let out = world.helper("ok", "unfoldable");
     assert!(out.status.success(), "a rollback is reported: {out:?}");
     assert!(
