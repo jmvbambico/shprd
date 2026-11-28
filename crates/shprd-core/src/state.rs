@@ -817,7 +817,9 @@ impl RunState {
                 );
             }
             EventKind::AskAnswered { task, ask, answer } => {
-                if let Some(record) = self.asks.get_mut(&(task.clone(), ask.clone())) {
+                if let Some(record) = self.asks.get_mut(&(task.clone(), ask.clone()))
+                    && record.answer.is_none()
+                {
                     record.answer = Some(AskAnswerRecord {
                         text: answer.clone(),
                         seq: event.seq,
@@ -2113,6 +2115,37 @@ mod tests {
         );
         assert_eq!(
             state.closed_needs.get(&4).map(String::as_str),
+            Some("task dropped")
+        );
+    }
+
+    /// The installed log's sequence: a task is dropped (its review-out ask is
+    /// closed by the fold), then an `ask_answered` for that ask is written. The
+    /// replay takes it as a no-op and keeps the closing answer.
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn an_answer_after_a_drop_closed_the_ask_folds_as_a_no_op() {
+        let state = fold_extra(vec![
+            raise(3, "review-out-2"),
+            ev(
+                4,
+                EventKind::TaskDropped {
+                    task: "a".to_string(),
+                    reason: "no longer wanted".to_string(),
+                },
+            ),
+            ev(
+                5,
+                EventKind::AskAnswered {
+                    task: "a".to_string(),
+                    ask: "review-out-2".to_string(),
+                    answer: "late".to_string(),
+                },
+            ),
+        ])
+        .expect("a later answer for a closed ask folds");
+        assert_eq!(
+            answer_of(&state, "review-out-2").as_deref(),
             Some("task dropped")
         );
     }
