@@ -2062,6 +2062,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::expect_used)]
     fn a_landing_closes_the_tasks_open_asks_and_escalations() {
         let state = fold_extra(vec![
             raise(3, "q-1"),
@@ -2092,6 +2093,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::expect_used)]
     fn a_drop_closes_the_tasks_open_asks_and_escalations() {
         let state = fold_extra(vec![
             raise(3, "review-stuck-1-1"),
@@ -2116,6 +2118,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::expect_used)]
     fn an_override_closes_the_out_of_rounds_ask_but_not_a_question() {
         let state = fold_extra(vec![
             raise(3, "review-out-1"),
@@ -2138,6 +2141,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::expect_used)]
     fn a_retry_closes_the_out_of_rounds_ask() {
         let state = fold_extra(vec![
             raise(3, "review-out-1"),
