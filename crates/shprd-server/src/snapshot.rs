@@ -1148,6 +1148,73 @@ mod tests {
     }
 
     #[test]
+    fn a_snapshot_with_one_of_each_marks_only_the_persons_for_you() {
+        use shprd_core::event::EventKind as K;
+        use shprd_core::state::TaskStatus as S;
+        let added = |id: &str| K::TaskAdded {
+            task: id.to_string(),
+            title: format!("task {id}"),
+            scope: Vec::new(),
+            acceptance: vec!["it works".to_string()],
+            tags: Vec::new(),
+            skills: Vec::new(),
+            deps: Vec::new(),
+        };
+        let mut state = with(vec![
+            added("T2"),
+            added("T3"),
+            added("T4"),
+            added("T5"),
+            added("T6"),
+            added("T7"),
+        ]);
+        // T1 queued, T2 working, T3 done, T4 dropped, T5 ready (Accept), T6 landing,
+        // T7 ready with a worker's question open.
+        for (id, status) in [
+            ("T2", S::Working),
+            ("T3", S::Integrated),
+            ("T4", S::Dropped),
+            ("T5", S::Passed),
+            ("T6", S::Passed),
+            ("T7", S::Working),
+        ] {
+            state.tasks.get_mut(id).expect(id).status = status;
+        }
+        let mut ask = record("ask-1", None, None);
+        ask.task = "T7".to_string();
+        state.asks.insert(("T7".to_string(), "ask-1".to_string()), ask);
+        let mut snap = snapshot(&state, NOW);
+        let mut landing = std::collections::BTreeSet::new();
+        landing.insert("T6".to_string());
+        crate::snapshot::apply_landing(&mut snap, &landing);
+        let for_you: Vec<(&str, bool)> = snap
+            .tasks
+            .iter()
+            .map(|t| (t.id.as_str(), t.derived.for_you))
+            .collect();
+        assert_eq!(
+            for_you,
+            vec![
+                ("T1", false), // queued
+                ("T2", false), // working
+                ("T3", false), // done
+                ("T4", false), // dropped
+                ("T5", true),  // ready, waits for Accept
+                ("T6", false), // landing by itself
+                ("T7", true),  // a worker's question
+            ],
+            "{:?}",
+            snap.tasks.iter().map(|t| &t.derived).collect::<Vec<_>>()
+        );
+        // The release / integration PR card is the person's too: it shows once
+        // every task has landed or been dropped.
+        for id in ["T1", "T2", "T5", "T6", "T7"] {
+            state.tasks.get_mut(id).expect(id).status = S::Integrated;
+        }
+        assert!(snapshot(&state, NOW).integration_pr.is_some());
+    }
+
+    #[test]
     fn an_operational_card_is_visible_but_not_for_you() {
         use shprd_core::event::EventKind as K;
         let mut state = with(vec![K::Spawned {

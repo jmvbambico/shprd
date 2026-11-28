@@ -1246,6 +1246,28 @@ test("typing an id leaves only that task's row", () => {
   assert.deepEqual(ids, ["T3"]);
 });
 
+test("For you lists only the tasks whose for_you is true", () => {
+  const row = (id, status, for_you, need) => ({ id, status: "queued", derived: { status, need, for_you } });
+  const board = {
+    tasks: [
+      row("W", "working", false),
+      row("D", "done", false),
+      row("Q", "queued", false),
+      row("M", "merging", false),
+      row("R", "ready", true),
+      row("A", "needs_you", true, "asks"),
+      row("O", "needs_you", false, "attention"),
+    ],
+  };
+  const view = listView(board, {});
+  const you = view.groups.find((g) => g.key === "you");
+  assert.deepEqual(you.tasks.map((t) => t.id).sort(), ["A", "R"]);
+  assert.equal(view.groups.find((g) => g.key === "coordinator").tasks[0].id, "O");
+  // A Ready row the engine lands itself (for_you false) is not listed there.
+  const landing = listView({ tasks: [row("L", "ready", false)] }, {});
+  assert.equal(landing.groups.some((g) => g.key === "you"), false);
+});
+
 test("For you comes first: needs you, then Ready; Done is a line until opened", () => {
   const view = listView(STATE, {});
   assert.equal(view.groups[0].label, "For you");
