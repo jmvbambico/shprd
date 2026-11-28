@@ -27,7 +27,7 @@
 // Shared: the source is `mods/lib/toasts.js`; `bin/sync-shared` copies it into
 // every mod folder that imports it. Edit the source, never a copy.
 
-import { newestDecision } from "./board.js";
+import { forYou, newestDecision } from "./board.js";
 import { desktopWords, roleRename } from "./tokens.js";
 
 /** How many toasts are on screen at once (`core/toasts.js:11`). */
@@ -105,6 +105,16 @@ function finished(state, taskId) {
   return task?.status === "integrated" || task?.status === "dropped";
 }
 
+/**
+ * Whether the card on `taskId` is the person's: the same rule For you and the
+ * Needs you badge use (`forYou`), so a toast and the board cannot disagree. A
+ * card with no task row in the snapshot is not on the board, so not theirs.
+ */
+export function isTheirs(state, taskId) {
+  const task = (state?.tasks ?? []).find((entry) => entry?.id === taskId);
+  return Boolean(task) && forYou(task);
+}
+
 /** The integration branch a landed task went into, as a person reads it. */
 function landedBody(state, taskId) {
   const task = (state?.tasks ?? []).find((entry) => entry?.id === taskId);
@@ -167,6 +177,10 @@ export function newsItems(changes, state) {
     }
     if (level === "warning") {
       if (finished(state, task)) continue;
+      // "Needs you" is For you's word: a card the coordinator or the engine
+      // settles (operational, out of rounds, a stopped agent, the run-wide
+      // card, which has no task row) is not told to the person at all.
+      if (!isTheirs(state, task)) continue;
       items.push({
         id: eventId(change.seq),
         level,

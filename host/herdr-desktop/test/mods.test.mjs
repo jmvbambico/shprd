@@ -533,6 +533,41 @@ test("a card about a task the board calls finished is not news", () => {
   assert.equal(newsItems([{ seq: 42, kind: "task_landed", task: "T4" }], STATE).length, 1);
 });
 
+test("an operational card gets no Needs you toast; a protected-path accept does", () => {
+  const operational = (id, need) => ({
+    id,
+    status: "needs_you",
+    derived: { status: "needs_you", need, reason: "out of rounds", for_you: false },
+  });
+  // The shape the service gives a task that touched an undeclared protected
+  // path: ready, waiting for the person's Accept, For you.
+  const protectedAccept = {
+    id: "T8",
+    status: "passed",
+    derived: {
+      status: "ready",
+      need: "accept",
+      reason: "Touches protected paths: AGENTS.md",
+      for_you: true,
+    },
+  };
+  const state = {
+    seq: 53,
+    tasks: [operational("T7", "attention"), operational("T9", "agent_stopped"), protectedAccept],
+  };
+  const events = [
+    { seq: 50, kind: "escalated", task: "T7" },
+    { seq: 51, kind: "ask_raised", task: "T9" },
+    { seq: 52, kind: "escalated", task: "" },
+    { seq: 53, kind: "escalated", task: "T8" },
+  ];
+  const items = fromSnapshot(events, state);
+  assert.deepEqual(items.map((item) => item.id), ["ev:53"]);
+  assert.equal(items[0].title, "T8 · Needs you");
+  assert.equal(items[0].body, "Touches protected paths: AGENTS.md");
+  assert.equal(items.some((item) => /Needs you/.test(item.title) && /T7|T9/.test(item.title)), false);
+});
+
 test("a batch of events nobody acts on says nothing", () => {
   const quiet = EVENTS.filter((event) => ["spawned", "reported", "task_status", "task_added"].includes(event.kind));
   assert.deepEqual(newsItems(quiet, STATE), []);
