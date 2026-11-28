@@ -247,6 +247,11 @@ fn with_a_task_branch() -> Fixture {
 /// [`with_a_task_branch`] whose task also commits `extra`, which its declared
 /// paths do not name.
 fn with_a_task_branch_also_changing(extra: &[&str]) -> Fixture {
+    with_a_branch_for("T1", extra)
+}
+
+/// [`with_a_task_branch`] for the task `id` (e.g. `SHP-12`): its branch is `shprd/r1/<id>`.
+fn with_a_branch_for(id: &str, extra: &[&str]) -> Fixture {
     let repo = TempDir::new().expect("repo dir");
     let root = repo.path().to_path_buf();
     git(&root, &["init", "-q", "-b", "main"]);
@@ -257,7 +262,7 @@ fn with_a_task_branch_also_changing(extra: &[&str]) -> Fixture {
     git(&root, &["add", "."]);
     git(&root, &["commit", "-q", "-m", "seed"]);
     git(&root, &["checkout", "-q", "-b", "integration/m10"]);
-    git(&root, &["checkout", "-q", "-b", "shprd/r1/T1"]);
+    git(&root, &["checkout", "-q", "-b", &format!("shprd/r1/{id}")]);
     fs::write(root.join("kept.txt"), "one\nTWO\nthree\nfour\n").expect("the change");
     fs::write(root.join("new.txt"), "hello\n").expect("a new file");
     for path in extra {
@@ -277,7 +282,7 @@ fn with_a_task_branch_also_changing(extra: &[&str]) -> Fixture {
     append(
         &fixture,
         EventKind::TaskAdded {
-            task: "T1".to_string(),
+            task: id.to_string(),
             title: "a task with work".to_string(),
             scope: vec!["kept.txt".to_string(), "new.txt".to_string()],
             acceptance: vec!["it works".to_string()],
@@ -289,12 +294,12 @@ fn with_a_task_branch_also_changing(extra: &[&str]) -> Fixture {
     append(
         &fixture,
         EventKind::Spawned {
-            task: "T1".to_string(),
+            task: id.to_string(),
             attempt: 1,
             agent: "claude".to_string(),
             model: None,
             worktree: root.display().to_string(),
-            branch: "shprd/r1/T1".to_string(),
+            branch: format!("shprd/r1/{id}"),
         },
     );
     // The attempt reports, so the task is a finished hand-in rather than work in
@@ -302,7 +307,7 @@ fn with_a_task_branch_also_changing(extra: &[&str]) -> Fixture {
     append(
         &fixture,
         EventKind::Reported {
-            task: "T1".to_string(),
+            task: id.to_string(),
             attempt: 1,
             status: shprd_core::event::ReportStatus::Completed,
             summary: "changed the file and added one".to_string(),
@@ -362,7 +367,7 @@ fn recording_engine(answer: Result<&'static str, &'static str>) -> (Engine, Call
 // -- POST /api/tasks -------------------------------------------------------
 
 #[tokio::test]
-async fn the_person_adds_a_task_and_it_is_named_from_the_title() {
+async fn the_person_adds_a_task_and_it_gets_a_prefixed_number() {
     let fixture = Fixture::new();
     let reply = fixture
         .add(json!({
@@ -374,7 +379,8 @@ async fn the_person_adds_a_task_and_it_is_named_from_the_title() {
     assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
     assert_eq!(reply.json()["ok"], json!(true));
     let task = &reply.json()["task"];
-    assert_eq!(task["id"], json!("add-the-board-s-add-task-form"));
+    let prefix = shprd_core::settings::task_id_prefix(None, fixture.repo.path());
+    assert_eq!(task["id"], json!(format!("{prefix}-1")));
     assert_eq!(task["derived"]["status"], json!("to_do"));
     assert_eq!(task["scope"], json!(["host/herdr-desktop"]));
 
@@ -382,7 +388,7 @@ async fn the_person_adds_a_task_and_it_is_named_from_the_title() {
     let events = fixture.events();
     let added: Vec<&shprd_core::event::Event> = events
         .iter()
-        .filter(|event| matches!(&event.kind, EventKind::TaskAdded { task, .. } if task.starts_with("add-the-board")))
+        .filter(|event| matches!(&event.kind, EventKind::TaskAdded { task, .. } if task.ends_with("-1")))
         .collect();
     assert_eq!(added.len(), 1, "one task, one event");
     assert_eq!(
@@ -393,7 +399,7 @@ async fn the_person_adds_a_task_and_it_is_named_from_the_title() {
 }
 
 #[tokio::test]
-async fn two_tasks_with_one_title_are_two_tasks() {
+async fn two_tasks_with_one_title_are_two_numbered_tasks() {
     let fixture = Fixture::new();
     let body = json!({
         "title": "Tabs",
@@ -401,10 +407,11 @@ async fn two_tasks_with_one_title_are_two_tasks() {
         "acceptance": ["it works"],
     });
     let first = fixture.add(body.clone()).await;
-    assert_eq!(first.json()["task"]["id"], json!("tabs"));
+    let prefix = shprd_core::settings::task_id_prefix(None, fixture.repo.path());
+    assert_eq!(first.json()["task"]["id"], json!(format!("{prefix}-1")));
     let second = fixture.add(body).await;
     assert_eq!(second.status, StatusCode::OK, "{:?}", second.body);
-    assert_eq!(second.json()["task"]["id"], json!("tabs-2"));
+    assert_eq!(second.json()["task"]["id"], json!(format!("{prefix}-2")));
 }
 
 #[tokio::test]
@@ -598,7 +605,7 @@ async fn changes_after_another_task_landed_list_only_this_tasks_files() {
 async fn a_task_with_no_attempt_has_nothing_to_compare() {
     let fixture = Fixture::new();
     let added = fixture
-        .add(json!({"title": "fresh", "scope": ["a"], "acceptance": ["y"]}))
+        .add(json!({"id": "fresh", "title": "fresh", "scope": ["a"], "acceptance": ["y"]}))
         .await;
     assert_eq!(added.status, StatusCode::OK);
     let reply = fixture
@@ -1045,7 +1052,7 @@ async fn a_second_stop_is_refused_with_its_reason() {
 async fn a_stop_of_a_task_nobody_started_is_refused() {
     let fixture = Fixture::new();
     fixture
-        .add(json!({"title": "not started", "scope": ["a"], "acceptance": ["y"]}))
+        .add(json!({"id": "not-started", "title": "not started", "scope": ["a"], "acceptance": ["y"]}))
         .await;
     let (engine, _, stopped) = recording_engine(Ok("closed the space"));
     let fixture = Fixture {
@@ -1096,7 +1103,9 @@ async fn a_stopped_task_reads_the_same_from_the_cli_and_the_board() {
 async fn dropping_a_task_records_the_persons_reason_once() {
     let fixture = Fixture::new();
     let add = fixture
-        .add(json!({"title": "not needed", "scope": ["a"], "acceptance": ["y"]}))
+        .add(
+            json!({"id": "not-needed", "title": "not needed", "scope": ["a"], "acceptance": ["y"]}),
+        )
         .await;
     assert_eq!(add.status, StatusCode::OK);
     let drop = fixture
@@ -1125,7 +1134,7 @@ async fn dropping_many_tasks_takes_one_reason_and_skips_the_ones_it_cannot() {
     let fixture = Fixture::new();
     for (title, scope) in [("old one", "a"), ("old two", "b"), ("new one", "c")] {
         let add = fixture
-            .add(json!({"title": title, "scope": [scope], "acceptance": ["y"]}))
+            .add(json!({"id": title.replace(' ', "-"), "title": title, "scope": [scope], "acceptance": ["y"]}))
             .await;
         assert_eq!(add.status, StatusCode::OK);
     }
@@ -1249,7 +1258,7 @@ async fn accepting_a_task_pins_the_head_its_branch_is_at() {
 async fn accepting_a_task_with_no_attempt_is_refused() {
     let fixture = Fixture::new();
     fixture
-        .add(json!({"title": "fresh", "scope": ["a"], "acceptance": ["y"]}))
+        .add(json!({"id": "fresh", "title": "fresh", "scope": ["a"], "acceptance": ["y"]}))
         .await;
     let reply = fixture
         .act(json!({"kind": "task.accept", "task": "fresh"}))
@@ -1432,4 +1441,29 @@ async fn override_readmit_and_sync_actions_run_the_rules_and_say_why_they_refuse
         "the reason names the verb: {:?}",
         reply.body
     );
+}
+
+#[tokio::test]
+async fn a_hyphenated_id_survives_spawn_and_land() {
+    let fixture = with_a_branch_for("SHP-12", &[]);
+    let (engine, started, _) = recording_engine(Ok("started the worker"));
+    let fixture = Fixture {
+        app: fixture.app.with_engine(engine),
+        ..fixture
+    };
+    let start = fixture
+        .act(json!({"kind": "task.start", "task": "SHP-12"}))
+        .await;
+    assert_eq!(start.status, StatusCode::OK, "{:?}", start.body);
+    assert_eq!(start.json()["task"]["id"], json!("SHP-12"));
+    assert_eq!(calls(&started)[0].1, "SHP-12");
+
+    let accept = fixture
+        .act(json!({"kind": "task.accept", "task": "SHP-12"}))
+        .await;
+    assert_eq!(accept.status, StatusCode::OK, "{:?}", accept.body);
+    let approved = fixture.events().into_iter().any(
+        |event| matches!(&event.kind, EventKind::TaskApproved { task, .. } if task == "SHP-12"),
+    );
+    assert!(approved, "the landing names SHP-12");
 }

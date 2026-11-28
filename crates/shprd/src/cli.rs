@@ -1015,7 +1015,8 @@ pub struct TaskStatusArgs {
 #[derive(Debug, Args)]
 pub struct TaskAddArgs {
     /// Task id, e.g. `M1.6`. Leave it out and shprd assigns the next free
-    /// `T<n>` and prints it.
+    /// `<PREFIX>-<n>` (a 3-letter prefix from the repository's name, e.g.
+    /// `SHP-12`; `tasks.id_prefix` overrides it) and prints it.
     #[arg(long, value_name = "ID")]
     pub id: Option<String>,
     /// One-line title.

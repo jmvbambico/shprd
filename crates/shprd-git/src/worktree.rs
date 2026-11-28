@@ -1084,6 +1084,17 @@ mod tests {
     }
 
     #[test]
+    fn a_hyphenated_prefix_id_makes_a_branch_and_a_worktree() {
+        let (repo, home) = fixture();
+        let layout = Layout::default_for_home(home.path());
+        assert_eq!(layout.branch_name("m11", "SHP-12"), "shprd/m11/SHP-12");
+        let created = create(repo.path(), &layout, "m11", "SHP-12", "main").expect("a worktree");
+        assert_eq!(created.branch, "shprd/m11/SHP-12");
+        assert!(created.path.ends_with("SHP-12"), "{:?}", created.path);
+        assert!(layout.owns_branch(&created.branch));
+    }
+
+    #[test]
     fn a_pattern_git_would_refuse_is_ignored() {
         for bad in [
             "a b",

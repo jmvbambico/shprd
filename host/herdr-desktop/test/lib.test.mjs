@@ -838,3 +838,10 @@ test("a health answer that takes 2 s (a backgrounded window) still finds the ser
   const found = await discover({ dir, fetch: slow, wait: (ms) => new Promise((resolve) => setTimeout(resolve, ms)) });
   assert.equal(found?.record.id, "abc");
 });
+
+test("a prefixed task id (SHP-12) reads as it is, and an attempt label keeps its hyphen", async () => {
+  const { ref } = await import("../mods/lib/tokens.js");
+  assert.equal(ref("SHP-12"), "SHP-12");
+  assert.equal(ref("JMN-3"), "JMN-3");
+  assert.equal(ref("SHP-12·a2"), "SHP-12·a2");
+});
