@@ -123,6 +123,7 @@ const LIT_MS = 2500;
 
 /** The shared key the pane's Needs you pill writes to take the chat to its card. */
 const FOCUS_KEY = "shprd.chat.focus";
+const COMPOSER_KEY = "shprd.chat.composer";
 
 
 export default class Chat extends View {
@@ -170,6 +171,8 @@ export default class Chat extends View {
     this.holdSend = null;
     /** The last "take me to the card" request this chat acted on (the pane's Needs you pill). */
     this.focusSeen = null;
+    /** The last "take the keyboard" request this chat acted on (a task tab just opened by a click). */
+    this.composerSeen = null;
     /** The buttons pressed, by card id: `{label, busy, phase: "busy" | "chose"}`. */
     this.pressed = new Map();
     /** The card whose Drop is waiting for its second press. */
@@ -1133,6 +1136,7 @@ export default class Chat extends View {
     // The question the agent's terminal waits on is a card of this chat, at the
     // bottom; the one just answered stays away until the record says it is over.
     this.focusCard();
+    this.takeComposer();
     const asked = this.chat?.question && !this.answered(this.chat.question.id) ? questionCard(this.chat.question, this.space ?? COORDINATOR) : null;
     const live = [...cardsOf(board, open), ...(asked ? [asked] : [])];
     // A card the person just answered stays, saying what they chose, until the service stops listing it.
@@ -1265,6 +1269,14 @@ export default class Chat extends View {
             ),
         ),
       );
+  }
+
+  /** A request that a task's tab opened by a click takes the keyboard: the composer is focused. */
+  takeComposer() {
+    const want = shared(COMPOSER_KEY);
+    if (!want || want.at === this.composerSeen) return;
+    this.composerSeen = want.at;
+    if (this.fixed && want.space === this.fixed && Date.now() - want.at < 10_000) this.input.focus();
   }
 
   /** A request from the pane's Needs you pill to show this chat's card: the next reveal lands on it. */

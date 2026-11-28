@@ -45,8 +45,8 @@ import { closeOverlay, nextCommand, openOverlay, props, run, setShared, shared, 
 
 import { adoptCache, attach, downNotice, forgetAll, reason, remember, singleFlight, syncRepo, watchSwitch } from "./lib/client.js";
 import { MENU, closeWords, isOpen, menuHeight, menuItems, pickOpen, toggleOpen } from "./lib/spaces.js";
-import { livePick, plainSpaces, spaceTree, subtitle } from "./lib/tree.js";
-import { note, openNewSpace, openThread, statusGlyph } from "./lib/panel.js";
+import { herdrSpaceOf, livePick, plainSpaces, spaceTree, subtitle } from "./lib/tree.js";
+import { activeTaskId, note, openNewSpace, openTaskChat, openThread, statusGlyph } from "./lib/panel.js";
 import { H, RADIUS, SPACE, TEXT, ref, tone } from "./lib/tokens.js";
 import { followChanges } from "./lib/watch.js";
 
@@ -251,6 +251,16 @@ export default class Spaces extends View {
     });
   }
 
+  /** A click on a task's entry in the tree: its chat as a tab in the main pane. */
+  openTaskTab(task) {
+    const full = (this.state?.tasks ?? []).find((entry) => entry.id === task.id);
+    openTaskChat(
+      { task: task.id, herdr: herdrSpaceOf(this.state, full?.space ?? null, spaces()) },
+      { card: task.status === "needs_you" && task.forYou },
+    );
+    this.cx.notify();
+  }
+
   /**
    * Opens the task's thread in the Tasks panel (`openThread` in `lib/panel.js`
    * selects the stacks itself, so it works while another thread is open).
@@ -438,7 +448,7 @@ export default class Spaces extends View {
    * title, and for a working task a dim second line with its agent and progress.
    */
   taskRow(t, colors, task) {
-    const picked = (shared("tasks.thread")?.task ?? null) === task.id;
+    const picked = activeTaskId() === task.id;
     const guide = (text) => div().h(text.h).flex().items_center().child(text.s);
     return h_flex()
       .id(`task-${task.id}`)
@@ -451,7 +461,7 @@ export default class Spaces extends View {
       .when(picked, (el) => el.bg(t.selected))
       .when(!picked, (el) => el.hover((style) => style.bg(t.hover)))
       .cursor_pointer()
-      .on_click(() => this.openTask({ task: task.id, title: task.title }))
+      .on_click(() => this.openTaskTab(task))
       .on_mouse_down("right", () => this.menu({ id: task.id, title: task.title, space: null }))
       .child(
         v_flex()

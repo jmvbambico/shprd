@@ -13,12 +13,12 @@
 
 import { View, div } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
-import { nextCommand, run, setShared, theme } from "herdr";
+import { nextCommand, run, setShared, spaces, theme } from "herdr";
 
 import { adoptCache, attach, downNotice, forgetAll, reason, remember, singleFlight, syncRepo, watchSwitch } from "./lib/client.js";
-import { note, openThread, statusGlyph } from "./lib/panel.js";
+import { activeTaskId, note, openTaskChat, statusGlyph } from "./lib/panel.js";
 import { H, RADIUS, TEXT, tone } from "./lib/tokens.js";
-import { agentRows } from "./lib/tree.js";
+import { agentRows, herdrSpaceOf } from "./lib/tree.js";
 import { followChanges } from "./lib/watch.js";
 
 /** How often the pane reads the board when the change file says nothing. */
@@ -127,7 +127,8 @@ export default class Agents extends View {
   open(row) {
     this.picked = row.id;
     if (row.task) {
-      openThread({ task: row.task, title: row.title }, "chat");
+      const task = (this.state?.tasks ?? []).find((entry) => entry.id === row.task);
+      openTaskChat({ task: row.task, herdr: herdrSpaceOf(this.state, row.space ?? task?.space, spaces()) }, { card: row.state === "needs_you" });
     } else if (row.space) {
       setShared("spaces.picked", row.space);
     }
@@ -220,7 +221,7 @@ export default class Agents extends View {
    * program at the right; under it the state and how long it has been so.
    */
   row(t, colors, row) {
-    const picked = this.picked === row.id;
+    const picked = this.picked === row.id || (row.task && activeTaskId() === row.task);
     return h_flex()
       .id(`agent-${row.id}`)
       .h(44)
