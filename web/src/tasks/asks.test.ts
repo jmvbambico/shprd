@@ -9,8 +9,8 @@ describe("cards", () => {
   it("draws an ask once: an escalation that names an open ask is dropped", () => {
     const state = snapshot([], {
       needs: [
-        { task: "T1", body: "Answer the card `q1`, then run `shprd drop T1 --reason x`", default_action: "wait", seq: 1, kind: "decision", actions: [], key: "" },
-        { task: "T1", body: "Review spent: run `shprd retry T1`", default_action: "", seq: 2, kind: "decision", actions: [], key: "" },
+        { task: "T1", body: "Answer the card `q1`, then run `shprd drop T1 --reason x`", default_action: "wait", seq: 1, kind: "decision", actions: [], key: "", for_you: true },
+        { task: "T1", body: "Review spent: run `shprd retry T1`", default_action: "", seq: 2, kind: "decision", actions: [], key: "", for_you: true },
       ],
     });
     const list = cards(state, { asks: [ask("T1", "q1", { options: ["yes", "no"], kind: "permission" })] });
@@ -24,7 +24,7 @@ describe("cards", () => {
     const [card] = cards(snapshot([]), { asks: [ask("T1", "q1")] });
     expect(answerBody(card!, "  main ")).toEqual({ task: "T1", ask: "q1", answer: "main" });
     expect(answerBody(card!, "  ")).toBeNull();
-    const [esc] = cards(snapshot([], { needs: [{ task: "T1", body: "x", default_action: "", seq: 1, kind: "decision", actions: [], key: "" }] }), null);
+    const [esc] = cards(snapshot([], { needs: [{ task: "T1", body: "x", default_action: "", seq: 1, kind: "decision", actions: [], key: "", for_you: true }] }), null);
     expect(answerBody(esc!, "y")).toBeNull();
     expect(footer(esc!)).toBe("");
   });
