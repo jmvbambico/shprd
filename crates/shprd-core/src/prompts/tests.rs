@@ -965,6 +965,8 @@ fn worker_and_coordinator_wordings_are_current_and_retired_ones_upgrade() {
     let worker = shipped_prompt("worker").expect("shipped").text;
     assert!(worker.contains("never run the work against real or shared data"));
     assert!(worker.contains("never phrase one as the person running a command"));
+    assert!(worker.contains("UI proof:"));
+    assert!(worker.contains("by their literal path"));
     let assistant = shipped_prompt("assistant").expect("shipped").text;
     assert!(!assistant.contains("they never type a command here"));
     assert!(assistant.contains("agent propose"));
@@ -974,6 +976,11 @@ fn worker_and_coordinator_wordings_are_current_and_retired_ones_upgrade() {
             "worker",
             WORKER_M11_PRE_REAL_DATA,
             WORKER_M11_PRE_REAL_DATA_DIGEST,
+        ),
+        (
+            "worker",
+            WORKER_M11_PRE_PROOF_UI,
+            WORKER_M11_PRE_PROOF_UI_DIGEST,
         ),
         (
             "assistant",
