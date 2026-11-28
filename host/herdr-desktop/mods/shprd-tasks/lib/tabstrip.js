@@ -33,7 +33,7 @@
 // Shared: the source is `mods/lib/tabstrip.js`; `bin/sync-shared` copies it into
 // every mod folder that imports it. Edit the source, never a copy.
 
-import { roleTitle, status as statusOf } from "./tokens.js";
+import { roleTitle, statusColor, status as statusOf } from "./tokens.js";
 
 /** The separator shprd's tab titles are built from (`worker_title`). */
 export const SEP = "·";
@@ -57,9 +57,9 @@ export const SUFFIX = { review: "reviewer", worker: "worker" };
 
 /** Herdr's agent states, as a pill names and colours them. */
 export const LIVE = {
-  working: { word: "Working", tone: "amber", glyph: "pie" },
-  blocked: { word: "Needs you", tone: "red", glyph: "dot" },
-  done: { word: "Finished", tone: "green", glyph: "tick" },
+  working: { word: "Working", tone: "amber", color: "working", glyph: "pie" },
+  blocked: { word: "Needs you", tone: "red", color: "waiting", glyph: "dot" },
+  done: { word: "Finished", tone: "green", color: "done", glyph: "tick" },
   idle: { word: "Idle", tone: "dim", glyph: "ring" },
 };
 
@@ -135,6 +135,7 @@ export function tabState(tab, panes, state) {
     status: task.derived?.status ?? "to_do",
     word: look.word,
     tone: look.tone,
+    color: statusColor(task),
     glyph: look.glyph,
     from: "shprd",
   };
@@ -196,6 +197,7 @@ export function tabRows(space, panes, state, coordinator = null, icons = {}) {
       status: shape.status,
       word: shape.word,
       tone: shape.tone,
+      color: shape.color,
       glyph: shape.glyph,
       from: shape.from,
       needs: shape.tone === "red",
@@ -309,6 +311,22 @@ export function seenWith(seen, spaces) {
     .map((space) => space.id)
     .filter((id) => !seen.includes(id));
   return add.length > 0 ? [...seen, ...add] : null;
+}
+
+/**
+ * What a left release on a pill does: `{select: id}` for a plain click, or
+ * `{move: id, index}` for a drag from another pill (the host counts from one).
+ *
+ * **It compares tab ids, never positions.** A press remembers the pill it went
+ * down on; a position can shift between press and release (a sweep closing an
+ * ended task's tab moves every pill after it), and a click then looked like a
+ * drag to the wrong place, so the tab never got selected. A press with no
+ * remembered pill, or one whose tab is gone, is a click on the pill released on.
+ */
+export function pillRelease(pressed, row, rows = []) {
+  const stale = !pressed || !rows.some((entry) => entry?.id === pressed.id);
+  if (stale || pressed.id === row.id) return { select: row.id };
+  return { move: pressed.id, index: row.index + 1 };
 }
 
 /** The pills' counts, for a heading or a test. */

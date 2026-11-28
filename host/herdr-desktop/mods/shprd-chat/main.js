@@ -1234,7 +1234,11 @@ export default class Chat extends View {
     const want = shared(COMPOSER_KEY);
     if (!want || want.at === this.composerSeen) return;
     this.composerSeen = want.at;
-    if (this.fixed && want.space === this.fixed && Date.now() - want.at < 10_000) this.input.focus();
+    if (this.fixed && want.space === this.fixed) {
+      // Consumed once: a request that is read is cleared, so no start replays it.
+      setShared(COMPOSER_KEY, null);
+      if (Date.now() - want.at < 10_000) this.input.focus();
+    }
   }
 
   /** A request from the pane's Needs you pill to show this chat's card: the next reveal lands on it. */
@@ -1242,6 +1246,7 @@ export default class Chat extends View {
     const want = shared(FOCUS_KEY);
     if (!want || want.at === this.focusSeen) return;
     this.focusSeen = want.at;
+    if (want.space === (this.space ?? COORDINATOR)) setShared(FOCUS_KEY, null);
     if (want.space === (this.space ?? COORDINATOR) && Date.now() - want.at < 10_000) {
       this.pinned = "card";
       this.litUntil = Date.now() + LIT_MS;

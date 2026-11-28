@@ -250,6 +250,7 @@ export function treeTasks(state, space, spaceCount = 1, now = Date.now()) {
       forYou: task.derived?.for_you !== false,
       glyph: shape.glyph,
       tone: shape.tone,
+      color: shape.color,
       pct: shape.pct,
       sub: taskLine(state, task, now),
       last: at === mine.length - 1,
@@ -387,6 +388,7 @@ export function agentRows(state, { grouped = false, now = Date.now(), icons = {}
       line: agentLine(agent, now),
       glyph: shape.glyph,
       tone: shape.tone,
+      color: shape.color,
       pct: shape.pct,
       state: agent.state,
       task: task?.id ?? null,
@@ -461,6 +463,7 @@ export function graphRows(state, pickedId = null, herdrSpaces = []) {
         status: task.derived?.status ?? "to_do",
         glyph: shape.glyph,
         tone: shape.tone,
+        color: shape.color,
         pct: shape.pct,
         word: task.pending?.label ?? words,
         // The dependency a waiting task is held by, so the view can dim it.

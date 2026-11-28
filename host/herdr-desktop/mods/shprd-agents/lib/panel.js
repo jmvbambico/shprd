@@ -578,7 +578,7 @@ export function endedTabs(tasks, tabs, activeTab, known = []) {
  * view: the tab holds a mod pane and no terminal, and the worker lives on in the
  * service and the multiplexer. A board that is not loaded closes nothing.
  */
-export function sweepTaskTabs(state) {
+export function sweepTaskTabs(state, { startup = false } = {}) {
   if (!Array.isArray(state?.tasks)) return [];
   const tabs = (panes() ?? [])
     .filter((p) => p?.mod === TASK_CHAT_MOD && p?.tab && p?.props?.space && p.props.space !== "coordinator")
@@ -586,13 +586,52 @@ export function sweepTaskTabs(state) {
   const space = (spaces() ?? []).find((entry) => entry?.active);
   const activeTab = (space?.tabs ?? []).find((entry) => entry?.active)?.id ?? null;
   const known = Object.keys(shared(TASK_TABS_KEY) ?? {});
-  const closing = endedTabs(state.tasks, tabs, activeTab, known);
+  // At startup the shown tab may be a restored tab of a task that landed while
+  // the window was closed: nobody is "leaving" it, so it closes too, after the
+  // space's own first tab (the coordinator's) is shown in its place.
+  const closing = endedTabs(state.tasks, tabs, startup ? null : activeTab, known);
+  if (startup && closing.some(({ tab }) => tab === activeTab)) {
+    const spare = (space?.tabs ?? []).find((entry) => entry?.id !== activeTab && !closing.some(({ tab }) => tab === entry?.id));
+    if (spare) run("tab.select", { id: spare.id });
+  }
   for (const { tab } of closing) run("tab.close", { id: tab });
   return closing.map((entry) => entry.task);
 }
 
 /** The shared key the chat reads to scroll to a waiting card (`{space, at}`). */
 export const FOCUS_KEY = "shprd.chat.focus";
+
+/** How long a focus or composer request is good for; an older one is a leftover. */
+export const REQUEST_FRESH_MS = 10_000;
+
+/**
+ * The shared request keys to clear: a focus or composer request is consumed once
+ * by the chat that takes it, so one still there is a leftover when it is older
+ * than [`REQUEST_FRESH_MS`] or names a task that landed, was dropped or is not on
+ * the board. Pure: `entries` is `{[key]: {space, at} | null}`. A board that is not
+ * loaded clears only the old ones. A request never opens a tab; it is only read
+ * by a chat that is already open.
+ */
+export function staleRequests(tasks, entries, now = Date.now()) {
+  const board = Array.isArray(tasks) ? new Map(tasks.map((task) => [task.id, task])) : null;
+  return Object.entries(entries ?? {})
+    .filter(([, want]) => want !== null && want !== undefined)
+    .filter(([, want]) => {
+      if (typeof want !== "object" || !Number.isFinite(want.at) || now - want.at > REQUEST_FRESH_MS) return true;
+      if (!board || want.space === "coordinator" || !want.space) return false;
+      const found = board.get(want.space);
+      return !found || ENDED.has(found.status) || ENDED.has(found.derived?.status);
+    })
+    .map(([key]) => key);
+}
+
+/** Clears the leftover focus and composer requests (see [`staleRequests`]); returns the keys cleared. */
+export function clearStaleRequests(state) {
+  const keys = [FOCUS_KEY, COMPOSER_KEY];
+  const cleared = staleRequests(state?.tasks, Object.fromEntries(keys.map((key) => [key, shared(key)])));
+  for (const key of cleared) setShared(key, null);
+  return cleared;
+}
 /** The shared key the Tasks list reads to outline a task's entry (`{task, at}`). */
 export const TASKS_FOCUS_KEY = "tasks.focus";
 
@@ -728,11 +767,12 @@ export function icon(name, size, color) {
  * `lib/tabstrip.js` build it, and `colors` is `tone(theme())`.
  */
 export function statusGlyph(t, shape, colors, size = 14) {
-  const color = !shape || shape.tone === "dim" ? t.dim : (colors?.[shape.tone] ?? t.dim);
+  const key = shape?.color ?? shape?.tone;
+  const color = !shape || key === "dim" ? t.dim : (colors?.[key] ?? t.dim);
   const kind = shape?.glyph ?? "ring";
   const box = div().relative().w(size).h(size).flex_none().flex().items_center().justify_center();
   if (kind === "pie") {
-    return svg(pieFile(shape?.pct)).size(size).flex_none().text_color(colors?.amber ?? color);
+    return svg(pieFile(shape?.pct)).size(size).flex_none().text_color(colors?.[shape?.color] ?? colors?.working ?? color);
   }
   if (kind === "dot") {
     const dot = size - 4;

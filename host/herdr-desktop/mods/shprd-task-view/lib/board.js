@@ -18,7 +18,7 @@
 // Shared: the source is `mods/lib/board.js`; `bin/sync-shared` copies it into
 // every mod folder as `lib/board.js`. Edit the source, never a copy.
 
-import { NEED, STATUS, STATUS_ORDER, status as statusOf } from "./tokens.js";
+import { NEED, STATUS, STATUS_ORDER, statusColor, status as statusOf } from "./tokens.js";
 
 /** How many characters a row's second line may hold (Shepherdr `LINE_MAX`). */
 export const LINE_MAX = 40;
@@ -386,7 +386,7 @@ export function listView(
   if (groupBy !== "status") {
     const mine = byRank([
       ...rest.filter((t) => word(t) === "needs_you" && forYou(t)),
-      ...rest.filter((t) => word(t) === "ready"),
+      ...rest.filter((t) => word(t) === "ready" && forYou(t)),
     ]);
     const pr = searching ? null : integrationRow(state);
     const you = pr ? [pr, ...mine] : mine;
@@ -425,7 +425,9 @@ export function taskById(state, id) {
 
 /** One task's status, as the tone and glyph a row draws. */
 export function look(task) {
-  return { ...statusOf(task?.derived?.status), pct: progressOf(task) };
+  const shape = statusOf(task?.derived?.status);
+  const color = statusColor(task);
+  return { ...shape, ...(color ? { color } : {}), pct: progressOf(task) };
 }
 
 /**
