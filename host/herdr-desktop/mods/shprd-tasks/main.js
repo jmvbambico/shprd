@@ -43,10 +43,11 @@ import {
   actionBody,
   secondLine,
   taskIds,
+  forYou,
 } from "./lib/board.js";
 import { MENU, menuHeight, tasksMenu } from "./lib/menu.js";
-import { badge, card, cardHeader, countBadge, keycap, note, openAccept, openThread, segmented, statusGlyph } from "./lib/panel.js";
-import { followPick, graphRows, pickedName, scopeToSpace, spacesOf } from "./lib/tree.js";
+import { badge, card, cardHeader, countBadge, keycap, note, activeTaskId, openAccept, openTaskChat, openThread, segmented, statusGlyph } from "./lib/panel.js";
+import { followPick, graphRows, herdrSpaceOf, pickedName, scopeToSpace, spacesOf } from "./lib/tree.js";
 import { H, RADIUS, TEXT, ref, SPACE, tone } from "./lib/tokens.js";
 import { followChanges } from "./lib/watch.js";
 
@@ -338,6 +339,22 @@ export default class Tasks extends View {
       return;
     }
     openThread({ task: task?.id ?? null, title: task?.title ?? "" }, view);
+    this.cx.notify();
+  }
+
+  /**
+   * A click on a task's row or node: its chat opens as a tab in the main pane (or
+   * the open tab is shown), and this panel stays as it is. A task that waits on
+   * the person's own question also scrolls the chat to that card. The full
+   * in-panel thread is the row's `›`, or `open`.
+   */
+  openChat(task) {
+    if (!task || task.synthetic) {
+      this.open(task);
+      return;
+    }
+    const ask = task.derived?.status === "needs_you" && forYou(task);
+    openTaskChat({ task: task.id, herdr: herdrSpaceOf(this.state, task.space, spaces()) }, { card: ask });
     this.cx.notify();
   }
 
@@ -839,7 +856,8 @@ export default class Tasks extends View {
       .rounded(RADIUS.control)
       .cursor_pointer()
       .hover((style) => style.bg(t.hover))
-      .on_click(() => this.open({ id: row.id, title: row.title }))
+      .when(activeTaskId() === row.id, (el) => el.bg(t.selected ?? t.raised))
+      .on_click(() => this.openChat((this.state?.tasks ?? []).find((entry) => entry.id === row.id) ?? { id: row.id, title: row.title }))
       .text_size(TEXT.label)
       .child(div().flex_none().font_family(MONO).text_color(t.border).whitespace_nowrap().child(`  ${row.guide}`))
       .child(statusGlyph(t, row, colors, 12))
@@ -1264,7 +1282,8 @@ export default class Tasks extends View {
         el.id(`tasks-row-${task.id}-lit`).border_1().border_color(t.selected ?? t.ring ?? t.foreground),
       )
       .hover((style) => style.bg(t.hover))
-      .on_click(() => this.open(task))
+      .when(activeTaskId() === task.id, (el) => el.bg(t.selected ?? t.raised))
+      .on_click(() => this.openChat(task))
       .child(
         v_flex()
           .w(28)
@@ -1288,7 +1307,23 @@ export default class Tasks extends View {
       // A second act (Drop beside Retry) is a pill of its own.
       .when(acts.length > 1, (el) => el.child(this.act(t, task, acts[1])))
       // Reopen, Override and Sync ride in the free slot where they apply.
-      .children(more(task, this.state).map((extra) => this.act(t, task, extra)));
+      .children(more(task, this.state).map((extra) => this.act(t, task, extra)))
+      // The full thread (Review head, Terminal, PR, Artifacts) stays one click away.
+      .child(
+        div()
+          .id(`task-${task.id}-thread`)
+          .flex_none()
+          .px(4)
+          .text_size(TEXT.body)
+          .text_color(t.muted)
+          .cursor_pointer()
+          .hover((style) => style.text_color(t.foreground))
+          .on_click((_event, cx) => {
+            cx?.stop_propagation?.();
+            this.open(task);
+          })
+          .child("›"),
+      );
   }
 
   /**
@@ -1322,7 +1357,7 @@ export default class Tasks extends View {
       cx.stop_propagation();
       if (this.busy.has(task.id) || (task.pending && task.pending.kind !== "review")) return;
       // Review is the card, as a dialog: the panel underneath stays as it was.
-      if (act.id === "answer") this.open(task);
+      if (act.id === "answer") this.openChat(task);
       else if (act.action === null) {
         this.busy.set(task.id, { id: act.id, label: "Opening…" });
         // The row says "Reviewing…" in every pane until the card is closed.

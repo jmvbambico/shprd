@@ -176,14 +176,12 @@ test("the Tasks pane draws an old review-out task and its Needs you badge counts
     assert.ok(nodes.some((n) => n.idv === "task-OUT-answer"), "the asking row draws its Answer pill");
     assert.ok(nodes.some((n) => n.idv === "task-OUT-drop"), "the asking row draws its Drop pill");
     // A click on Answer runs the pane's own handler (no stub): it opens the task's
-    // thread, which is how the person reaches the card.
+    // chat as a tab in the main pane and points the chat at the waiting card.
     herdr.RUNS.length = 0;
     click(root, "task-OUT-answer");
-    assert.equal(herdr.shared("tasks.thread")?.task, "OUT", "Answer opens the task's thread");
-    assert.ok(
-      herdr.RUNS.some((run) => run.name === "layout.select" && run.args?.child === "tasks-thread-chat"),
-      "and shows its chat",
-    );
+    assert.ok(herdr.RUNS.some((run) => run.name === "tab.new" && run.args?.name === "OUT"), "Answer opens the task's tab");
+    assert.equal(herdr.shared("shprd.chat.focus")?.space, "OUT", "and scrolls to its card");
+    herdr.setShared("tasks.thread", { task: "OUT", title: "", view: "chat", at: Date.now() });
     // The thread's chat follows what the pane shared and draws the card the open
     // ask makes, choices and all, through its own render (not `cardsOf` by hand).
     const board = view.cache.get("/work/shop");

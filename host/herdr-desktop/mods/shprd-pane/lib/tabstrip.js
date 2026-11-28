@@ -166,7 +166,7 @@ export function tabLabel(tab, named, program) {
  * whether it is the shown tab. `active` is the host's own answer, so a click
  * that missed never moves the highlight here.
  */
-export function tabRows(space, panes, state, coordinator = null) {
+export function tabRows(space, panes, state, coordinator = null, icons = {}) {
   const tabs = space?.tabs ?? [];
   return tabs.flatMap((tab, index) => {
     // Another product's Assistant tab (Shepherdr's chat pane) is not shprd's to
@@ -175,7 +175,7 @@ export function tabRows(space, panes, state, coordinator = null) {
     const named = parseTabName(tab?.name);
     const shape = tabState(tab, panes, state);
     const task = taskOf(state, named.task);
-    const program = tabProgram(panes, tab?.id);
+    const program = tabProgram(panes, tab?.id) ?? taskTabProgram(panes, tab?.id, state, icons);
     // The coordinator's tab is its role's, not the repository's: the role's display
     // name from the settings, and the icon of the harness the role runs now.
     const mine = shprdCoordinatorTab(tab);
@@ -213,6 +213,40 @@ export function tabRows(space, panes, state, coordinator = null) {
       panes: Number.isInteger(tab.panes) ? tab.panes : 0,
     }];
   });
+}
+
+/**
+ * The harness of the agent on a task right now: the reviewer's while the task is
+ * in review, else the worker's. The program comes from the task's current attempt
+ * (`agent`) and its review (`reviews[].reviewer`); a live reviewer agent in the
+ * snapshot is the same answer, sooner. Null when the task has none.
+ */
+export function taskHarness(task, state) {
+  if (!task) return null;
+  const live = (state?.live_agents ?? []).find(
+    (agent) => agent?.task === task.id && agent?.role === "reviewer" && agent?.state !== "done",
+  );
+  if (live?.program) return live.program;
+  const latest = (task.attempts ?? [])[(task.attempts ?? []).length - 1];
+  const reviews = latest?.reviews ?? [];
+  const settled = (latest?.gates ?? []).some((gate) => gate?.gate === "review");
+  if (reviews.length > 0 && !settled) return reviews[reviews.length - 1]?.reviewer ?? null;
+  return latest?.agent ?? null;
+}
+
+/**
+ * What a task's chat tab shows as its program: the icon of the harness on that
+ * task (`taskHarness`), from the app's own table of agents (`icons`, harness id to
+ * `{icon, tint}`). It is read each paint, so it changes with the task's state.
+ */
+export function taskTabProgram(panes, tabId, state, icons = {}) {
+  const chat = (panes ?? []).find(
+    (pane) => pane?.tab === tabId && pane?.mod === "shprd-chat" && pane?.props?.space && pane.props.space !== "coordinator",
+  );
+  if (!chat) return null;
+  const id = taskHarness(taskOf(state, chat.props.space), state);
+  const found = id ? icons[id] : null;
+  return found ? { name: id, icon: found.icon, tint: Boolean(found.tint) } : null;
 }
 
 /**

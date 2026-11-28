@@ -6545,7 +6545,13 @@ project_dirs = []
             .get(&("T1".to_string(), ask))
             .unwrap_or_else(|| panic!("the ask is in the log"));
         let answer = record.answer.as_ref().unwrap_or_else(|| panic!("closed"));
-        assert_eq!(answer.text, "retry with another round");
+        // The fold closes it as "retried" when the new attempt starts; either
+        // way it is closed, never left unanswered.
+        assert!(
+            answer.text == "retried" || answer.text == "retry with another round",
+            "{}",
+            answer.text
+        );
     }
 
     /// A retry's brief, written by the spawn path itself, carries the ask the

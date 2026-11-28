@@ -471,3 +471,22 @@ export function graphRows(state, pickedId = null, herdrSpaces = []) {
   }
   return out;
 }
+
+/**
+ * The Herdr space a task's tab belongs in: the task's repo space. `servedId` is
+ * the served space id on the task (`task.space`) or a `herdr:<id>` row; it is
+ * matched by the served space's `herdr_id`, then by folder. Null when no Herdr
+ * space is known (the caller then makes the tab in the shown space).
+ */
+export function herdrSpaceOf(state, servedId, herdrSpaces = []) {
+  const list = Array.isArray(herdrSpaces) ? herdrSpaces : [];
+  const id = String(servedId ?? "");
+  if (id.startsWith("herdr:")) return id.slice("herdr:".length);
+  if (list.some((space) => space?.id === id)) return id;
+  const served = spacesOf(state).find((space) => space.id === id);
+  if (!served) return null;
+  if (served.herdr_id && list.some((space) => space?.id === served.herdr_id)) return served.herdr_id;
+  const folder = trimFolder(served.folder);
+  const same = list.find((space) => folder !== "" && trimFolder(space?.folder) === folder);
+  return same ? same.id : null;
+}

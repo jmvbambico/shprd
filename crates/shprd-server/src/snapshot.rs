@@ -113,7 +113,6 @@ pub(crate) fn auto_landing(
     home: Option<&std::path::Path>,
     state: &RunState,
 ) -> std::collections::BTreeSet<String> {
-    use shprd_core::state::TaskStatus;
     let Some(run) = state.run.as_ref() else {
         return Default::default();
     };
@@ -140,7 +139,12 @@ pub(crate) fn auto_landing(
     state
         .tasks
         .values()
-        .filter(|task| !matches!(task.status, TaskStatus::Integrated | TaskStatus::Dropped))
+        .filter(|task| {
+            !matches!(
+                task.status,
+                shprd_core::state::TaskStatus::Integrated | shprd_core::state::TaskStatus::Dropped
+            )
+        })
         .filter(|task| shprd_core::rules::ready_to_land(task).is_ok())
         .filter(|task| shprd_git::changed::protected_for_task(repo, state, task).is_empty())
         .map(|task| task.id.clone())
@@ -187,6 +191,16 @@ fn open_asks(state: &RunState, now_ms: u64) -> Vec<AskDto> {
         .asks
         .values()
         .filter(|ask| ask.is_open_at(now_ms))
+        // A finished task has nothing left to decide.
+        .filter(|ask| {
+            state.tasks.get(&ask.task).is_none_or(|task| {
+                !matches!(
+                    task.status,
+                    shprd_core::state::TaskStatus::Integrated
+                        | shprd_core::state::TaskStatus::Dropped
+                )
+            })
+        })
         // A new attempt retires what the old one left open.
         .filter(|ask| {
             state
@@ -569,6 +583,28 @@ mod tests {
             board.tasks[0].accept_blocked.as_deref(),
             Some(expected.as_str())
         );
+    }
+
+    #[test]
+    fn an_ask_of_a_finished_task_is_never_open_or_needs_you() {
+        // An ask the log still holds open (raised after the landing, say) must
+        // not reach the needs-you strip, For you or the badge once its task is
+        // Integrated or Dropped.
+        for status in [
+            shprd_core::state::TaskStatus::Integrated,
+            shprd_core::state::TaskStatus::Dropped,
+        ] {
+            let mut state = run_with_a_task();
+            let record = record("q-1", None, None);
+            state
+                .asks
+                .insert(("T1".to_string(), record.id.clone()), record);
+            assert_eq!(snapshot(&state, NOW).asks.len(), 1, "open while queued");
+            state.tasks.get_mut("T1").expect("task").status = status;
+            let open = snapshot(&state, NOW);
+            assert!(open.asks.is_empty(), "{status:?} has no open ask");
+            assert!(open.needs.is_empty(), "{status:?} has no needs-you card");
+        }
     }
 
     #[test]

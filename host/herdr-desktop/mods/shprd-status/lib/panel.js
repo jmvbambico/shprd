@@ -17,7 +17,7 @@
 
 import { div, svg } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
-import { openOverlay, run, setShared, shared } from "herdr";
+import { openOverlay, panes, run, setShared, shared, spaces } from "herdr";
 
 import { H, RADIUS, SPACE, TEXT, onStatus, red } from "./tokens.js";
 
@@ -477,6 +477,122 @@ export function openThread(p, view = "chat") {
   run("layout.show", { id: "panel" });
 }
 
+/** The shared key the composer reads to take the keyboard (`{space, at}`). */
+export const COMPOSER_KEY = "shprd.chat.composer";
+
+/** The shared table of the task tabs this window opened (`{<task id>: <tab id>}`). */
+export const TASK_TABS_KEY = "shprd.task-tabs";
+
+/** The mod a task's tab shows, and the name of the tab's title: the task id. */
+const TASK_CHAT_MOD = "shprd-chat";
+
+/**
+ * The tab that already shows a task's chat, or null.
+ *
+ * **What it keys on.** `panes()` exposes a mod pane's `props`, so a tab is the
+ * pane whose mod is `shprd-chat` and whose props are `{space: <task id>}`; its
+ * `tab` is the tab id. The shared table `shprd.task-tabs` is the fallback for the
+ * moment between `tab.new` and the pane list catching up (a quick second click),
+ * and counts only while that tab id is still one of Herdr's.
+ */
+export function taskTabOf(taskId) {
+  if (!taskId) return null;
+  const pane = (panes() ?? []).find((p) => p?.mod === TASK_CHAT_MOD && p?.props?.space === taskId && p?.tab);
+  if (pane) return pane.tab;
+  const remembered = (shared(TASK_TABS_KEY) ?? {})[taskId];
+  const alive = (spaces() ?? []).some((space) => (space?.tabs ?? []).some((tab) => tab?.id === remembered));
+  return remembered && alive ? remembered : null;
+}
+
+/** The task whose chat tab is the shown one, or null: the row or node to draw selected. */
+export function activeTaskId() {
+  const space = (spaces() ?? []).find((entry) => entry?.active);
+  const tab = (space?.tabs ?? []).find((entry) => entry?.active);
+  if (!tab) return null;
+  const pane = (panes() ?? []).find((p) => p?.mod === TASK_CHAT_MOD && p?.tab === tab.id && p?.props?.space && p.props.space !== "coordinator");
+  return pane?.props?.space ?? null;
+}
+
+/**
+ * Opens a task's chat as a tab in the main pane: the click on a task in the Tasks
+ * list, the Graph, the Agents pane or the Spaces tree (and nowhere else).
+ *
+ * One tab per task: a tab that is already open is selected, never doubled. The
+ * tab is `shprd-chat` with `{space: <task id>}` (fixed to that task, not the
+ * following thread), made in the task's repo space (`p.herdr`, which the caller resolves with `herdrSpaceOf` in `lib/tree.js`, selecting it
+ * first when it is not the shown one) and titled with the task id. The composer
+ * takes the keyboard (`shprd.chat.composer`); with `card` the chat also scrolls to
+ * the task's waiting question (`shprd.chat.focus`). The side panel stays on its
+ * list or graph, untouched. `p` is `{task, herdr?}`; returns the tab id
+ * or null.
+ */
+export function openTaskChat(p, { card = false } = {}) {
+  const task = p?.task;
+  if (!task) return null;
+  const at = Date.now();
+  if (card) setShared(FOCUS_KEY, { space: task, at });
+  setShared(COMPOSER_KEY, { space: task, at });
+  const open = taskTabOf(task);
+  if (open) {
+    run("tab.select", { id: open });
+    return open;
+  }
+  const list = spaces() ?? [];
+  const target = p.herdr ?? null;
+  const shown = list.find((space) => space?.active)?.id ?? null;
+  if (target && target !== shown) run("space.select", { id: target });
+  const made = run("tab.new", {
+    name: task,
+    ...(target ? { space: target } : {}),
+    mod: TASK_CHAT_MOD,
+    props: JSON.stringify({ space: task }),
+    focus: true,
+  });
+  const tab = typeof made?.tab === "string" ? made.tab : typeof made === "string" ? made : null;
+  // Remembered even when the app does not name the tab: it marks a tab opened here, which may auto-close.
+  setShared(TASK_TABS_KEY, { ...(shared(TASK_TABS_KEY) ?? {}), [task]: tab ?? "" });
+  return tab;
+}
+
+/** The task states that end a task's tab: landed, dropped. A task gone from the board is cleared. */
+const ENDED = new Set(["landed", "done", "dropped", "cancelled"]);
+
+/**
+ * The tabs of tasks that are over, to close: landed, dropped or cleared (gone from
+ * the board), and not the shown tab (it closes once the person leaves it, at a
+ * later sweep). Pure: `tasks` is the board's list, `tabs` is `[{tab, task}]`,
+ * `activeTab` the shown tab id. Only a tab opened here counts (`known` task ids).
+ */
+export function endedTabs(tasks, tabs, activeTab, known = []) {
+  const board = new Map((tasks ?? []).map((task) => [task.id, task]));
+  return (tabs ?? []).filter(({ tab, task }) => {
+    if (tab === activeTab) return false;
+    const found = board.get(task);
+    if (found) return ENDED.has(found.status) || ENDED.has(found.derived?.status);
+    return known.includes(task);
+  });
+}
+
+/**
+ * Closes the chat tabs of tasks that are over. `tab.close` here only closes the
+ * view: the tab holds a mod pane and no terminal, and the worker lives on in the
+ * service and the multiplexer. A board that is not loaded closes nothing.
+ */
+export function sweepTaskTabs(state) {
+  if (!Array.isArray(state?.tasks)) return [];
+  const tabs = (panes() ?? [])
+    .filter((p) => p?.mod === TASK_CHAT_MOD && p?.tab && p?.props?.space && p.props.space !== "coordinator")
+    .map((p) => ({ tab: p.tab, task: p.props.space }));
+  const space = (spaces() ?? []).find((entry) => entry?.active);
+  const activeTab = (space?.tabs ?? []).find((entry) => entry?.active)?.id ?? null;
+  const known = Object.keys(shared(TASK_TABS_KEY) ?? {});
+  const closing = endedTabs(state.tasks, tabs, activeTab, known);
+  for (const { tab } of closing) run("tab.close", { id: tab });
+  return closing.map((entry) => entry.task);
+}
+
+/** The shared key the chat reads to scroll to a waiting card (`{space, at}`). */
+export const FOCUS_KEY = "shprd.chat.focus";
 /** The shared key the Tasks list reads to outline a task's entry (`{task, at}`). */
 export const TASKS_FOCUS_KEY = "tasks.focus";
 
