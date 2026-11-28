@@ -247,6 +247,11 @@ fn with_a_task_branch() -> Fixture {
 /// [`with_a_task_branch`] whose task also commits `extra`, which its declared
 /// paths do not name.
 fn with_a_task_branch_also_changing(extra: &[&str]) -> Fixture {
+    with_a_branch_for("T1", extra)
+}
+
+/// [`with_a_task_branch`] for the task `id` (e.g. `SHP-12`): its branch is `shprd/r1/<id>`.
+fn with_a_branch_for(id: &str, extra: &[&str]) -> Fixture {
     let repo = TempDir::new().expect("repo dir");
     let root = repo.path().to_path_buf();
     git(&root, &["init", "-q", "-b", "main"]);
@@ -257,7 +262,7 @@ fn with_a_task_branch_also_changing(extra: &[&str]) -> Fixture {
     git(&root, &["add", "."]);
     git(&root, &["commit", "-q", "-m", "seed"]);
     git(&root, &["checkout", "-q", "-b", "integration/m10"]);
-    git(&root, &["checkout", "-q", "-b", "shprd/r1/T1"]);
+    git(&root, &["checkout", "-q", "-b", &format!("shprd/r1/{id}")]);
     fs::write(root.join("kept.txt"), "one\nTWO\nthree\nfour\n").expect("the change");
     fs::write(root.join("new.txt"), "hello\n").expect("a new file");
     for path in extra {
@@ -277,7 +282,7 @@ fn with_a_task_branch_also_changing(extra: &[&str]) -> Fixture {
     append(
         &fixture,
         EventKind::TaskAdded {
-            task: "T1".to_string(),
+            task: id.to_string(),
             title: "a task with work".to_string(),
             scope: vec!["kept.txt".to_string(), "new.txt".to_string()],
             acceptance: vec!["it works".to_string()],
@@ -289,12 +294,12 @@ fn with_a_task_branch_also_changing(extra: &[&str]) -> Fixture {
     append(
         &fixture,
         EventKind::Spawned {
-            task: "T1".to_string(),
+            task: id.to_string(),
             attempt: 1,
             agent: "claude".to_string(),
             model: None,
             worktree: root.display().to_string(),
-            branch: "shprd/r1/T1".to_string(),
+            branch: format!("shprd/r1/{id}"),
         },
     );
     // The attempt reports, so the task is a finished hand-in rather than work in
@@ -302,7 +307,7 @@ fn with_a_task_branch_also_changing(extra: &[&str]) -> Fixture {
     append(
         &fixture,
         EventKind::Reported {
-            task: "T1".to_string(),
+            task: id.to_string(),
             attempt: 1,
             status: shprd_core::event::ReportStatus::Completed,
             summary: "changed the file and added one".to_string(),
@@ -1436,4 +1441,29 @@ async fn override_readmit_and_sync_actions_run_the_rules_and_say_why_they_refuse
         "the reason names the verb: {:?}",
         reply.body
     );
+}
+
+#[tokio::test]
+async fn a_hyphenated_id_survives_spawn_and_land() {
+    let fixture = with_a_branch_for("SHP-12", &[]);
+    let (engine, started, _) = recording_engine(Ok("started the worker"));
+    let fixture = Fixture {
+        app: fixture.app.with_engine(engine),
+        ..fixture
+    };
+    let start = fixture
+        .act(json!({"kind": "task.start", "task": "SHP-12"}))
+        .await;
+    assert_eq!(start.status, StatusCode::OK, "{:?}", start.body);
+    assert_eq!(start.json()["task"]["id"], json!("SHP-12"));
+    assert_eq!(calls(&started)[0].1, "SHP-12");
+
+    let accept = fixture
+        .act(json!({"kind": "task.accept", "task": "SHP-12"}))
+        .await;
+    assert_eq!(accept.status, StatusCode::OK, "{:?}", accept.body);
+    let approved = fixture.events().into_iter().any(|event| {
+        matches!(&event.kind, EventKind::TaskApproved { task, .. } if task == "SHP-12")
+    });
+    assert!(approved, "the landing names SHP-12");
 }
