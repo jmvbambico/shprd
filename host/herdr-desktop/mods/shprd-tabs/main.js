@@ -45,7 +45,6 @@ import {
   shared,
   spaces,
   theme,
-  knownAgents,
   window,
 } from "herdr";
 
