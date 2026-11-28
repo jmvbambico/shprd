@@ -28,7 +28,7 @@
 // Shared: the source is `mods/lib/spaces.js`; `bin/sync-shared` copies it into
 // every mod folder that imports it. Edit the source, never a copy.
 
-import { NEED, STATUS_ORDER, desktopWords, roleTitle, status as statusOf } from "./tokens.js";
+import { NEED, STATUS_ORDER, desktopWords, roleTitle, status as statusOf, waitLabel } from "./tokens.js";
 import { NO_TASKS, counts, isLive, newestDecision, progressOf, secondLine } from "./board.js";
 
 /** The id a coordinator row carries, so a click and a test name the same thing. */
@@ -118,7 +118,7 @@ export function taskLook(task) {
   const look = statusOf(task?.derived?.status);
   return {
     status: task?.derived?.status ?? "to_do",
-    word: look.word,
+    word: task?.derived?.status === "needs_you" && task?.derived?.for_you === false ? waitLabel(task) : look.word,
     tone: look.tone,
     glyph: look.glyph,
     pct: progressOf(task),

@@ -433,17 +433,37 @@ fn health(port: u16) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Percent-encodes `text` for a query value.
+fn query_escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for byte in text.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~' | b'/') {
+            out.push(char::from(byte));
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
+}
+
 /// `GET /api/health/repos` on `port`: the service folds every repository it
 /// serves. `Ok` when none fails (or when the service has no such route, which
 /// an old build is); the repositories that could not be folded otherwise.
-fn repos_fold(port: u16) -> Result<(), String> {
+///
+/// `repo` is the repository being updated: the service folds it too, because a
+/// service that has only just started has registered no repository yet, and
+/// the check would otherwise fold nothing and pass any build.
+fn repos_fold(port: u16, repo: &Path) -> Result<(), String> {
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(20)))
         .http_status_as_error(false)
         .build()
         .into();
     let mut response = agent
-        .get(&format!("http://127.0.0.1:{port}/api/health/repos"))
+        .get(&format!(
+            "http://127.0.0.1:{port}/api/health/repos?folder={}",
+            query_escape(&repo.to_string_lossy())
+        ))
         .call()
         .map_err(|err| format!("the repository check did not answer: {err}"))?;
     if !response.status().is_success() {
@@ -619,7 +639,7 @@ impl Machine<'_> {
                 && let Some(version) = health(record.port)
             {
                 if fold {
-                    repos_fold(record.port)?;
+                    repos_fold(record.port, &self.args.repo)?;
                 }
                 return Ok(version);
             }

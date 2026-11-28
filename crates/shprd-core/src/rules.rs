@@ -1594,7 +1594,10 @@ fn check_ask_answered(
             ask: ask.to_string(),
         });
     };
-    if record.answer.is_some() {
+    // A new second answer is refused. A recorded one folds as a no-op: a landing
+    // or a drop closes a task's asks in the fold, and the answer a person or the
+    // engine wrote just before or after still replays.
+    if provenance == Provenance::Required && record.answer.is_some() {
         return Err(RuleError::AskAlreadyAnswered {
             task: task.to_string(),
             ask: ask.to_string(),
@@ -5234,11 +5237,26 @@ mod tests {
                 .map(|answer| answer.text.as_str()),
             Some("allow")
         );
-        log.push(ask_answered(5, "a", "q1"));
+        // A new second answer is refused at write time.
+        let kind = EventKind::AskAnswered {
+            task: "a".to_string(),
+            ask: "q1".to_string(),
+            answer: "deny".to_string(),
+        };
         assert!(matches!(
-            RunState::fold(&log),
+            state.check_as(&Actor::Human, &kind, 2_000),
             Err(RuleError::AskAlreadyAnswered { .. })
         ));
+        // One already in the log replays as a no-op and keeps the first answer.
+        log.push(ask_answered(5, "a", "q1"));
+        let replayed = RunState::fold(&log).expect("a recorded second answer replays");
+        assert_eq!(
+            replayed.asks[&("a".to_string(), "q1".to_string())]
+                .answer
+                .as_ref()
+                .map(|answer| answer.seq),
+            Some(4)
+        );
     }
 
     /// A recorded answer that is off its card's choices still folds, because a

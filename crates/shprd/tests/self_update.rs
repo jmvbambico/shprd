@@ -80,33 +80,18 @@ for a in "$@"; do
 done
 [ "$1" = serve ] || exit 0
 [ "$VERSION" = bad ] && exit 1
-# The unfoldable build is the REAL shprd, serving a repository whose log it
-# cannot fold: it comes up once (its own check catches it), and a supervisor
-# that restarts it before the rollback's file swap finds it gone, as it would a
-# service that cannot start.
+# The unfoldable build is the REAL shprd, started the way the helper starts the
+# service: from the state folder, naming no repository. It registers nothing at
+# start, so only the repository the helper names (whose log cannot be folded)
+# can make the health check fail. A supervisor that restarts it before the
+# rollback's file swap finds it gone, as it would a service that cannot start.
 if [ "$VERSION" = unfoldable ]; then
   [ -f "$FAKE_STATE/unfoldable-served" ] && exit 1
   touch "$FAKE_STATE/unfoldable-served"
-  # The real service keeps its own state directory, so the helper cannot see it
-  # until this script hands the record over: after the log has gone bad. That
-  # makes the order fixed (the helper's health check can never run first).
-  REAL_HOME="$FAKE_STATE.real"
-  mkdir -p "$REAL_HOME"
-  XDG_STATE_HOME="$REAL_HOME" "$FAKE_REAL" --repo "$FAKE_BAD_REPO" --home "$FAKE_HOME" serve --port 0 &
+  cd "$FAKE_STATE"
+  "$FAKE_REAL" --home "$FAKE_HOME" serve --port 0 &
   real=$!
   trap 'kill $real 2>/dev/null' TERM INT
-  # The repository was readable when the service started (the real service
-  # refuses a log it cannot read at start-up); its log goes bad once the
-  # service is up, which is what an old log under a newer fold looks like to a
-  # service that already holds the repository. The health check folds it again.
-  until grep -q "$real" "$REAL_HOME/shprd/service.json" 2>/dev/null; do sleep 0.02; done
-  # The service records itself before it loads its repository, so wait until
-  # the repository is registered; a log spoiled earlier is simply not served.
-  port=$(sed 's/.*"port":\([0-9]*\).*/\1/' "$REAL_HOME/shprd/service.json")
-  until curl -s "http://127.0.0.1:$port/api/health/repos" 2>/dev/null | grep -q '"checked":1'; do sleep 0.02; done
-  printf '{{"this": "is not an event"}}\n' > "$FAKE_BAD_REPO/.shprd/events.jsonl"
-  cp "$REAL_HOME/shprd/service.json" "$FAKE_STATE/service.json.tmp"
-  mv "$FAKE_STATE/service.json.tmp" "$FAKE_STATE/service.json"
   wait $real
   exit $?
 fi
@@ -281,8 +266,6 @@ impl World {
         let state = shprd_server::state_dir(&state_home);
         let work = root.join("work");
         let app_home = root.join("app-home");
-        let bad_repo = root.join("bad-repo");
-        fs::create_dir_all(bad_repo.join(".shprd")).unwrap();
         for dir in [&bin_dir, &state, &work, &app_home, &root.join("fake-home")] {
             fs::create_dir_all(dir).unwrap();
         }
@@ -311,7 +294,6 @@ impl World {
                 "FAKE_REAL".to_string(),
                 env!("CARGO_BIN_EXE_shprd").to_string(),
             ),
-            ("FAKE_BAD_REPO".to_string(), bad_repo.display().to_string()),
             (
                 "FAKE_HOME".to_string(),
                 root.join("fake-home").display().to_string(),
@@ -676,6 +658,32 @@ fn a_new_binary_that_cannot_fold_a_repository_log_is_rolled_back() {
     // The "unfoldable" build is the real shprd serving a repository whose log it
     // cannot fold; its own /api/health/repos says so.
     let world = World::new("crates/x.rs", "unfoldable");
+    // The updated repository's log is a real run (started by the real CLI) plus a
+    // well-formed `ask_answered` the fold refuses, the class of failure the
+    // 2026-11-28 incident had: every line parses, the fold rejects the sequence.
+    world.start_run();
+    let mut log =
+        shprd_core::log::EventLog::open(&world.repo.join(".shprd").join("events.jsonl")).unwrap();
+    log.append(
+        shprd_core::event::Actor::Human,
+        shprd_core::event::EventKind::AskAnswered {
+            task: "chat-tail".to_string(),
+            ask: "review-out-2".to_string(),
+            answer: "late".to_string(),
+        },
+        &shprd_core::log::SystemClock,
+    )
+    .unwrap();
+    drop(log);
+    assert!(
+        shprd_core::state::RunState::fold(
+            &shprd_core::log::EventLog::read_all(&world.repo.join(".shprd").join("events.jsonl"))
+                .unwrap()
+                .events
+        )
+        .is_err(),
+        "the seeded log must be one a build cannot fold"
+    );
     let out = world.helper("ok", "unfoldable");
     assert!(out.status.success(), "a rollback is reported: {out:?}");
     assert!(
