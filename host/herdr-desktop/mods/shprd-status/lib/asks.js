@@ -535,32 +535,13 @@ export function oldestCard(state, asks = null) {
   return list.find((card) => !card.notice) ?? list[0] ?? null;
 }
 
-/** The words of the strip's button for a card that has no single action. */
-export const STRIP_OPEN = "Open";
-
 /**
- * The needs-you strip of the coordinator's chat: one item per task that has a
- * card waiting (a task's first one), each with `Open` or, when the card has
- * exactly one button, that button. Empty when no task has an ask or a decision.
- *
- * `titles` is a `task id -> title` lookup for the line's words.
+ * The task whose entry the Tasks pane outlines when the *Needs you* badge or pill
+ * is pressed: the oldest waiting card's task, else the first needs-you task the
+ * service has no card for yet. Null when it is run-wide or nothing waits.
  */
-export function stripItems(list, titles = new Map()) {
-  const seen = new Set();
-  const out = [];
-  for (const card of list ?? []) {
-    if (!card.task || card.notice || seen.has(card.task)) continue;
-    seen.add(card.task);
-    const only = (card.buttons ?? []).length === 1 && !card.buttons[0].confirm ? card.buttons[0] : null;
-    out.push({
-      id: card.id,
-      task: card.task,
-      title: titles.get(card.task) ?? "",
-      text: card.text,
-      card,
-      button: only,
-      label: only ? only.label : STRIP_OPEN,
-    });
-  }
-  return out;
+export function needTask(state, asks = null) {
+  const card = oldestCard(state, asks);
+  if (card) return card.task ?? null;
+  return (state?.tasks ?? []).find((entry) => entry?.derived?.status === "needs_you")?.id ?? null;
 }

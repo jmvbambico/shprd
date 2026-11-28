@@ -27,17 +27,14 @@
 //
 // The Autopilot switch is not here: shprd has no Autopilot.
 
-import { View, div, image, svg } from "gpui-kit";
+import { View, div, svg } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { exec, hc, home, openOverlay, panes, props, run, setShared, shared, spaces, terminals, theme } from "herdr";
+import { exec, hc, home, openOverlay, panes, props, run, shared, spaces, terminals, theme } from "herdr";
 
 import { CHAT_MOD, PARK_LABEL, TERMINAL_KEY, agentLabel, chatLabel, endAgent, paneChat } from "./lib/chat.js";
 import { menuHeight, MENU, paneMenu } from "./lib/menu.js";
-import { button, iconFile, segmented } from "./lib/panel.js";
+import { button, iconFile, openNeeds, segmented } from "./lib/panel.js";
 import { RADIUS, TEXT } from "./lib/tokens.js";
-
-/** The shared key `shprd-chat` watches to show its card. */
-const FOCUS_KEY = "shprd.chat.focus";
 
 /**
  * Runs an app command and answers what it returned (`herdr-app do`): `run` gives
@@ -154,14 +151,9 @@ export default class Pane extends View {
     });
   }
 
-  /**
-   * The Needs you pill: opens the chat (when the terminal is shown) and asks it to
-   * scroll to its waiting card (`shprd.chat.focus`, read by `shprd-chat`).
-   */
-  toCard(self, view, cx) {
-    if (view.space === null) return;
-    setShared(FOCUS_KEY, { space: view.space, at: Date.now() });
-    if (!view.chatMode && view.canSwitch) this.toChat(self, view, cx);
+  /** The Needs you pill: the Tasks pane, at this task's entry. */
+  toCard(view) {
+    openNeeds(view.space ?? null);
   }
 
   /**
@@ -265,13 +257,6 @@ export default class Pane extends View {
         own?.stop_propagation?.();
         this.menu(wired);
       })
-      .when(Boolean(program?.icon), (el) =>
-        el.child(
-          program.tint
-            ? svg(program.icon).size(14).flex_none().text_color(t.dim)
-            : image(program.icon).size(14).flex_none(),
-        ),
-      )
       .child(div().flex_none().max_w(260).min_w(0).truncate().font_medium().text_color(t.foreground).child(name))
       // The folder gives way first; the gap after it pushes the rest right.
       .child(div().flex_shrink_1().min_w(0).truncate().text_color(t.dim).child(this.short(pane?.cwd)))
@@ -306,7 +291,7 @@ export default class Pane extends View {
             // The pill takes you to what needs you: the chat, scrolled to its card.
             .on_click((_event, own) => {
               own?.stop_propagation?.();
-              this.toCard(self, view, own);
+              this.toCard(view);
               own?.notify?.();
             })
             .child("Needs you"),

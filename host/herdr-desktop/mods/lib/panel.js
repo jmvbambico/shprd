@@ -593,22 +593,21 @@ export function sweepTaskTabs(state) {
 
 /** The shared key the chat reads to scroll to a waiting card (`{space, at}`). */
 export const FOCUS_KEY = "shprd.chat.focus";
+/** The shared key the Tasks list reads to outline a task's entry (`{task, at}`). */
+export const TASKS_FOCUS_KEY = "tasks.focus";
 
 /**
- * Takes the person to a waiting card: a task's card opens that task's thread on
- * Chat, a run-wide one (no task) shows the coordinator's space; the chat there
- * scrolls to the card and outlines it (`shprd.chat.focus`). `coordinator` is that
- * space (`{id}`), which the caller finds with `spaceIndex`.
+ * Takes the person to what needs them: the Tasks pane, with the task's entry
+ * outlined (a task's own question stays inside its conversation, which the entry
+ * opens). A run-wide item (no task) just shows the Tasks pane. The list's mod is
+ * not loaded unless it is the shown child, so the request is shared and the list
+ * takes it, as `openAddTask` does.
  */
-export function showCard(card, title = "", coordinator = null) {
-  if (!card) return;
-  if (card.task) {
-    setShared(FOCUS_KEY, { space: card.task, at: Date.now() });
-    openThread({ task: card.task, title }, "chat");
-    return;
-  }
-  setShared(FOCUS_KEY, { space: "coordinator", at: Date.now() });
-  if (coordinator) run("space.select", { id: coordinator.id });
+export function openNeeds(task = null) {
+  if (task) setShared(TASKS_FOCUS_KEY, { task, at: Date.now() });
+  run("layout.select", { stack: "panel-body", child: "tasks" });
+  run("layout.select", { stack: "tasks", child: "tasks-list" });
+  run("layout.show", { id: "panel" });
 }
 
 /**

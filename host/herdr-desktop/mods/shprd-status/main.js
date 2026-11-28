@@ -24,9 +24,8 @@ import { keys, run, spaces, theme, window } from "herdr";
 
 import { adoptCache, attach, downNotice, forgetAll, reason, remember, singleFlight, syncRepo, watchSwitch } from "./lib/client.js";
 import { counts, lastFailure, runShort, since } from "./lib/board.js";
-import { oldestCard } from "./lib/asks.js";
-import { spaceIndex } from "./lib/spaces.js";
-import { badge, countBadge, icon, showCard } from "./lib/panel.js";
+import { needTask } from "./lib/asks.js";
+import { badge, countBadge, icon, openNeeds } from "./lib/panel.js";
 import { RADIUS, TEXT, tone } from "./lib/tokens.js";
 import { followChanges } from "./lib/watch.js";
 
@@ -150,15 +149,7 @@ export default class Status extends View {
     } catch {
       asks = null;
     }
-    const card = oldestCard(this.state, asks);
-    if (card) {
-      const title = (this.state?.tasks ?? []).find((task) => task.id === card.task)?.title ?? "";
-      showCard(card, title, spaceIndex(spaces()).coordinator);
-      return;
-    }
-    // A needs-you task whose card the service does not list yet: its thread.
-    const task = (this.state?.tasks ?? []).find((entry) => entry?.derived?.status === "needs_you");
-    if (task) showCard({ task: task.id }, task.title ?? "");
+    openNeeds(needTask(this.state, asks));
   }
 
   /** An icon and its words, as Shepherdr's bar writes a machine and a branch. */

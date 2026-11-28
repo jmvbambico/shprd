@@ -133,8 +133,10 @@ export default class Tasks extends View {
     // New task from anywhere (`openAddTask` in `lib/panel.js`) is a shared request,
     // because this mod's commands do not exist while it is not the shown child.
     this.takeAdd(cx);
+    this.takeFocus(cx);
     cx.timer.every(300, (cx) => {
       this.takeAdd(cx);
+      this.takeFocus(cx);
       this.takeChoice();
       // A switch of space is noticed on this beat: the cached board is drawn at
       // once and read again now, not at the next 4 s floor.
@@ -589,6 +591,24 @@ export default class Tasks extends View {
   /** Whether there is more than one space to choose between. */
   hasSpaces() {
     return (this.state?.spaces ?? []).length > 1 || this.picked() !== null;
+  }
+
+  /**
+   * A fresh `tasks.focus` request (the Needs you badge or pill, `openNeeds` in
+   * `lib/panel.js`): shows the list with every status, unfolds the groups and
+   * outlines the task's entry for a few seconds.
+   */
+  takeFocus(cx = this.cx) {
+    const req = shared("tasks.focus");
+    if (!req || req.at === this.lastFocus) return;
+    this.lastFocus = req.at;
+    if (Date.now() - req.at >= 10_000) return;
+    this.show("tasks");
+    this.focusId = req.task;
+    this.focusUntil = Date.now() + 2500;
+    this.filter = "all";
+    this.shut.clear();
+    cx?.notify?.();
   }
 
   /** Opens the add-task form for a fresh `tasks.add` request, once. */
@@ -1258,6 +1278,9 @@ export default class Tasks extends View {
       .items_center()
       .rounded(8)
       .cursor_pointer()
+      .when(this.focusId === task.id && Date.now() < this.focusUntil, (el) =>
+        el.id(`tasks-row-${task.id}-lit`).border_1().border_color(t.selected ?? t.ring ?? t.foreground),
+      )
       .hover((style) => style.bg(t.hover))
       .when(activeTaskId() === task.id, (el) => el.bg(t.selected ?? t.raised))
       .on_click(() => this.openChat(task))
