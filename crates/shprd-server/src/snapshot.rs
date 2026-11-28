@@ -162,7 +162,7 @@ pub(crate) fn apply_landing(snapshot: &mut SnapshotDto, ids: &std::collections::
             task.derived.status = DerivedStatusDto::Merging;
             task.derived.need = None;
             task.derived.reason = Some(shprd_views::derived::LANDING.to_string());
-            task.derived.for_you = true;
+            task.derived.for_you = false;
         }
     }
 }
@@ -1114,6 +1114,37 @@ mod tests {
             snap.tasks[0].derived.reason.as_deref(),
             Some(shprd_views::derived::LANDING)
         );
+        assert!(!snap.tasks[0].derived.for_you);
+    }
+
+    #[test]
+    fn for_you_is_true_only_for_what_is_the_persons() {
+        use shprd_core::event::EventKind as K;
+        let spawned = |task: &str| K::Spawned {
+            task: task.to_string(),
+            attempt: 1,
+            agent: "claude".to_string(),
+            model: None,
+            worktree: "/wt".to_string(),
+            branch: "b".to_string(),
+        };
+        let mut state = with(vec![spawned("T1")]);
+        let snap = snapshot(&state, NOW);
+        // Working: not the person's.
+        assert!(
+            !snap.tasks[0].derived.for_you,
+            "{:?}",
+            snap.tasks[0].derived
+        );
+        // An operational card: not the person's (an agent's ask is, see the views test).
+        state.escalations.push(shprd_core::state::Escalation {
+            seq: 90,
+            task: Some("T1".to_string()),
+            body: "review brief not delivered".to_string(),
+            default_action: "ask".to_string(),
+            by_agent: false,
+        });
+        assert!(!snapshot(&state, NOW).tasks[0].derived.for_you);
     }
 
     #[test]

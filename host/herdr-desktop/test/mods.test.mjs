@@ -1741,6 +1741,25 @@ test("an operational card is not counted in For you or the Needs you badge", () 
   assert.ok(view.groups.some((g) => g.key === "merging" && g.tasks[0].id === "T4"), "Landing is a merge, not For you");
 });
 
+test("For you lists only the tasks the service marks for_you", () => {
+  const task = (id, status, derived) => ({ id, title: id, status, derived: { status, ...derived } });
+  const state = {
+    tasks: [
+      task("T1", "needs_you", { need: "asks", for_you: true }),
+      task("T2", "ready", { for_you: true }),
+      task("T3", "done", { for_you: false }),
+      task("T4", "working", { for_you: false }),
+      task("T5", "merging", { for_you: false }),
+      task("T6", "queued", { for_you: false }),
+      task("T7", "needs_you", { need: "attention", for_you: false }),
+      task("T8", "ready", { for_you: false }),
+    ],
+    integration_pr: null,
+  };
+  const you = listView(state, {}).groups.find((g) => g.key === "you");
+  assert.deepEqual(you.tasks.map((t) => t.id).sort(), ["T1", "T2"]);
+});
+
 test("a payload from an older service reads a needs-you row as the person's", () => {
   assert.equal(forYou({ derived: { status: "needs_you" } }), true);
 });

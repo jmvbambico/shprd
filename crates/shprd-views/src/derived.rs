@@ -158,14 +158,17 @@ impl Derived {
     /// stopped agent, a provider that gave up) is the coordinator's to settle
     /// with the verbs it has, and says so to the person in a line. It stays on
     /// the row for them to see but is not counted as theirs. Only an agent's
-    /// question is theirs.
+    /// question is theirs, and a Ready task waiting for Accept. Every other
+    /// status (to do, scheduled, queued, working, merging, done) waits on
+    /// nothing from the person.
     pub fn is_for_you(&self) -> bool {
         match self.status {
             DerivedStatus::NeedsYou => !matches!(
                 self.needs,
                 Some(Need::Attention | Need::Reply | Need::Stopped | Need::Provider)
             ),
-            _ => true,
+            DerivedStatus::Ready => true,
+            _ => false,
         }
     }
 
@@ -2240,6 +2243,16 @@ mod tests {
             assert!(!row(operational).is_for_you(), "{operational:?}");
         }
         assert!(Derived::new(DerivedStatus::Ready, None, None).is_for_you());
+        for status in [
+            DerivedStatus::ToDo,
+            DerivedStatus::Scheduled,
+            DerivedStatus::Queued,
+            DerivedStatus::Working,
+            DerivedStatus::Merging,
+            DerivedStatus::Done,
+        ] {
+            assert!(!Derived::new(status, None, None).is_for_you(), "{status:?}");
+        }
     }
 
     #[test]
